@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rlmb"
+version = "0.1.0"
+description = "A base repository that enables the integration of reinforcement learning implementations with crisp_gym manipulation environments."
+authors = [{name = "Luka Hofer", email = "luka.hofer@tum.de"}]
+readme = "README.md"
+requires-python = ">=3.8"
+
+[tool.setuptools.packages.find]
+where = ["."]
