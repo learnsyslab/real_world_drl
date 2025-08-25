@@ -21,6 +21,7 @@
 
 from dataclasses import dataclass
 import os
+import gymnasium as gym
 
 
 @ dataclass
@@ -33,16 +34,13 @@ class SAC_Config:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
-    capture_video: bool = False
-    """whether to capture videos of the agent performances (check out `videos` folder)"""
 
     # Algorithm specific arguments
-    env_id: str = "Pendulum-v1"
+    #env_name: str = "FrankaCartesianEnv"
+    env_name: str = "Pendulum-v1"
     """the environment id of the task"""
     total_timesteps: int = 100000
     """total timesteps of the experiments"""
-    num_envs: int = 1
-    """the number of parallel game environments"""
     buffer_size: int = int(1e6)
     """the replay memory buffer size"""
     gamma: float = 0.99
@@ -51,17 +49,19 @@ class SAC_Config:
     """target smoothing coefficient (default: 0.005)"""
     batch_size: int = 256
     """the batch size of sample from the reply memory"""
-    learning_starts: int = 5e3
+    learning_starts: int = int(5e3)
     """timestep to start learning"""
     policy_lr: float = 3e-4
     """the learning rate of the policy network optimizer"""
     q_lr: float = 1e-3
     """the learning rate of the Q network network optimizer"""
-    policy_update_after: int = 1
+    update_policy_after: int = 1
     """number of time steps after which the policy is updated"""
-    target_network_frequency: int = 1  # Denis Yarats' implementation delays this by 2.
-    """the frequency of updates for the target nerworks"""
+    utd_ratio: float = 1.0
+    """the ratio of policy updates to environment steps taken"""
     alpha: float = 0.2
     """Entropy regularization coefficient."""
-    autotune: bool = False
+    autotune: bool = True
     """automatic tuning of the entropy coefficient"""
+    max_action: float = 0.01 if not env_name in list(gym.envs.registry.keys()) else None
+    """the maximum norm of an action value the policy can output"""

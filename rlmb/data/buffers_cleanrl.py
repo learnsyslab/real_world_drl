@@ -30,6 +30,8 @@ import numpy as np
 import torch as th
 from gymnasium import spaces
 
+from rlmb.data.utils import crisp_batch_obs_to_tensor
+
 try:
     # Check memory used by replay buffer when possible
     import psutil
@@ -164,6 +166,7 @@ class BaseBuffer(ABC):
         super().__init__()
         self.buffer_size = buffer_size
         self.observation_space = observation_space
+        self.is_dict_observation = isinstance(observation_space, spaces.Dict)
         self.action_space = action_space
         self.obs_shape = get_obs_shape(observation_space)  # type: ignore[assignment]
 
@@ -234,9 +237,9 @@ class BaseBuffer(ABC):
         """
         raise NotImplementedError()
 
-    def to_torch(self, array: np.ndarray, copy: bool = True) -> th.Tensor:
+    def to_torch(self, array, copy: bool = True) -> th.Tensor:
         """
-        Convert a numpy array to a PyTorch tensor.
+        Convert buffer data array to a PyTorch tensor.
         Note: it copies the data by default
 
         :param array:
@@ -244,9 +247,13 @@ class BaseBuffer(ABC):
             by reference). This argument is inoperative if the device is not the CPU.
         :return:
         """
-        if copy:
-            return th.tensor(array, device=self.device)
-        return th.as_tensor(array, device=self.device)
+        if array.dtype == np.dtype("O"):
+            return crisp_batch_obs_to_tensor(array, copy=copy).to(self.device)
+        else:
+            if copy:
+                return th.tensor(array, device=self.device)
+            else:
+                return th.as_tensor(array, device=self.device)
 
 
 class ReplayBuffer(BaseBuffer):
@@ -304,11 +311,17 @@ class ReplayBuffer(BaseBuffer):
             )
         self.optimize_memory_usage = optimize_memory_usage
 
-        self.observations = np.zeros((self.buffer_size, self.n_envs, *self.obs_shape), dtype=observation_space.dtype)
-
-        if not optimize_memory_usage:
-            # When optimizing memory, `observations` contains also the next observation
-            self.next_observations = np.zeros((self.buffer_size, self.n_envs, *self.obs_shape), dtype=observation_space.dtype)
+        # check type of observation space (dict like in crisp_gym or box like in gymnasium)
+        if self.is_dict_observation:
+            self.observations = np.empty((self.buffer_size, self.n_envs, 1), dtype=object)
+            if not optimize_memory_usage:
+                # When optimizing memory, `observations` contains also the next observation
+                self.next_observations = np.empty((self.buffer_size, self.n_envs, 1), dtype=object)
+        else:
+            self.observations = np.zeros((self.buffer_size, self.n_envs, *self.obs_shape), dtype=np.float32)
+            if not optimize_memory_usage:
+                # When optimizing memory, `observations` contains also the next observation
+                self.next_observations = np.zeros((self.buffer_size, self.n_envs, *self.obs_shape), dtype=np.float32)
 
         self.actions = np.zeros(
             (self.buffer_size, self.n_envs, self.action_dim), dtype=self._maybe_cast_dtype(action_space.dtype)
@@ -357,12 +370,12 @@ class ReplayBuffer(BaseBuffer):
         action = action.reshape((self.n_envs, self.action_dim))
 
         # Copy to avoid modification by reference
-        self.observations[self.pos] = np.array(obs)
+        self.observations[self.pos] = obs
 
         if self.optimize_memory_usage:
-            self.observations[(self.pos + 1) % self.buffer_size] = np.array(next_obs)
+            self.observations[(self.pos + 1) % self.buffer_size] = next_obs
         else:
-            self.next_observations[self.pos] = np.array(next_obs)
+            self.next_observations[self.pos] = next_obs
 
         self.actions[self.pos] = np.array(action)
         self.rewards[self.pos] = np.array(reward)

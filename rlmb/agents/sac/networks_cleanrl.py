@@ -22,13 +22,22 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from gymnasium.spaces import Dict, Box
+
+from rlmb.data.utils import get_input_size_from_dict_space
 
 
 class SoftQNetwork(nn.Module):
-    def __init__(self, env):
+    def __init__(self, observation_space, action_space):
         super().__init__()
+        if isinstance(observation_space, Dict):
+            obs_size = get_input_size_from_dict_space(observation_space)
+        elif isinstance(observation_space, Box):
+            obs_size = observation_space.shape[0]
+        else:
+            raise NotImplementedError("Observation space type not supported")
         self.fc1 = nn.Linear(
-            np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape),
+            obs_size + np.prod(action_space.shape),
             256,
         )
         self.fc2 = nn.Linear(256, 256)
@@ -47,24 +56,38 @@ LOG_STD_MIN = -5
 
 
 class Actor(nn.Module):
-    def __init__(self, env):
+    def __init__(self, observation_space, action_space, config):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), 256)
+        if isinstance(observation_space, Dict):
+            input_size = get_input_size_from_dict_space(observation_space)
+        elif isinstance(observation_space, Box):
+            input_size = observation_space.shape[0]
+        else:
+            raise NotImplementedError("Observation space type not supported")
+        self.config = config
+        self.fc1 = nn.Linear(input_size, 256)
         self.fc2 = nn.Linear(256, 256)
-        self.fc_mean = nn.Linear(256, np.prod(env.single_action_space.shape))
-        self.fc_logstd = nn.Linear(256, np.prod(env.single_action_space.shape))
+        self.fc_mean = nn.Linear(256, np.prod(action_space.shape))
+        self.fc_logstd = nn.Linear(256, np.prod(action_space.shape))
         # action rescaling
+        if self.config.max_action:
+            scale = self.config.max_action
+            bias = 0.0
+        else:
+            scale = (action_space.high - action_space.low) / 2.0
+            bias = (action_space.high + action_space.low) / 2.0
+            
         self.register_buffer(
             "action_scale",
             torch.tensor(
-                (env.single_action_space.high - env.single_action_space.low) / 2.0,
+                scale,
                 dtype=torch.float32,
             ),
         )
         self.register_buffer(
             "action_bias",
             torch.tensor(
-                (env.single_action_space.high + env.single_action_space.low) / 2.0,
+                bias,
                 dtype=torch.float32,
             ),
         )

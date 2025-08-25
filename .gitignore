@@ -1,5 +1,8 @@
 __pycache__
 .ros_env.sh
 .vscode
-runs/
+runs_actor/
+runs_learner/
 rlmb.egg-info
+checkpoints/
+pixi.lock
