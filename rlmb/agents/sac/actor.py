@@ -61,9 +61,7 @@ class SACActor:
             # reset the episode variables
             if not self.is_gymnasium_env:
                 self.env.home()
-                obs, _ = self.env.reset()
-            else:
-                obs, _ = self.env.reset(seed = self.config.seed)
+            obs, _ = self.env.reset(seed=self.config.seed)
 
             episode_return = 0.0
             episode_length = 0
@@ -75,6 +73,8 @@ class SACActor:
                 if global_step < self.learning_starts: 
                     # Take random actions for the first few steps
                     action = self.env.action_space.sample()
+                    if not self.is_gymnasium_env:
+                        action = action * self.config.max_action
                 else:              
                     # transform observation to torch Tensor
                     if not self.is_gymnasium_env:
@@ -136,7 +136,7 @@ class SACActor:
         if self.is_gymnasium_env:
             env = gym.make(self.config.env_name)
         else:
-            manipulator_env_config = NoCamFrankaEnvConfig(max_episode_steps=50, control_frequency=2)
+            manipulator_env_config = NoCamFrankaEnvConfig(max_episode_steps=self.config.episode_length, control_frequency=self.config.control_frequency)
             env = ManipulatorCartesianEnv(config = manipulator_env_config)
             env = MaximizeHeightRewardWrapper(env)
         env.observation_space.dtype = np.float32
