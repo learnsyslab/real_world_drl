@@ -38,7 +38,7 @@ class SACActor:
         self.is_gymnasium_env = self.config.env_name in list(gym.envs.registry.keys())
 
         self.device = torch.device("cuda" if torch.cuda.is_available() and self.config.cuda else "cpu")
-        self.policy_update_after = self.config.update_policy_after
+        self.update_policy_after = self.config.update_policy_after
         self.learning_starts = self.config.learning_starts
         self.env = self._create_env()
 
@@ -86,7 +86,7 @@ class SACActor:
                     action = action.view(-1).detach().cpu().numpy()
                     
                     # sync policy every "self.policy_update_after" steps
-                    if (global_step - self.learning_starts) % self.policy_update_after == 0:
+                    if (global_step - self.learning_starts) % self.update_policy_after == 0:
                         self._sync_policy()
 
                 next_obs, reward, termination, truncation, info = self.env.step(action)
@@ -136,7 +136,7 @@ class SACActor:
         if self.is_gymnasium_env:
             env = gym.make(self.config.env_name)
         else:
-            manipulator_env_config = NoCamFrankaEnvConfig(max_episode_steps=100, control_frequency=10)
+            manipulator_env_config = NoCamFrankaEnvConfig(max_episode_steps=50, control_frequency=2)
             env = ManipulatorCartesianEnv(config = manipulator_env_config)
             env = MaximizeHeightRewardWrapper(env)
         env.observation_space.dtype = np.float32
