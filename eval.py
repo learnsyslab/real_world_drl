@@ -4,26 +4,30 @@ import numpy as np
 
 from rlmb.agents.sac.networks_cleanrl import Actor
 
+from crisp_gym.manipulator_env_config import NoCamFrankaEnvConfig
+from crisp_gym.manipulator_env import ManipulatorCartesianEnv
+from rlmb.data.utils import crisp_obs_to_tensor
+from rlmb.agents.sac.config import SAC_Config
+
+manipulator_env_config = NoCamFrankaEnvConfig(max_episode_steps=50, control_frequency=2)
+env = ManipulatorCartesianEnv(config = manipulator_env_config)
 
 
-import gymnasium as gym
-from gymnasium.vector import SyncVectorEnv
+actor = Actor(env.observation_space, env.action_space, SAC_Config())
+actor.load_state_dict(torch.load("checkpoints/FrankaCartesianEnv__config__20250828-151155/actor_state_dict.pth"))
 
-def make_env():
-    return gym.make("Pendulum-v1", render_mode="human")
+env.home()
+obs, info = env.reset()
+for i in range(100):
+    print(f"Episode {i}")
+    terminated = False
+    truncated = False
+    while not (terminated or truncated):
+        with torch.no_grad():
+            obs_input = crisp_obs_to_tensor(obs)
+            action, _, _ = actor.get_action(obs_input)
+        obs, reward, terminated, truncated, info = env.step(action.view(-1).detach().cpu().numpy())
 
-# Create vector env
-envs = SyncVectorEnv([make_env for _ in range(1)])
-
-actor = Actor(envs)
-actor.load_state_dict(torch.load("model_weights.pth"))
-
-obs, info = envs.reset()
-for _ in range(1000):
-    with torch.no_grad():
-        action, _, _ = actor.get_action(torch.Tensor(obs))
-    obs, reward, terminated, truncated, info = envs.step(action)
-
-    # Render each underlying environment
-    for e in envs.envs:
-        e.render()
+        if terminated or truncated:
+            env.home()
+            obs, info = env.reset()

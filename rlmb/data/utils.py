@@ -32,5 +32,5 @@ def get_input_size_from_dict_space(obs_space) -> int:
     """
     size = 0
     for space in obs_space.values():
-        size += space.shape[0]
+        size += np.prod(space.shape)
     return size

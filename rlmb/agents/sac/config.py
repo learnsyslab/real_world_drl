@@ -36,11 +36,13 @@ class SAC_Config:
     """if toggled, cuda will be enabled by default"""
 
     # Algorithm specific arguments
-    #env_name: str = "FrankaCartesianEnv"
-    env_name: str = "Pendulum-v1"
+    env_name: str = "FrankaCartesianEnv"
+    #env_name: str = "Pendulum-v1"
     """the environment id of the task"""
     total_timesteps: int = 100000
     """total timesteps of the experiments"""
+    episode_length: int = 50
+    """the maximum length of an episode"""
     buffer_size: int = int(1e6)
     """the replay memory buffer size"""
     gamma: float = 0.99
@@ -49,7 +51,7 @@ class SAC_Config:
     """target smoothing coefficient (default: 0.005)"""
     batch_size: int = 256
     """the batch size of sample from the reply memory"""
-    learning_starts: int = int(5e3)
+    learning_starts: int = int(256)
     """timestep to start learning"""
     policy_lr: float = 3e-4
     """the learning rate of the policy network optimizer"""
@@ -63,5 +65,7 @@ class SAC_Config:
     """Entropy regularization coefficient."""
     autotune: bool = True
     """automatic tuning of the entropy coefficient"""
-    max_action: float = 0.01 if not env_name in list(gym.envs.registry.keys()) else None
+    max_action: float = 0.05 if not env_name in list(gym.envs.registry.keys()) else None
     """the maximum norm of an action value the policy can output"""
+    control_frequency: int = 2
+    """the frequency at which the control commands are sent to the robot"""

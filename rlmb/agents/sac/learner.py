@@ -26,8 +26,8 @@ class SACLearner:
         self.config = SAC_Config
         assert int(self.config.update_policy_after * self.config.utd_ratio) > 0, \
             "Invalid combination of update_policy_after and utd_ratio. " \
-            "Ensure that update_policy_after * utd_ratio > 0."
-        
+            "Ensure that int(update_policy_after * utd_ratio) > 0."
+
         # set seed for reproducibility
         random.seed(self.config.seed)
         np.random.seed(self.config.seed)
@@ -89,6 +89,7 @@ class SACLearner:
         try:
             global_time_step = 0
             # Wait for enough data in the replay buffer before starting training
+            logging.info("Learner is waiting for the replay buffer to fill with initial exploration samples...")
             for _ in range(self.config.learning_starts):
                 obs, action, reward, new_obs, terminated, truncated, info = data_queue.get()
                 self.replay_buffer.add(
