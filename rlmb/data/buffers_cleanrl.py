@@ -159,6 +159,7 @@ class BaseBuffer(ABC):
         self,
         buffer_size: int,
         observation_space: spaces.Space,
+        image_encoders: list[th.nn.Module],
         action_space: spaces.Space,
         device: th.device | str = "auto",
         n_envs: int = 1,
@@ -166,6 +167,7 @@ class BaseBuffer(ABC):
         super().__init__()
         self.buffer_size = buffer_size
         self.observation_space = observation_space
+        self.image_encoders = image_encoders
         self.is_dict_observation = isinstance(observation_space, spaces.Dict)
         self.action_space = action_space
         self.obs_shape = get_obs_shape(observation_space)  # type: ignore[assignment]
@@ -248,7 +250,7 @@ class BaseBuffer(ABC):
         :return:
         """
         if array.dtype == np.dtype("O"):
-            return crisp_batch_obs_to_tensor(array, copy=copy).to(self.device)
+            return crisp_batch_obs_to_tensor(array, self.image_encoders, self.device, copy=copy)
         else:
             if copy:
                 return th.tensor(array, device=self.device)
@@ -262,6 +264,7 @@ class ReplayBuffer(BaseBuffer):
 
     :param buffer_size: Max number of element in the buffer
     :param observation_space: Observation space
+    :param image_encoders: list of projection image encoders
     :param action_space: Action space
     :param device: PyTorch device
     :param n_envs: Number of parallel environments
@@ -287,13 +290,14 @@ class ReplayBuffer(BaseBuffer):
         self,
         buffer_size: int,
         observation_space: spaces.Space,
+        image_encoders: list[th.nn.Module],
         action_space: spaces.Space,
         device: th.device | str = "auto",
         n_envs: int = 1,
         optimize_memory_usage: bool = False,
         handle_timeout_termination: bool = True,
     ):
-        super().__init__(buffer_size, observation_space, action_space, device, n_envs=n_envs)
+        super().__init__(buffer_size, observation_space, image_encoders, action_space, device, n_envs=n_envs)
 
         # Adjust buffer size
         self.buffer_size = max(buffer_size // n_envs, 1)
@@ -400,7 +404,7 @@ class ReplayBuffer(BaseBuffer):
         :return:
         """
         if not self.optimize_memory_usage:
-            return super().sample(batch_size=batch_size)
+            return super().sample(batch_size)
         # Do not sample the element with index `self.pos` as the transitions is invalid
         # (we use only one array to store `obs` and `next_obs`)
         if self.full:

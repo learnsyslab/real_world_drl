@@ -7,10 +7,13 @@ import time
 import random
 import numpy as np
 
-from crisp_gym.manipulator_env_config import NoCamFrankaEnvConfig
+from crisp_gym.manipulator_env_config import NoCamFrankaEnvConfig, FrankaEnvConfig
+from crisp_py.camera.camera_config import CameraConfig
+from crisp_py.gripper.gripper import GripperConfig
 from crisp_gym.manipulator_env import ManipulatorCartesianEnv
 from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
+from copy import deepcopy
 
 from rlmb.agents.sac.config import SAC_Config
 from rlmb.agents.sac.networks_cleanrl import Actor
@@ -44,13 +47,24 @@ class SACActor:
 
         # policy
         self.actor = Actor(self.env.observation_space, self.env.action_space, self.config).to(self.device)
-        
+        # image encoder
+        projection_head = torch.nn.Sequential(
+                torch.nn.Linear(512, 512),
+                torch.nn.ReLU(),
+                torch.nn.Linear(512, 128)
+            )
+        resnet_18 = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True).requires_grad_(False)
+        resnet_18.fc = projection_head
+        self.image_encoders = [
+            deepcopy(resnet_18).to(self.device) for _ in range(len(self.env.cameras))
+        ]
+
         # summary writer for tensorboard
         runs_path = Path(__file__).resolve().parent.parent.parent.parent / "runs_actor"
         runs_path.mkdir(parents=True, exist_ok=True)
         self.writer = SummaryWriter(runs_path / run_name)
   
-        self._sync_policy() # Wait for the learner to put the initial policy parameters in the queue
+        self._sync_nodes() # Wait for the learner to put the initial policy parameters in the queue
 
     def run(self, data_queue: mp.Queue):
         """Main process loop for the RLPD actor.
@@ -78,7 +92,7 @@ class SACActor:
                 else:              
                     # transform observation to torch Tensor
                     if not self.is_gymnasium_env:
-                        obs_input = crisp_obs_to_tensor(obs).to(self.device)
+                        obs_input = crisp_obs_to_tensor(obs, self.image_encoders, self.device)
                     else:
                         obs_input = torch.Tensor(obs).to(self.device).view(1, -1)
 
@@ -87,7 +101,7 @@ class SACActor:
                     
                     # sync policy every "self.policy_update_after" steps
                     if (global_step - self.learning_starts) % self.update_policy_after == 0:
-                        self._sync_policy()
+                        self._sync_nodes()
 
                 next_obs, reward, termination, truncation, info = self.env.step(action)
                 episode_return += reward
@@ -136,7 +150,17 @@ class SACActor:
         if self.is_gymnasium_env:
             env = gym.make(self.config.env_name)
         else:
+            """
             manipulator_env_config = NoCamFrankaEnvConfig(max_episode_steps=self.config.episode_length, control_frequency=self.config.control_frequency)
+            env = ManipulatorCartesianEnv(config = manipulator_env_config)
+            env = MaximizeHeightRewardWrapper(env)"""
+            gripper_config = GripperConfig(min_value=0.0, max_value=1.0)
+            camera_config = CameraConfig(
+                resolution=(128, 128), 
+                camera_color_image_topic="/camera/camera/color/image_rect_raw",
+                camera_color_info_topic="/camera/camera/color/camera_info"
+                )
+            manipulator_env_config = FrankaEnvConfig(max_episode_steps=100, control_frequency=self.config.control_frequency, gripper_config=gripper_config, camera_configs=[camera_config])
             env = ManipulatorCartesianEnv(config = manipulator_env_config)
             env = MaximizeHeightRewardWrapper(env)
         env.observation_space.dtype = np.float32
@@ -144,10 +168,11 @@ class SACActor:
         self.env_info_queue.put(env.observation_space)
         return env
 
-    def _sync_policy(self):
-        """Update the actor policy to match the learner policy."""
-        # Get the latest policy parameters from the queue
-        policy_parameters = self.parameters_queue.get()
+    def _sync_nodes(self):
+        """Sync all shared model parameters between actor and learner."""
+        policy_parameters, proj_head_parameters = self.parameters_queue.get()
         self.actor.load_state_dict(policy_parameters)
+        for i, params in enumerate(proj_head_parameters):
+            self.image_encoders[i].fc.load_state_dict(params)
 
-        logging.info("Actor received an updated policy")
+        logging.info("Actor received updated parameters for the policy and vision encoder.")

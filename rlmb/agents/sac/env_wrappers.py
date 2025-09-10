@@ -7,6 +7,8 @@ class MaximizeHeightRewardWrapper(RewardWrapper):
         super().__init__(env)
 
         self.robot = self.env.robot
+        self.cameras = self.env.cameras
+        self.gripper = self.env.gripper
 
     def reward(self, reward, action):
         """
@@ -15,7 +17,7 @@ class MaximizeHeightRewardWrapper(RewardWrapper):
         eef_pose = self.robot.end_effector_pose
         z = eef_pose.position[2]
         #reward = 10 * action[2] - 0.1 * np.linalg.norm(action)
-        reward = z - np.linalg.norm(action)
+        reward = 10 * z - np.linalg.norm(action)
 
         return reward
     

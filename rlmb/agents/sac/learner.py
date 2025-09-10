@@ -10,6 +10,7 @@ import time
 from torch import multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
+from copy import deepcopy
 
 from rlmb.data.buffers_cleanrl import ReplayBuffer
 from rlmb.agents.sac.config import SAC_Config
@@ -49,15 +50,6 @@ class SACLearner:
             "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(self.config).items()])),
         )
 
-        # initializing the replay buffer
-        self.replay_buffer = ReplayBuffer(
-            buffer_size=self.config.buffer_size,
-            observation_space=observation_space,
-            action_space=action_space,
-            device=self.device,
-            handle_timeout_termination=False
-        )
-
         # initializing networks
         self.actor = Actor(observation_space, action_space, self.config).to(self.device)
         self.qf1 = SoftQNetwork(self.observation_space, self.action_space).to(self.device)
@@ -66,15 +58,43 @@ class SACLearner:
         self.qf2_target = SoftQNetwork(self.observation_space, self.action_space).to(self.device)
         self.qf1_target.load_state_dict(self.qf1.state_dict())
         self.qf2_target.load_state_dict(self.qf2.state_dict())
+
+        # image encoders
+        projection_head = torch.nn.Sequential(
+                torch.nn.Linear(512, 512),
+                torch.nn.ReLU(),
+                torch.nn.Linear(512, 128)
+            )
+        resnet_18 = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True).requires_grad_(False)
+        resnet_18.fc = projection_head
+        self.image_encoders = [
+            deepcopy(resnet_18).to(self.device) for name in self.observation_space.keys() if "image" in name
+        ]
+        
+        # optimizers
         self.q_optimizer = optim.Adam(list(self.qf1.parameters()) + list(self.qf2.parameters()), lr=self.config.q_lr)
         self.actor_optimizer = optim.Adam(list(self.actor.parameters()), lr=self.config.policy_lr)
-        self._sync_policy()
+        params = []
+        for encoder in self.image_encoders:
+            params += list(encoder.fc.parameters())
+        self.img_encoder_optimizer = optim.Adam(params, lr=self.config.policy_lr)
+        self._sync_nodes()
+
+        # initializing the replay buffer
+        self.replay_buffer = ReplayBuffer(
+            buffer_size=self.config.buffer_size,
+            observation_space=observation_space,
+            image_encoders=self.image_encoders,
+            action_space=action_space,
+            device=self.device,
+            handle_timeout_termination=False
+        )
 
         # Automatic entropy tuning
         if self.config.autotune:
             self.target_entropy = -torch.prod(torch.Tensor(self.action_space.shape).to(self.device)).item()
             self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
-            self.alpha = self.log_alpha.exp().item()
+            self.alpha = self.log_alpha.exp().item()    
             self.a_optimizer = optim.Adam([self.log_alpha], lr=self.config.q_lr)
         else:
             self.alpha = self.config.alpha
@@ -106,7 +126,7 @@ class SACLearner:
                     self._train_step(self.writer, current_training_step)
                     current_training_step += 1
                 # send updated policy parameters to the actor
-                self._sync_policy()
+                self._sync_nodes()
 
                 for _ in range(self.config.update_policy_after):
                     # move next batch of data from the queue to the replay buffer
@@ -142,9 +162,12 @@ class SACLearner:
         qf2_loss = F.mse_loss(qf2_a_values, next_q_values)
         qf_loss = qf1_loss + qf2_loss
 
-        # optimize the q functions
+        # optimize the q functions, image encoder and policy
+        self.img_encoder_optimizer.zero_grad()
         self.q_optimizer.zero_grad()
-        qf_loss.backward()
+        self.actor_optimizer.zero_grad()
+
+        qf_loss.backward(retain_graph=True)
         self.q_optimizer.step()
         
         pi, log_pi, _ = self.actor.get_action(data.observations)
@@ -153,9 +176,9 @@ class SACLearner:
         min_qf_pi = torch.min(qf1_pi, qf2_pi)
         actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
 
-        self.actor_optimizer.zero_grad()
         actor_loss.backward()
         self.actor_optimizer.step()
+        self.img_encoder_optimizer.step()
 
         # update temperature if needed
         if self.config.autotune:
@@ -194,10 +217,11 @@ class SACLearner:
             for param2, target_param2 in zip(self.qf2.parameters(), self.qf2_target.parameters()):
                 target_param2.data.copy_(self.config.tau * param2.data + (1 - self.config.tau) * target_param2.data)
 
-    def _sync_policy(self):
-        """Send the current policy parameters to the actor."""
+    def _sync_nodes(self):
+        """Sync all shared model parameters between actor and learner."""
         actor_parameters = self.actor.state_dict()
-        self.parameters_queue.put(actor_parameters)
+        proj_heads_parameters = [encoder.fc.state_dict() for encoder in self.image_encoders]
+        self.parameters_queue.put((actor_parameters, proj_heads_parameters))
 
     def close(self):
         """Close the learner and clean up resources."""

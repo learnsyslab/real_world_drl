@@ -65,7 +65,7 @@ class SAC_Config:
     """Entropy regularization coefficient."""
     autotune: bool = True
     """automatic tuning of the entropy coefficient"""
-    max_action: float = 0.05 if not env_name in list(gym.envs.registry.keys()) else None
+    max_action: float = 1 if not env_name in list(gym.envs.registry.keys()) else None
     """the maximum norm of an action value the policy can output"""
-    control_frequency: int = 2
+    control_frequency: int = 10
     """the frequency at which the control commands are sent to the robot"""
