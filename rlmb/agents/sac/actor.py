@@ -47,17 +47,19 @@ class SACActor:
 
         # policy
         self.actor = Actor(self.env.observation_space, self.env.action_space, self.config).to(self.device)
-        # image encoder
-        projection_head = torch.nn.Sequential(
-                torch.nn.Linear(512, 512),
-                torch.nn.ReLU(),
-                torch.nn.Linear(512, 128)
-            )
-        resnet_18 = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True).requires_grad_(False)
-        resnet_18.fc = projection_head
-        self.image_encoders = [
-            deepcopy(resnet_18).to(self.device) for _ in range(len(self.env.cameras))
-        ]
+        
+        if not self.is_gymnasium_env:
+            # image encoders
+            projection_head = torch.nn.Sequential(
+                    torch.nn.Linear(512, 512),
+                    torch.nn.ReLU(),
+                    torch.nn.Linear(512, 128)
+                )
+            resnet_18 = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True).requires_grad_(False)
+            resnet_18.fc = projection_head
+            self.image_encoders = [
+                deepcopy(resnet_18).to(self.device) for _ in range(len(self.env.cameras))
+            ]
 
         # summary writer for tensorboard
         runs_path = Path(__file__).resolve().parent.parent.parent.parent / "runs_actor"
@@ -172,7 +174,8 @@ class SACActor:
         """Sync all shared model parameters between actor and learner."""
         policy_parameters, proj_head_parameters = self.parameters_queue.get()
         self.actor.load_state_dict(policy_parameters)
-        for i, params in enumerate(proj_head_parameters):
-            self.image_encoders[i].fc.load_state_dict(params)
+        if not self.is_gymnasium_env:
+            for i, params in enumerate(proj_head_parameters):
+                self.image_encoders[i].fc.load_state_dict(params)
 
         logging.info("Actor received updated parameters for the policy and vision encoder.")

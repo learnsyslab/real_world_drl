@@ -6,6 +6,7 @@ import os
 import random
 import numpy as np
 import time
+import gymnasium as gym
 
 from torch import multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
@@ -28,6 +29,9 @@ class SACLearner:
         assert int(self.config.update_policy_after * self.config.utd_ratio) > 0, \
             "Invalid combination of update_policy_after and utd_ratio. " \
             "Ensure that int(update_policy_after * utd_ratio) > 0."
+        
+        # check gym environment
+        self.is_gymnasium_env = self.config.env_name in list(gym.envs.registry.keys())
 
         # set seed for reproducibility
         random.seed(self.config.seed)
@@ -59,25 +63,28 @@ class SACLearner:
         self.qf1_target.load_state_dict(self.qf1.state_dict())
         self.qf2_target.load_state_dict(self.qf2.state_dict())
 
-        # image encoders
-        projection_head = torch.nn.Sequential(
-                torch.nn.Linear(512, 512),
-                torch.nn.ReLU(),
-                torch.nn.Linear(512, 128)
-            )
-        resnet_18 = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True).requires_grad_(False)
-        resnet_18.fc = projection_head
-        self.image_encoders = [
-            deepcopy(resnet_18).to(self.device) for name in self.observation_space.keys() if "image" in name
-        ]
+        if not self.is_gymnasium_env:
+        # image encoders (only relevant for crisp_gym environments)
+            projection_head = torch.nn.Sequential(
+                    torch.nn.Linear(512, 512),
+                    torch.nn.ReLU(),
+                    torch.nn.Linear(512, 128)
+                )
+            resnet_18 = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True).requires_grad_(False)
+            resnet_18.fc = projection_head
+            self.image_encoders = [
+                deepcopy(resnet_18).to(self.device) for name in self.observation_space.keys() if "image" in name
+            ]
+            params = []
+            for encoder in self.image_encoders:
+                params += list(encoder.fc.parameters())
+            self.img_encoder_optimizer = optim.Adam(params, lr=self.config.policy_lr)
+        else:
+            self.image_encoders = None
         
         # optimizers
         self.q_optimizer = optim.Adam(list(self.qf1.parameters()) + list(self.qf2.parameters()), lr=self.config.q_lr)
         self.actor_optimizer = optim.Adam(list(self.actor.parameters()), lr=self.config.policy_lr)
-        params = []
-        for encoder in self.image_encoders:
-            params += list(encoder.fc.parameters())
-        self.img_encoder_optimizer = optim.Adam(params, lr=self.config.policy_lr)
         self._sync_nodes()
 
         # initializing the replay buffer
@@ -163,11 +170,16 @@ class SACLearner:
         qf_loss = qf1_loss + qf2_loss
 
         # optimize the q functions, image encoder and policy
-        self.img_encoder_optimizer.zero_grad()
+        if not self.is_gymnasium_env:
+            self.img_encoder_optimizer.zero_grad()
         self.q_optimizer.zero_grad()
         self.actor_optimizer.zero_grad()
 
-        qf_loss.backward(retain_graph=True)
+        if not self.is_gymnasium_env:
+            # retain graph for image encoder update
+            qf_loss.backward(retain_graph=True)
+        else:
+            qf_loss.backward()
         self.q_optimizer.step()
         
         pi, log_pi, _ = self.actor.get_action(data.observations)
@@ -178,7 +190,8 @@ class SACLearner:
 
         actor_loss.backward()
         self.actor_optimizer.step()
-        self.img_encoder_optimizer.step()
+        if not self.is_gymnasium_env:
+            self.img_encoder_optimizer.step()
 
         # update temperature if needed
         if self.config.autotune:
@@ -220,7 +233,10 @@ class SACLearner:
     def _sync_nodes(self):
         """Sync all shared model parameters between actor and learner."""
         actor_parameters = self.actor.state_dict()
-        proj_heads_parameters = [encoder.fc.state_dict() for encoder in self.image_encoders]
+
+        proj_heads_parameters = None
+        if not self.is_gymnasium_env:
+            proj_heads_parameters = [encoder.fc.state_dict() for encoder in self.image_encoders]
         self.parameters_queue.put((actor_parameters, proj_heads_parameters))
 
     def close(self):
