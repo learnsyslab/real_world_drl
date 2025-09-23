@@ -6,3 +6,5 @@ runs_learner/
 rlmb.egg-info
 checkpoints/
 pixi.lock
+parquet/
+*parquet*
