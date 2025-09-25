@@ -47,11 +47,10 @@ class SparseHeightRewardWrapper(RewardWrapper):
         """
         eef_pose = self.robot.end_effector_pose
         z = eef_pose.position[2]
-        if z > 1.0:
-            reward = 10.0 - 0.01 * np.linalg.norm(action)
+        if z > 0.9:
+            reward = 100.0
         else:
-            reward = - 0.01 * np.linalg.norm(action)
-
+            reward = - 0.1 * np.linalg.norm(action)
         return reward
     
     def step(self, action):
@@ -59,7 +58,7 @@ class SparseHeightRewardWrapper(RewardWrapper):
         observation, reward, terminated, truncated, info = self.env.step(action)
         eef_pose = self.robot.end_effector_pose
         z = eef_pose.position[2]
-        if z > 1.0:
+        if z > 0.9:
             terminated = True
         return observation, self.reward(reward, action), terminated, truncated, info
     

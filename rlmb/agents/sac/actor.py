@@ -12,6 +12,7 @@ from crisp_py.camera.camera_config import CameraConfig
 from crisp_py.gripper.gripper import GripperConfig
 from crisp_gym.manipulator_env import ManipulatorCartesianEnv
 from torch.utils.tensorboard import SummaryWriter
+from torchvision.models import resnet18, ResNet18_Weights
 from pathlib import Path
 from copy import deepcopy
 
@@ -53,11 +54,12 @@ class SACActor:
         if self.use_camera_inputs:
             # image encoders
             projection_head = torch.nn.Sequential(
-                    torch.nn.Linear(512, 512),
+                    torch.nn.Linear(512, 128),
                     torch.nn.ReLU(),
-                    torch.nn.Linear(512, 128)
+                    torch.nn.Linear(128, 10)
                 )
-            resnet_18 = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True).requires_grad_(False)
+            # resnet_18 = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True).requires_grad_(False)
+            resnet_18 = resnet18(weights=ResNet18_Weights.DEFAULT, progress=False).eval().requires_grad_(False)
             resnet_18.fc = projection_head
             self.image_encoders = [
                 deepcopy(resnet_18).to(self.device) for _ in range(len(self.env.cameras))
@@ -118,7 +120,6 @@ class SACActor:
                 data_queue.put((obs, action, reward, real_next_obs, termination, truncation, info))
 
                 obs = next_obs
-
                 done = termination or truncation
                 if done:
                     self.writer.add_scalar(f"charts/episodic_return", episode_return, global_step)
@@ -165,12 +166,13 @@ class SACActor:
                     )
                 manipulator_env_config = FrankaEnvConfig(max_episode_steps=self.config.episode_length, control_frequency=self.config.control_frequency, gripper_config=gripper_config, camera_configs=[camera_config])
                 env = ManipulatorCartesianEnv(config = manipulator_env_config)
-                env = MaximizeHeightRewardWrapper(env)
-                #env = SparseHeightRewardWrapper(env)
+                #env = MaximizeHeightRewardWrapper(env)
+                env = SparseHeightRewardWrapper(env)
             else:
                 manipulator_env_config = NoCamFrankaEnvConfig(max_episode_steps=self.config.episode_length, control_frequency=self.config.control_frequency)
                 env = ManipulatorCartesianEnv(config = manipulator_env_config)
-                env = MaximizeHeightRewardWrapper(env)
+                #env = MaximizeHeightRewardWrapper(env)
+                env = SparseHeightRewardWrapper(env)
         env.observation_space.dtype = np.float32
         self.env_info_queue.put(env.action_space)
         self.env_info_queue.put(env.observation_space)

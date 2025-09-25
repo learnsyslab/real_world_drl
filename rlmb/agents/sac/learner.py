@@ -9,6 +9,7 @@ import time
 import gymnasium as gym
 
 from torch import multiprocessing as mp
+from torchvision.models import resnet18, ResNet18_Weights
 from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
 from copy import deepcopy
@@ -66,11 +67,12 @@ class SACLearner:
         if self.use_camera_inputs:
         # image encoders (only relevant for crisp_gym environments)
             projection_head = torch.nn.Sequential(
-                    torch.nn.Linear(512, 512),
+                    torch.nn.Linear(512, 128),
                     torch.nn.ReLU(),
-                    torch.nn.Linear(512, 128)
+                    torch.nn.Linear(128, 10)
                 )
-            resnet_18 = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True).requires_grad_(False)
+            #resnet_18 = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True).requires_grad_(False)
+            resnet_18 = resnet18(weights=ResNet18_Weights.DEFAULT, progress=False).eval().requires_grad_(False)
             resnet_18.fc = projection_head
             self.image_encoders = [
                 deepcopy(resnet_18).to(self.device) for name in self.observation_space.keys() if "image" in name
@@ -181,18 +183,20 @@ class SACLearner:
         else:
             qf_loss.backward()
         self.q_optimizer.step()
+
+        if self.use_camera_inputs:
+            self.img_encoder_optimizer.step()
         
-        pi, log_pi, _ = self.actor.get_action(data.observations)
-        qf1_pi = self.qf1(data.observations, pi)
-        qf2_pi = self.qf2(data.observations, pi)
+        obs = data.observations.clone().detach()
+        pi, log_pi, _ = self.actor.get_action(obs)
+        qf1_pi = self.qf1(obs, pi)
+        qf2_pi = self.qf2(obs, pi)
         min_qf_pi = torch.min(qf1_pi, qf2_pi)
         actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
 
         actor_loss.backward()
         self.actor_optimizer.step()
-        if self.use_camera_inputs:
-            self.img_encoder_optimizer.step()
-
+        
         # update temperature if needed
         if self.config.autotune:
             with torch.no_grad():
@@ -215,10 +219,11 @@ class SACLearner:
             writer.add_scalar("losses/qf_loss", qf_loss.item() / 2.0, current_training_step)
             writer.add_scalar("losses/actor_loss", actor_loss.item(), current_training_step)
             writer.add_scalar("losses/alpha", self.alpha, current_training_step)
-            if self.use_camera_inputs:
-                writer.add_scalar("weights_img_encoder", self.image_encoders[0].fc[0].weight.data.norm().cpu().item(), current_training_step)
             if self.config.autotune:
                 writer.add_scalar("losses/alpha_loss", alpha_loss.item(), current_training_step)
+            if self.use_camera_inputs:
+                writer.add_scalar("weights_img_encoder", self.image_encoders[0].fc[0].weight.data.norm().cpu().item(), current_training_step)
+            writer.add_scalar("entropy", -log_pi.mean().item(), current_training_step)
             
             # model checkpoint
             torch.save(self.actor.state_dict(), os.path.join(self.checkpoint_path, "actor_state_dict.pth"))

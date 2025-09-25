@@ -1,8 +1,11 @@
-import pickle
 import torch
 import numpy as np
 from collections import defaultdict
 import time
+from torchvision.models import ResNet18_Weights
+
+
+RESNET18_TRANSFORM = ResNet18_Weights.DEFAULT.transforms(antialias=True)
 
 
 def crisp_obs_to_tensor(observation: dict,  
@@ -53,7 +56,7 @@ def get_input_size_from_dict_space(obs_space) -> int:
     size = 0
     for name, space in obs_space.items():
         if 'image' in name:
-            size += 128
+            size += 10
         else:
             size += np.prod(space.shape)
     return size
@@ -61,9 +64,12 @@ def get_input_size_from_dict_space(obs_space) -> int:
 
 def encode_image(img: np.ndarray, image_encoder: torch.nn.Module, device: torch.device) -> torch.Tensor:
     """Encode an image using a ResNet18 model with a custom projection head."""
-    img_tensor = torch.as_tensor(img, dtype=torch.float32)
+    img_tensor = torch.from_numpy(img).float() / 255.0
     if img.shape[1] != 3:
         img_tensor = img_tensor.permute(0, 3, 1, 2)
+    # preprocess the image for resnet 18
+    img_tensor = RESNET18_TRANSFORM(img_tensor)
+    # get the features from the image encoder
     features = image_encoder(img_tensor.to(device))
     return features
 
