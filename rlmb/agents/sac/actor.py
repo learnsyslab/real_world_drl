@@ -17,7 +17,7 @@ from copy import deepcopy
 
 from rlmb.agents.sac.config import SAC_Config
 from rlmb.agents.sac.networks_cleanrl import Actor
-from rlmb.agents.sac.env_wrappers import MaximizeHeightRewardWrapper
+from rlmb.agents.sac.env_wrappers import SparseHeightRewardWrapper, MaximizeHeightRewardWrapper
 from rlmb.data.utils import crisp_obs_to_tensor
 
 class SACActor:
@@ -40,6 +40,8 @@ class SACActor:
         # check gym environment
         self.is_gymnasium_env = self.config.env_name in list(gym.envs.registry.keys())
 
+        self.use_camera_inputs = self.config.use_cameras
+
         self.device = torch.device("cuda" if torch.cuda.is_available() and self.config.cuda else "cpu")
         self.update_policy_after = self.config.update_policy_after
         self.learning_starts = self.config.learning_starts
@@ -48,7 +50,7 @@ class SACActor:
         # policy
         self.actor = Actor(self.env.observation_space, self.env.action_space, self.config).to(self.device)
         
-        if not self.is_gymnasium_env:
+        if self.use_camera_inputs:
             # image encoders
             projection_head = torch.nn.Sequential(
                     torch.nn.Linear(512, 512),
@@ -60,6 +62,8 @@ class SACActor:
             self.image_encoders = [
                 deepcopy(resnet_18).to(self.device) for _ in range(len(self.env.cameras))
             ]
+        else:
+            self.image_encoders = None
 
         # summary writer for tensorboard
         runs_path = Path(__file__).resolve().parent.parent.parent.parent / "runs_actor"
@@ -152,19 +156,21 @@ class SACActor:
         if self.is_gymnasium_env:
             env = gym.make(self.config.env_name)
         else:
-            """
-            manipulator_env_config = NoCamFrankaEnvConfig(max_episode_steps=self.config.episode_length, control_frequency=self.config.control_frequency)
-            env = ManipulatorCartesianEnv(config = manipulator_env_config)
-            env = MaximizeHeightRewardWrapper(env)"""
-            gripper_config = GripperConfig(min_value=0.0, max_value=1.0)
-            camera_config = CameraConfig(
-                resolution=(128, 128), 
-                camera_color_image_topic="/camera/camera/color/image_rect_raw",
-                camera_color_info_topic="/camera/camera/color/camera_info"
-                )
-            manipulator_env_config = FrankaEnvConfig(max_episode_steps=100, control_frequency=self.config.control_frequency, gripper_config=gripper_config, camera_configs=[camera_config])
-            env = ManipulatorCartesianEnv(config = manipulator_env_config)
-            env = MaximizeHeightRewardWrapper(env)
+            if self.use_camera_inputs:
+                gripper_config = GripperConfig(min_value=0.0, max_value=1.0)
+                camera_config = CameraConfig(
+                    resolution=(128, 128), 
+                    camera_color_image_topic="/camera/camera/color/image_rect_raw",
+                    camera_color_info_topic="/camera/camera/color/camera_info"
+                    )
+                manipulator_env_config = FrankaEnvConfig(max_episode_steps=self.config.episode_length, control_frequency=self.config.control_frequency, gripper_config=gripper_config, camera_configs=[camera_config])
+                env = ManipulatorCartesianEnv(config = manipulator_env_config)
+                env = MaximizeHeightRewardWrapper(env)
+                #env = SparseHeightRewardWrapper(env)
+            else:
+                manipulator_env_config = NoCamFrankaEnvConfig(max_episode_steps=self.config.episode_length, control_frequency=self.config.control_frequency)
+                env = ManipulatorCartesianEnv(config = manipulator_env_config)
+                env = MaximizeHeightRewardWrapper(env)
         env.observation_space.dtype = np.float32
         self.env_info_queue.put(env.action_space)
         self.env_info_queue.put(env.observation_space)
@@ -174,7 +180,7 @@ class SACActor:
         """Sync all shared model parameters between actor and learner."""
         policy_parameters, proj_head_parameters = self.parameters_queue.get()
         self.actor.load_state_dict(policy_parameters)
-        if not self.is_gymnasium_env:
+        if self.use_camera_inputs:
             for i, params in enumerate(proj_head_parameters):
                 self.image_encoders[i].fc.load_state_dict(params)
 

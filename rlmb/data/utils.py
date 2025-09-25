@@ -1,6 +1,8 @@
+import pickle
 import torch
 import numpy as np
 from collections import defaultdict
+import time
 
 
 def crisp_obs_to_tensor(observation: dict,  
@@ -59,6 +61,63 @@ def get_input_size_from_dict_space(obs_space) -> int:
 
 def encode_image(img: np.ndarray, image_encoder: torch.nn.Module, device: torch.device) -> torch.Tensor:
     """Encode an image using a ResNet18 model with a custom projection head."""
-    img_tensor = torch.as_tensor(img, dtype=torch.float32).permute(0, 3, 1, 2)
+    img_tensor = torch.as_tensor(img, dtype=torch.float32)
+    if img.shape[1] != 3:
+        img_tensor = img_tensor.permute(0, 3, 1, 2)
     features = image_encoder(img_tensor.to(device))
     return features
+
+
+def load_buffer_from_lerobot_dataset(dataset, buffer, num_episodes: int = None):
+    """
+    Load a dataset from the LeRobotDataset into a replay buffer.
+
+    :param dataset: The dataset to load from
+    :param buffer: The replay buffer to load into
+    :param num_episodes: The number of episodes to load (default: None = load all)
+    """
+    total_recorded_steps = len(dataset)
+
+    current_obs = {}
+    for key in dataset[0].keys():
+        if 'observation' in key:
+            current_obs.update({key: dataset[0][key].numpy()})
+    next_obs = {}
+    reward = np.zeros(1, dtype=np.float32)
+    done = np.zeros(1, dtype=bool)
+
+
+
+    for idx in range(total_recorded_steps):
+        # Stop if we have loaded the desired number of episodes
+        if num_episodes is not None and dataset[idx]['episode_index'] >= num_episodes:
+            break
+        start_time = time.time()
+        # load the next observation
+        next_obs = {}
+        for key in dataset[idx].keys():
+            if 'observation' in key:
+                next_obs.update({key: dataset[idx][key].numpy()})
+        
+        # check if the episode is done
+        if idx > 0:
+            if dataset[idx]['episode_index'] != dataset[idx - 1]['episode_index']:
+                done = np.ones(1, dtype=bool)
+
+        action = dataset[idx]['action'].numpy()
+        
+        # add information to the buffer
+        buffer.add(obs=current_obs,
+                   next_obs=next_obs,
+                   action=action,
+                   reward=reward,
+                   done=done,
+                   infos={})
+        end_time = time.time()
+        print(f"total time taken for step {idx}: {end_time - start_time:.4f} seconds")
+
+        # update the current observation
+        current_obs = next_obs
+        # reset done
+        done = np.zeros(1, dtype=bool)
+        

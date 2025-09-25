@@ -11,6 +11,7 @@ else
     export ROS_LOCALHOST_ONLY=0
     export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
 fi
+export CRISP_CONFIG_PATH=/home/lukahofer/repos/crisp_config
 
 ros2 daemon stop
 ros2 daemon start

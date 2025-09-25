@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+from copyreg import pickle
+from importlib.resources import path
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Generator
@@ -29,6 +31,7 @@ from typing import Any, NamedTuple
 import numpy as np
 import torch as th
 from gymnasium import spaces
+import pickle
 
 from rlmb.data.utils import crisp_batch_obs_to_tensor
 
@@ -138,6 +141,17 @@ def get_device(device: th.device | str = "auto") -> th.device:
         return th.device("cpu")
 
     return device
+
+
+def load_buffer_from_file(path: str) -> BaseBuffer:
+    """
+    Load the replay buffer from a file.
+    
+    :param path: Path to the file from which to load the buffer
+    """
+    with open(path, 'rb') as f:
+        buffer = pickle.load(f)
+    return buffer
 
 
 class BaseBuffer(ABC):
@@ -256,6 +270,17 @@ class BaseBuffer(ABC):
                 return th.tensor(array, device=self.device)
             else:
                 return th.as_tensor(array, device=self.device)
+    
+    def save_buffer(self, path: str) -> None:
+        """
+        Save the buffer to a file.
+
+        :param path: Path to the file
+        """
+        if not path.endswith(".pkl"):
+            path = f"{path}/replay_buffer.pkl"
+        with open(path, "wb") as f:
+            pickle.dump(self, f)
 
 
 class ReplayBuffer(BaseBuffer):

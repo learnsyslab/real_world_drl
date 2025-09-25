@@ -39,6 +39,8 @@ class SAC_Config:
     env_name: str = "FrankaCartesianEnv"
     #env_name: str = "Pendulum-v1"
     """the environment id of the task"""
+    use_cameras: bool = False
+    """if true, use camera image observations"""
     total_timesteps: int = 100000
     """total timesteps of the experiments"""
     episode_length: int = 50
@@ -65,7 +67,7 @@ class SAC_Config:
     """Entropy regularization coefficient."""
     autotune: bool = True
     """automatic tuning of the entropy coefficient"""
-    max_action: float = 1 if not env_name in list(gym.envs.registry.keys()) else None
+    max_action: float = 0.05 if not env_name in list(gym.envs.registry.keys()) else None
     """the maximum norm of an action value the policy can output"""
     control_frequency: int = 10
     """the frequency at which the control commands are sent to the robot"""

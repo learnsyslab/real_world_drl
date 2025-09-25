@@ -31,7 +31,7 @@ class SACLearner:
             "Ensure that int(update_policy_after * utd_ratio) > 0."
         
         # check gym environment
-        self.is_gymnasium_env = self.config.env_name in list(gym.envs.registry.keys())
+        self.use_camera_inputs = self.config.use_cameras
 
         # set seed for reproducibility
         random.seed(self.config.seed)
@@ -63,7 +63,7 @@ class SACLearner:
         self.qf1_target.load_state_dict(self.qf1.state_dict())
         self.qf2_target.load_state_dict(self.qf2.state_dict())
 
-        if not self.is_gymnasium_env:
+        if self.use_camera_inputs:
         # image encoders (only relevant for crisp_gym environments)
             projection_head = torch.nn.Sequential(
                     torch.nn.Linear(512, 512),
@@ -170,12 +170,12 @@ class SACLearner:
         qf_loss = qf1_loss + qf2_loss
 
         # optimize the q functions, image encoder and policy
-        if not self.is_gymnasium_env:
+        if self.use_camera_inputs:
             self.img_encoder_optimizer.zero_grad()
         self.q_optimizer.zero_grad()
         self.actor_optimizer.zero_grad()
 
-        if not self.is_gymnasium_env:
+        if self.use_camera_inputs:
             # retain graph for image encoder update
             qf_loss.backward(retain_graph=True)
         else:
@@ -190,7 +190,7 @@ class SACLearner:
 
         actor_loss.backward()
         self.actor_optimizer.step()
-        if not self.is_gymnasium_env:
+        if self.use_camera_inputs:
             self.img_encoder_optimizer.step()
 
         # update temperature if needed
@@ -215,6 +215,8 @@ class SACLearner:
             writer.add_scalar("losses/qf_loss", qf_loss.item() / 2.0, current_training_step)
             writer.add_scalar("losses/actor_loss", actor_loss.item(), current_training_step)
             writer.add_scalar("losses/alpha", self.alpha, current_training_step)
+            if self.use_camera_inputs:
+                writer.add_scalar("weights_img_encoder", self.image_encoders[0].fc[0].weight.data.norm().cpu().item(), current_training_step)
             if self.config.autotune:
                 writer.add_scalar("losses/alpha_loss", alpha_loss.item(), current_training_step)
             
@@ -235,7 +237,7 @@ class SACLearner:
         actor_parameters = self.actor.state_dict()
 
         proj_heads_parameters = None
-        if not self.is_gymnasium_env:
+        if self.use_camera_inputs:
             proj_heads_parameters = [encoder.fc.state_dict() for encoder in self.image_encoders]
         self.parameters_queue.put((actor_parameters, proj_heads_parameters))
 
