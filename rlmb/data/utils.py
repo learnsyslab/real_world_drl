@@ -92,8 +92,6 @@ def load_buffer_from_lerobot_dataset(dataset, buffer, num_episodes: int = None):
     reward = np.zeros(1, dtype=np.float32)
     done = np.zeros(1, dtype=bool)
 
-
-
     for idx in range(total_recorded_steps):
         # Stop if we have loaded the desired number of episodes
         if num_episodes is not None and dataset[idx]['episode_index'] >= num_episodes:

@@ -20,14 +20,17 @@ from rlmb.agents.sac.config import SAC_Config
 from rlmb.agents.sac.networks_cleanrl import Actor
 from rlmb.agents.sac.env_wrappers import SparseHeightRewardWrapper, MaximizeHeightRewardWrapper
 from rlmb.data.utils import crisp_obs_to_tensor
+from rlmb.training.training_cli import TrainingCLI
 
 class SACActor:
     def __init__(self, 
+                 args,
                  env_info_queue: mp.Queue,
                  parameters_queue: mp.Queue,
                  run_name: str):
         
         self.config = SAC_Config()
+        self.args = args
 
         # setting the seed for reproducibility
         random.seed(self.config.seed)
@@ -42,17 +45,21 @@ class SACActor:
         self.is_gymnasium_env = self.config.env_name in list(gym.envs.registry.keys())
 
         self.use_camera_inputs = self.config.use_cameras
-
         self.device = torch.device("cuda" if torch.cuda.is_available() and self.config.cuda else "cpu")
         self.update_policy_after = self.config.update_policy_after
         self.learning_starts = self.config.learning_starts
         self.env = self._create_env()
 
+        # checkpoint names of model to be loaded
+        self.load_model = args.resume_training or args.load_policy
+
         # policy
         self.actor = Actor(self.env.observation_space, self.env.action_space, self.config).to(self.device)
-        
+        if self.load_model is not None:
+            self.actor.load_state_dict(torch.load(f"checkpoints/{self.load_model}/actor_state_dict.pth"))
+
+        # image encoders
         if self.use_camera_inputs:
-            # image encoders
             projection_head = torch.nn.Sequential(
                     torch.nn.Linear(512, 128),
                     torch.nn.ReLU(),
@@ -64,15 +71,19 @@ class SACActor:
             self.image_encoders = [
                 deepcopy(resnet_18).to(self.device) for _ in range(len(self.env.cameras))
             ]
+            if self.load_model is not None:
+                for i, encoder in enumerate(self.image_encoders):
+                    encoder.fc.load_state_dict(torch.load(f"checkpoints/{self.load_model}/image_encoder_{i}_state_dict.pth"))
         else:
             self.image_encoders = None
 
         # summary writer for tensorboard
         runs_path = Path(__file__).resolve().parent.parent.parent.parent / "runs_actor"
         runs_path.mkdir(parents=True, exist_ok=True)
-        self.writer = SummaryWriter(runs_path / run_name)
+        if not self.args.eval:
+            self.writer = SummaryWriter(runs_path / run_name)
   
-        self._sync_nodes() # Wait for the learner to put the initial policy parameters in the queue
+            self._sync_nodes() # Wait for the learner to put the initial policy parameters in the queue
 
     def run(self, data_queue: mp.Queue):
         """Main process loop for the RLPD actor.
@@ -92,7 +103,9 @@ class SACActor:
             episode_num = 0
 
             for global_step in range(self.config.total_timesteps):   
-                if global_step < self.learning_starts: 
+                if global_step < self.learning_starts \
+                    and not self.args.eval \
+                    and self.load_model is None:
                     # Take random actions for the first few steps
                     action = self.env.action_space.sample()
                     if not self.is_gymnasium_env:
@@ -108,7 +121,7 @@ class SACActor:
                     action = action.view(-1).detach().cpu().numpy()
                     
                     # sync policy every "self.policy_update_after" steps
-                    if (global_step - self.learning_starts) % self.update_policy_after == 0:
+                    if (global_step - self.learning_starts) % self.update_policy_after == 0 and not self.args.eval:
                         self._sync_nodes()
 
                 next_obs, reward, termination, truncation, info = self.env.step(action)
@@ -117,19 +130,21 @@ class SACActor:
 
                 real_next_obs = next_obs.copy()
                 # send experience data to the learner
-                data_queue.put((obs, action, reward, real_next_obs, termination, truncation, info))
+                if not self.args.eval:
+                    data_queue.put((obs, action, reward, real_next_obs, termination, truncation, info))
 
                 obs = next_obs
                 done = termination or truncation
                 if done:
-                    self.writer.add_scalar(f"charts/episodic_return", episode_return, global_step)
-                    self.writer.add_scalar(f"charts/episodic_length", episode_length, global_step)
-                    sum_of_returns += episode_return
-                    sum_of_squared_returns += episode_return ** 2
-                    episode_num += 1
-                    eps_return_std = (sum_of_squared_returns / episode_num - (sum_of_returns / episode_num) ** 2) ** 0.5    
-                    self.writer.add_scalar(f"charts/avg_return", sum_of_returns / episode_num, global_step)
-                    self.writer.add_scalar(f"charts/eps_return_std", eps_return_std, global_step)
+                    if not self.args.eval:
+                        self.writer.add_scalar(f"charts/episodic_return", episode_return, global_step)
+                        self.writer.add_scalar(f"charts/episodic_length", episode_length, global_step)
+                        sum_of_returns += episode_return
+                        sum_of_squared_returns += episode_return ** 2
+                        episode_num += 1
+                        eps_return_std = (sum_of_squared_returns / episode_num - (sum_of_returns / episode_num) ** 2) ** 0.5    
+                        self.writer.add_scalar(f"charts/avg_return", sum_of_returns / episode_num, global_step)
+                        self.writer.add_scalar(f"charts/eps_return_std", eps_return_std, global_step)
 
                     # reset the episode variables
                     episode_return = 0
@@ -146,7 +161,8 @@ class SACActor:
 
     def close(self):
         logging.info("Executing RLPD Actor closing behavior...")
-        self.writer.close()
+        if not self.args.eval:
+            self.writer.close()
         # Clean up the environment
         self.env.close()
         if rclpy.ok():
@@ -166,12 +182,10 @@ class SACActor:
                     )
                 manipulator_env_config = FrankaEnvConfig(max_episode_steps=self.config.episode_length, control_frequency=self.config.control_frequency, gripper_config=gripper_config, camera_configs=[camera_config])
                 env = ManipulatorCartesianEnv(config = manipulator_env_config)
-                #env = MaximizeHeightRewardWrapper(env)
                 env = SparseHeightRewardWrapper(env)
             else:
                 manipulator_env_config = NoCamFrankaEnvConfig(max_episode_steps=self.config.episode_length, control_frequency=self.config.control_frequency)
                 env = ManipulatorCartesianEnv(config = manipulator_env_config)
-                #env = MaximizeHeightRewardWrapper(env)
                 env = SparseHeightRewardWrapper(env)
         env.observation_space.dtype = np.float32
         self.env_info_queue.put(env.action_space)

@@ -143,7 +143,7 @@ def get_device(device: th.device | str = "auto") -> th.device:
     return device
 
 
-def load_buffer_from_file(path: str) -> BaseBuffer:
+def load_buffer_from_file(path: str, image_encoders) -> BaseBuffer:
     """
     Load the replay buffer from a file.
     
@@ -151,6 +151,8 @@ def load_buffer_from_file(path: str) -> BaseBuffer:
     """
     with open(path, 'rb') as f:
         buffer = pickle.load(f)
+    
+    buffer.image_encoders = image_encoders
     return buffer
 
 

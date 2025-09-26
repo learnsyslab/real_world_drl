@@ -14,12 +14,13 @@ from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
 from copy import deepcopy
 
-from rlmb.data.buffers_cleanrl import ReplayBuffer
+from rlmb.data.buffers_cleanrl import ReplayBuffer, load_buffer_from_file
 from rlmb.agents.sac.config import SAC_Config
 from rlmb.agents.sac.networks_cleanrl import SoftQNetwork, Actor
 
 class SACLearner:
     def __init__(self,
+                 args,
                  action_space,
                  observation_space,
                  parameters_queue: mp.Queue,
@@ -30,6 +31,7 @@ class SACLearner:
         assert int(self.config.update_policy_after * self.config.utd_ratio) > 0, \
             "Invalid combination of update_policy_after and utd_ratio. " \
             "Ensure that int(update_policy_after * utd_ratio) > 0."
+        self.args = args
         
         # check gym environment
         self.use_camera_inputs = self.config.use_cameras
@@ -55,28 +57,46 @@ class SACLearner:
             "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(self.config).items()])),
         )
 
+        # checkpoint names of model to be loaded
+        self.load_model = args.resume_training or args.load_policy
+
         # initializing networks
         self.actor = Actor(observation_space, action_space, self.config).to(self.device)
         self.qf1 = SoftQNetwork(self.observation_space, self.action_space).to(self.device)
         self.qf2 = SoftQNetwork(self.observation_space, self.action_space).to(self.device)
         self.qf1_target = SoftQNetwork(self.observation_space, self.action_space).to(self.device)
         self.qf2_target = SoftQNetwork(self.observation_space, self.action_space).to(self.device)
-        self.qf1_target.load_state_dict(self.qf1.state_dict())
-        self.qf2_target.load_state_dict(self.qf2.state_dict())
+        
+        # load model if specified
+        if self.load_model is not None:
+            self.actor.load_state_dict(torch.load(f"checkpoints/{self.load_model}/actor_state_dict.pth"))
+            self.qf1.load_state_dict(torch.load(f"checkpoints/{self.load_model}/qf1_state_dict.pth"))
+            self.qf2.load_state_dict(torch.load(f"checkpoints/{self.load_model}/qf2_state_dict.pth"))
+            self.qf1_target.load_state_dict(torch.load(f"checkpoints/{self.load_model}/qf1_target_state_dict.pth"))
+            self.qf2_target.load_state_dict(torch.load(f"checkpoints/{self.load_model}/qf2_target_state_dict.pth"))
+            logging.info(f"Loaded model from checkpoints/{self.load_model}")
+        else:
+            self.qf1_target.load_state_dict(self.qf1.state_dict())
+            self.qf2_target.load_state_dict(self.qf2.state_dict())
 
-        if self.use_camera_inputs:
         # image encoders (only relevant for crisp_gym environments)
+        if self.use_camera_inputs:
             projection_head = torch.nn.Sequential(
                     torch.nn.Linear(512, 128),
                     torch.nn.ReLU(),
                     torch.nn.Linear(128, 10)
                 )
-            #resnet_18 = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True).requires_grad_(False)
             resnet_18 = resnet18(weights=ResNet18_Weights.DEFAULT, progress=False).eval().requires_grad_(False)
             resnet_18.fc = projection_head
             self.image_encoders = [
                 deepcopy(resnet_18).to(self.device) for name in self.observation_space.keys() if "image" in name
             ]
+            # Load image encoder weights
+            if self.load_model is not None:
+                for i, encoder in enumerate(self.image_encoders):
+                    encoder.fc.load_state_dict(torch.load(f"checkpoints/{self.load_model}/image_encoder_{i}_state_dict.pth"))
+            
+            # image encoder optimizer
             params = []
             for encoder in self.image_encoders:
                 params += list(encoder.fc.parameters())
@@ -90,20 +110,27 @@ class SACLearner:
         self._sync_nodes()
 
         # initializing the replay buffer
-        self.replay_buffer = ReplayBuffer(
-            buffer_size=self.config.buffer_size,
-            observation_space=observation_space,
-            image_encoders=self.image_encoders,
-            action_space=action_space,
-            device=self.device,
-            handle_timeout_termination=False
-        )
+        if self.args.resume_training is not None:
+            self.replay_buffer = load_buffer_from_file(f"checkpoints/{self.args.resume_training}/replay_buffer.pkl", self.image_encoders)
+            logging.info(f"Loaded replay buffer from checkpoints/{self.args.resume_training}/replay_buffer.pkl")
+        else:
+            self.replay_buffer = ReplayBuffer(
+                buffer_size=self.config.buffer_size,
+                observation_space=observation_space,
+                image_encoders=self.image_encoders,
+                action_space=action_space,
+                device=self.device,
+                handle_timeout_termination=False
+            )
 
         # Automatic entropy tuning
         if self.config.autotune:
             self.target_entropy = -torch.prod(torch.Tensor(self.action_space.shape).to(self.device)).item()
-            self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
-            self.alpha = self.log_alpha.exp().item()    
+            if self.load_model is not None:
+                self.log_alpha = torch.load(f"checkpoints/{self.load_model}/log_alpha.pth").to(self.device).requires_grad_(True)
+            else:
+                self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
+            self.alpha = self.log_alpha.exp().item()
             self.a_optimizer = optim.Adam([self.log_alpha], lr=self.config.q_lr)
         else:
             self.alpha = self.config.alpha
@@ -117,14 +144,16 @@ class SACLearner:
         """Main process loop for the RLPD learner."""
         try:
             global_time_step = 0
-            # Wait for enough data in the replay buffer before starting training
-            logging.info("Learner is waiting for the replay buffer to fill with initial exploration samples...")
-            for _ in range(self.config.learning_starts):
-                obs, action, reward, new_obs, terminated, truncated, info = data_queue.get()
-                self.replay_buffer.add(
-                    obs=obs, next_obs=new_obs, action=action, reward=reward, done=terminated or truncated, infos=[info]
-                )
-                global_time_step += 1
+            # check if a model was loaded (in that case we do not need to fill the buffer)
+            if self.load_model is None:
+                # Wait for enough data in the replay buffer before starting training
+                logging.info("Learner is waiting for the replay buffer to fill with initial exploration samples...")
+                for _ in range(self.config.learning_starts):
+                    obs, action, reward, new_obs, terminated, truncated, info = data_queue.get()
+                    self.replay_buffer.add(
+                        obs=obs, next_obs=new_obs, action=action, reward=reward, done=terminated or truncated, infos=[info]
+                    )
+                    global_time_step += 1
             
             current_training_step = 0
             logging.info("Learner starts training...")
@@ -253,6 +282,14 @@ class SACLearner:
 
         # Save the model parameters
         torch.save(self.actor.state_dict(), os.path.join(self.checkpoint_path, "actor_state_dict.pth"))
+        torch.save(self.qf1.state_dict(), os.path.join(self.checkpoint_path, "qf1_state_dict.pth"))
+        torch.save(self.qf2.state_dict(), os.path.join(self.checkpoint_path, "qf2_state_dict.pth"))
+        torch.save(self.qf1_target.state_dict(), os.path.join(self.checkpoint_path, "qf1_target_state_dict.pth"))
+        torch.save(self.qf2_target.state_dict(), os.path.join(self.checkpoint_path, "qf2_target_state_dict.pth"))
+        torch.save(self.log_alpha, os.path.join(self.checkpoint_path, "log_alpha.pth"))
+        for i, encoder in enumerate(self.image_encoders):
+            torch.save(encoder.fc.state_dict(), os.path.join(self.checkpoint_path, f"image_encoder_{i}_state_dict.pth"))
+        self.replay_buffer.save_buffer(self.checkpoint_path)
         torch.cuda.empty_cache()
         logging.info("Model parameters saved successfully.")
         return
