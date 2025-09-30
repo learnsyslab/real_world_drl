@@ -141,7 +141,7 @@ class SACLearner:
         os.makedirs(self.checkpoint_path, exist_ok=True)
   
     def run(self, data_queue: mp.Queue):
-        """Main process loop for the RLPD learner."""
+        """Main process loop for the SAC learner."""
         try:
             global_time_step = 0
             # check if a model was loaded (in that case we do not need to fill the buffer)
@@ -174,7 +174,10 @@ class SACLearner:
                         done=terminated or truncated, infos=info
                     )
                     global_time_step += 1
-                
+
+        except SystemExit:
+            logging.info("Quit training request received. Closing learner process...")
+            self.close() 
         except KeyboardInterrupt:
             logging.info("Keyboard interrupt received. Terminating learner process...")
             self.close()
@@ -277,7 +280,7 @@ class SACLearner:
 
     def close(self):
         """Close the learner and clean up resources."""
-        logging.info("Executing RLPD Learner closing behavior...")
+        logging.info("Executing SAC Learner closing behavior...")
         self.writer.close()
 
         # Save the model parameters

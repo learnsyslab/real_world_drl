@@ -71,3 +71,9 @@ class SAC_Config:
     """the maximum norm of an action value the policy can output"""
     control_frequency: int = 10
     """the frequency at which the control commands are sent to the robot"""
+
+    ## sparse rewards settings ## 
+    success_reward: float = 100.0
+    """the reward given for task success"""
+    failure_reward: float = -10.0
+    """the reward given for task failure"""

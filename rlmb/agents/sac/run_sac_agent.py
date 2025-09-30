@@ -9,6 +9,8 @@ from argparse import ArgumentParser
 from rlmb.agents.sac.actor import SACActor
 from rlmb.agents.sac.learner import SACLearner
 from rlmb.agents.sac.config import SAC_Config
+from rlmb.training.training_cli import TrainingCLI
+
 
 def launch_processes(args):
     rclpy.init()
@@ -20,6 +22,12 @@ def launch_processes(args):
     env_info_queue = ctx.Queue()
     # for policy parameters
     parameters_queue = ctx.Queue()
+    # queue for sparse rewards from training CLI
+    reward_queue = ctx.Queue()
+    # event for training CLI
+    continue_training_event = ctx.Event()
+    # event to signal episode truncation
+    truncation_event = ctx.Event()
 
     config = SAC_Config()
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -28,14 +36,20 @@ def launch_processes(args):
         run_name = args.run_name
     else:
         run_name = f"{config.env_name}__{algo_name}__{timestamp}"
-    
+
     try:
+        if args.cli_training:
+            cli = TrainingCLI(continue_training_event, reward_queue, config)
+            cli.menu()
         # start actor
         actor_process = ctx.Process(target=launch_actor, args=(args,
                                                                data_queue, 
                                                                env_info_queue,
                                                                parameters_queue,
-                                                               run_name))
+                                                               run_name,
+                                                               continue_training_event,
+                                                               truncation_event,
+                                                               reward_queue))
         actor_process.start()
         logging.info(f"RLPD actor process started with PID: {actor_process.pid}")
 
@@ -51,43 +65,51 @@ def launch_processes(args):
 
         try:
             while True:
-                time.sleep(10.0)
+                if truncation_event.is_set():
+                    if args.cli_training:
+                        truncation_event.clear()
+                        cli.menu()
+                time.sleep(1/30)
         except KeyboardInterrupt:
             logging.info("Keyboard interrupt received. Terminating processes...")
 
+    except KeyboardInterrupt:
+        logging.info("Closing CLI.")
+
     finally:
-        actor_process.join(timeout=2)
-        if not args.eval:
-            learner_process.join(timeout=2)
+        if "actor_process" in locals():
+            actor_process.join(timeout=2)
+            if not args.eval:
+                learner_process.join(timeout=2)
 
-        if rclpy.ok():
-            rclpy.shutdown()
+            if rclpy.ok():
+                rclpy.shutdown()
 
-        if actor_process.is_alive():
-            logging.info(f"Trying to force terminating Actor Process.")
-            actor_process.terminate()
-            actor_process.join()
-        logging.info("RLPD actor process terminated succesfully.")
+            if actor_process.is_alive():
+                logging.info(f"Trying to force terminating Actor Process.")
+                actor_process.terminate()
+                actor_process.join()
+            logging.info("RLPD actor process terminated succesfully.")
 
-        if not args.eval:
-            if learner_process.is_alive():
-                logging.info(f"Trying to force terminating Learner Process with PID: {learner_process.pid}.")
-                learner_process.terminate()
-                learner_process.join()
-            logging.info("RLPD learner process terminated succesfully.")
-        logging.info("All nodes terminated.")
+            if not args.eval:
+                if learner_process.is_alive():
+                    logging.info(f"Trying to force terminating Learner Process with PID: {learner_process.pid}.")
+                    learner_process.terminate()
+                    learner_process.join()
+                logging.info("RLPD learner process terminated succesfully.")
+            logging.info("All nodes terminated.")
 
 
-def launch_actor(args, data_queue, env_info_queue, parameters_queue, run_name):
+def launch_actor(args, data_queue, env_info_queue, parameters_queue, run_name, continue_training_event, truncation_event, reward_queue):
     logging.basicConfig(level=logging.INFO)
     try:
-        actor = SACActor(args, env_info_queue, parameters_queue, run_name)
+        actor = SACActor(args, env_info_queue, parameters_queue, run_name, reward_queue)
     except Exception as e:
         logging.error(f"Failed to initialize SAC Actor: {e}", exc_info=True)
         return
 
     try:
-        actor.run(data_queue)
+        actor.run(data_queue, continue_training_event, truncation_event)
     finally:
         actor.close()
         

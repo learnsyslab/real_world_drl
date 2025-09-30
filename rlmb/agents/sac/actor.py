@@ -20,14 +20,16 @@ from rlmb.agents.sac.config import SAC_Config
 from rlmb.agents.sac.networks_cleanrl import Actor
 from rlmb.agents.sac.env_wrappers import SparseHeightRewardWrapper, MaximizeHeightRewardWrapper
 from rlmb.data.utils import crisp_obs_to_tensor
-from rlmb.training.training_cli import TrainingCLI
+from rlmb.training.training_cli import clear_terminal
+
 
 class SACActor:
     def __init__(self, 
                  args,
                  env_info_queue: mp.Queue,
                  parameters_queue: mp.Queue,
-                 run_name: str):
+                 run_name: str,
+                 reward_queue: mp.Queue):
         
         self.config = SAC_Config()
         self.args = args
@@ -40,6 +42,7 @@ class SACActor:
 
         self.env_info_queue = env_info_queue
         self.parameters_queue = parameters_queue
+        self.reward_queue = reward_queue
 
         # check gym environment
         self.is_gymnasium_env = self.config.env_name in list(gym.envs.registry.keys())
@@ -85,8 +88,8 @@ class SACActor:
   
             self._sync_nodes() # Wait for the learner to put the initial policy parameters in the queue
 
-    def run(self, data_queue: mp.Queue):
-        """Main process loop for the RLPD actor.
+    def run(self, data_queue: mp.Queue, continue_training_event: mp.Event, truncation_event: mp.Event):
+        """Main process loop for the SAC actor.
         This method will execture actions in the environment
         and send the s,a,r,s' tuples to the data queue."""
     
@@ -102,7 +105,9 @@ class SACActor:
             sum_of_squared_returns = 0.0
             episode_num = 0
 
-            for global_step in range(self.config.total_timesteps):   
+            for global_step in range(self.config.total_timesteps):
+                if self.args.cli_training:
+                    continue_training_event.wait()  # Wait until the CLI signals to start a new episode
                 if global_step < self.learning_starts \
                     and not self.args.eval \
                     and self.load_model is None:
@@ -125,6 +130,16 @@ class SACActor:
                         self._sync_nodes()
 
                 next_obs, reward, termination, truncation, info = self.env.step(action)
+                if self.args.cli_training and not continue_training_event.is_set():
+                    termination = True
+                    reward = self.reward_queue.get()  # Get the sparse reward from the CLI
+
+                if truncation and self.args.cli_training:
+                    truncation_event.set()
+                    continue_training_event.clear()
+                    clear_terminal()
+                    print("Episode truncated due to max episode length.")
+                    print("\n")
                 episode_return += reward
                 episode_length += 1
 
@@ -152,6 +167,9 @@ class SACActor:
                     if not self.is_gymnasium_env:
                         self.env.home()
                     obs, _ = self.env.reset()
+        except SystemExit:
+            logging.info("Quit Training request received. Terminating actor process...")
+            self.close()
         except KeyboardInterrupt:
             logging.info("Keyboard interrupt received. Terminating actor process...")
             self.close()
@@ -160,7 +178,7 @@ class SACActor:
             self.close()
 
     def close(self):
-        logging.info("Executing RLPD Actor closing behavior...")
+        logging.info("Executing SAC Actor closing behavior...")
         if not self.args.eval:
             self.writer.close()
         # Clean up the environment
@@ -176,7 +194,7 @@ class SACActor:
             if self.use_camera_inputs:
                 gripper_config = GripperConfig(min_value=0.0, max_value=1.0)
                 camera_config = CameraConfig(
-                    resolution=(128, 128), 
+                    resolution=(256, 256), 
                     camera_color_image_topic="/camera/camera/color/image_rect_raw",
                     camera_color_info_topic="/camera/camera/color/camera_info"
                     )
