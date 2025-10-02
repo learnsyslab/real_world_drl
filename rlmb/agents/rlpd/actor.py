@@ -17,7 +17,7 @@ from copy import deepcopy
 
 from rlmb.agents.rlpd.config import RLPD_Config
 from rlmb.agents.rlpd.networks_cleanrl import Actor
-from rlmb.agents.rlpd.env_wrappers import SparseHeightRewardWrapper, MaximizeHeightRewardWrapper
+from rlmb.agents.rlpd.env_wrappers import SparseHeightRewardWrapper, MaximizeHeightRewardWrapper, SafetyBoundingBoxWrapper
 from rlmb.data.utils import crisp_obs_to_tensor
 from rlmb.training.training_cli import clear_terminal
 
@@ -206,10 +206,12 @@ class RLPDActor:
                                                          gripper_config=gripper_config, 
                                                          camera_configs=[primary_config, wrist_config])
                 env = ManipulatorCartesianEnv(config = manipulator_env_config)
+                env = SafetyBoundingBoxWrapper(env)
                 env = SparseHeightRewardWrapper(env)
             else:
                 manipulator_env_config = NoCamFrankaEnvConfig(max_episode_steps=self.config.episode_length, control_frequency=self.config.control_frequency)
                 env = ManipulatorCartesianEnv(config = manipulator_env_config)
+                env = SafetyBoundingBoxWrapper(env)
                 env = SparseHeightRewardWrapper(env)
         env.observation_space.dtype = np.float32
         self.env_info_queue.put(env.action_space)
