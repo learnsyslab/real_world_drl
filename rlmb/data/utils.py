@@ -1,8 +1,12 @@
 import torch
 import numpy as np
-from collections import defaultdict
 import time
+
+from torch.utils.data import DataLoader
 from torchvision.models import ResNet18_Weights
+from collections import defaultdict
+
+from rlmb.agents.rlpd.config import RLPD_Config
 
 
 RESNET18_TRANSFORM = ResNet18_Weights.DEFAULT.transforms(antialias=True)
@@ -55,8 +59,10 @@ def get_input_size_from_dict_space(obs_space) -> int:
     """
     size = 0
     for name, space in obs_space.items():
-        if 'image' in name:
-            size += 10
+        if name in ["observation.state.joint", "task", "observation.state.target"]:
+            continue
+        elif 'image' in name:
+            size += 128
         else:
             size += np.prod(space.shape)
     return size
@@ -74,7 +80,7 @@ def encode_image(img: np.ndarray, image_encoder: torch.nn.Module, device: torch.
     return features
 
 
-def load_buffer_from_lerobot_dataset(dataset, buffer, num_episodes: int = None):
+def load_buffer_from_lerobot_dataset(dataset, buffer, num_episodes: int):
     """
     Load a dataset from the LeRobotDataset into a replay buffer.
 
@@ -82,46 +88,34 @@ def load_buffer_from_lerobot_dataset(dataset, buffer, num_episodes: int = None):
     :param buffer: The replay buffer to load into
     :param num_episodes: The number of episodes to load (default: None = load all)
     """
+    BATCH_SIZE = 1024
+    config = RLPD_Config()
     total_recorded_steps = len(dataset)
-
-    current_obs = {}
-    for key in dataset[0].keys():
-        if 'observation' in key:
-            current_obs.update({key: dataset[0][key].numpy()})
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, num_workers=8)
+    obs = {}
     next_obs = {}
-    reward = np.zeros(1, dtype=np.float32)
-    done = np.zeros(1, dtype=bool)
+    new_episode = True
 
-    for idx in range(total_recorded_steps):
-        # Stop if we have loaded the desired number of episodes
-        if num_episodes is not None and dataset[idx]['episode_index'] >= num_episodes:
-            break
-        start_time = time.time()
-        # load the next observation
-        next_obs = {}
-        for key in dataset[idx].keys():
-            if 'observation' in key:
-                next_obs.update({key: dataset[idx][key].numpy()})
-        
-        # check if the episode is done
-        if idx > 0:
-            if dataset[idx]['episode_index'] != dataset[idx - 1]['episode_index']:
+    for batch in dataloader:
+        for i in range(1, batch['action'].shape[0]):
+            # extract observations
+            obs = next_obs
+            next_obs['observation.images.primary'] = batch['observation.images.primary'][i].numpy() * 255.0
+            next_obs['observation.images.wrist'] = batch['observation.images.wrist'][i].numpy() * 255.0
+            next_obs['observation.state.cartesian'] = batch['observation.state.cartesian'][i].numpy()
+            next_obs['observation.state.gripper'] = np.expand_dims(batch['observation.state.gripper'][i].numpy(), axis=0)
+            action = batch['action'][i].numpy()
+            reward = - np.linalg.norm(action)
+            done = np.zeros(1, dtype=bool)
+
+            # check for new episode
+            if batch['frame_index'][i].item() == 0:
+                reward = config.success_reward
                 done = np.ones(1, dtype=bool)
-
-        action = dataset[idx]['action'].numpy()
-        
-        # add information to the buffer
-        buffer.add(obs=current_obs,
-                   next_obs=next_obs,
-                   action=action,
-                   reward=reward,
-                   done=done,
-                   infos={})
-        end_time = time.time()
-        print(f"total time taken for step {idx}: {end_time - start_time:.4f} seconds")
-
-        # update the current observation
-        current_obs = next_obs
-        # reset done
-        done = np.zeros(1, dtype=bool)
-        
+                new_episode = True
+                buffer.add(obs, obs, action, reward, done, {})
+            
+            if not new_episode:
+                buffer.add(obs, next_obs, action, reward, done, {})
+            else:
+                new_episode = False
