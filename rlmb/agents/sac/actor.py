@@ -193,12 +193,22 @@ class SACActor:
         else:
             if self.use_camera_inputs:
                 gripper_config = GripperConfig(min_value=0.0, max_value=1.0)
-                camera_config = CameraConfig(
-                    resolution=(256, 256), 
+                primary_config = CameraConfig(
+                    camera_name="primary",
+                    resolution=(128, 128), 
                     camera_color_image_topic="/camera/camera/color/image_rect_raw",
                     camera_color_info_topic="/camera/camera/color/camera_info"
                     )
-                manipulator_env_config = FrankaEnvConfig(max_episode_steps=self.config.episode_length, control_frequency=self.config.control_frequency, gripper_config=gripper_config, camera_configs=[camera_config])
+                wrist_config = CameraConfig(
+                    camera_name="wrist",
+                    resolution=(128, 128), 
+                    camera_color_image_topic="/camera/camera/color/image_rect_raw",
+                    camera_color_info_topic="/camera/camera/color/camera_info"
+                    )
+                manipulator_env_config = FrankaEnvConfig(max_episode_steps=self.config.episode_length, 
+                                                         control_frequency=self.config.control_frequency, 
+                                                         gripper_config=gripper_config, 
+                                                         camera_configs=[primary_config, wrist_config])
                 env = ManipulatorCartesianEnv(config = manipulator_env_config)
                 env = SparseHeightRewardWrapper(env)
             else:
