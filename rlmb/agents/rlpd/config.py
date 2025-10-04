@@ -54,7 +54,7 @@ class RLPD_Config:
     """target smoothing coefficient (default: 0.005)"""
     batch_size: int = 256
     """the batch size of sample from the reply memory"""
-    learning_starts: int = int(20)
+    learning_starts: int = int(1)
     """timestep to start learning"""
     policy_lr: float = 3e-4
     """the learning rate of the policy network optimizer"""
@@ -66,7 +66,7 @@ class RLPD_Config:
     """number of Q networks to use for calculating the target value"""
     update_policy_after: int = 1
     """number of time steps after which the policy is updated"""
-    utd_ratio: float = 1.0
+    utd_ratio: float = 2.0
     """the ratio of policy updates to environment steps taken"""
     alpha: float = 0.2
     """Entropy regularization coefficient."""
