@@ -33,17 +33,13 @@ dev = { features = ["dev"] }
 humble = { features = ["humble"] }
 humble-lerobot = { features = ["humble", "lerobot"] }
 lerobot = { features = ["lerobot"] }
-jazzy = { features = ["jazzy"] }
-jazzy-lerobot = { features = ["jazzy", "lerobot"] }
 
 [feature.dev.pypi-dependencies]
 pre-commit = "*"
 ruff = "*"
 
 [feature.lerobot.pypi-dependencies]
-# lerobot = { path = "../lerobot", editable = false }
 lerobot = { git = "https://github.com/huggingface/lerobot", rev = "dacd1d7f5c719c3e56d7b7154a751bef6d5bd23c", extras = ["smolvla"]}
-# lerobot = "*"
 rich = ">=14.0.0, <15"
 
 [feature.lerobot.dependencies]
@@ -61,22 +57,10 @@ ros-humble-ros2-controllers = "*"
 rosdep = "*"
 ros-humble-rmw-cyclonedds-cpp = "*"
 
-[feature.jazzy]
-channels = ["https://prefix.dev/robostack-jazzy"]
-
-[feature.jazzy.dependencies]
-ros-jazzy-desktop = "*"
-ros-jazzy-ros2-control = "*"
-ros-jazzy-ros2-controllers = "*"
-colcon-common-extensions = "*"
-rosdep = "*"
-ros-jazzy-rmw-cyclonedds-cpp = "*"
-
 [pypi-dependencies]
 rlmb = { path = ".", editable = true }
-torch = { version = ">=2.8.0, <3", index = "https://download.pytorch.org/whl/cu126" }
-torchvision = { version = ">=0.23.0, <0.24", index = "https://download.pytorch.org/whl/cu126" }
-crisp_gym = { path = "../crisp_gym", editable = false }
+torch = "*"
+crisp_gym = { path = "../crisp_gym_mod", editable = false }
 tensorboard = ">=2.20.0, <3"
 gymnasium = { version = ">=0.29.1, <2", extras = ["classic-control"] }
 

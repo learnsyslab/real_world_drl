@@ -3,7 +3,6 @@ import gymnasium as gym
 import torch
 import torch.multiprocessing as mp
 import rclpy
-import time
 import random
 import numpy as np
 
@@ -16,14 +15,14 @@ from torchvision.models import resnet18, ResNet18_Weights
 from pathlib import Path
 from copy import deepcopy
 
-from rlmb.agents.sac.config import SAC_Config
-from rlmb.agents.sac.networks_cleanrl import Actor
-from rlmb.agents.sac.env_wrappers import SparseHeightRewardWrapper, MaximizeHeightRewardWrapper
+from rlmb.agents.rlpd.config import RLPD_Config
+from rlmb.agents.rlpd.networks_cleanrl import Actor
+from rlmb.agents.rlpd.env_wrappers import SparseHeightRewardWrapper, MaximizeHeightRewardWrapper, SafetyBoundingBoxWrapper
 from rlmb.data.utils import crisp_obs_to_tensor
 from rlmb.training.training_cli import clear_terminal
 
 
-class SACActor:
+class RLPDActor:
     def __init__(self, 
                  args,
                  env_info_queue: mp.Queue,
@@ -31,7 +30,7 @@ class SACActor:
                  run_name: str,
                  reward_queue: mp.Queue):
         
-        self.config = SAC_Config()
+        self.config = RLPD_Config()
         self.args = args
 
         # setting the seed for reproducibility
@@ -66,9 +65,8 @@ class SACActor:
             projection_head = torch.nn.Sequential(
                     torch.nn.Linear(512, 128),
                     torch.nn.ReLU(),
-                    torch.nn.Linear(128, 10)
+                    torch.nn.Linear(128, 128)
                 )
-            # resnet_18 = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True).requires_grad_(False)
             resnet_18 = resnet18(weights=ResNet18_Weights.DEFAULT, progress=False).eval().requires_grad_(False)
             resnet_18.fc = projection_head
             self.image_encoders = [
@@ -89,7 +87,7 @@ class SACActor:
             self._sync_nodes() # Wait for the learner to put the initial policy parameters in the queue
 
     def run(self, data_queue: mp.Queue, continue_training_event: mp.Event, truncation_event: mp.Event):
-        """Main process loop for the SAC actor.
+        """Main process loop for the RLPD actor.
         This method will execture actions in the environment
         and send the s,a,r,s' tuples to the data queue."""
     
@@ -167,9 +165,7 @@ class SACActor:
                     if not self.is_gymnasium_env:
                         self.env.home()
                     obs, _ = self.env.reset()
-        except SystemExit:
-            logging.info("Quit Training request received. Terminating actor process...")
-            self.close()
+
         except KeyboardInterrupt:
             logging.info("Keyboard interrupt received. Terminating actor process...")
             self.close()
@@ -178,7 +174,7 @@ class SACActor:
             self.close()
 
     def close(self):
-        logging.info("Executing SAC Actor closing behavior...")
+        logging.info("Executing RLPD Actor closing behavior...")
         if not self.args.eval:
             self.writer.close()
         # Clean up the environment
@@ -195,13 +191,13 @@ class SACActor:
                 gripper_config = GripperConfig(min_value=0.0, max_value=1.0)
                 primary_config = CameraConfig(
                     camera_name="primary",
-                    resolution=(128, 128), 
+                    resolution=(256, 256), 
                     camera_color_image_topic="/camera/camera/color/image_rect_raw",
                     camera_color_info_topic="/camera/camera/color/camera_info"
                     )
                 wrist_config = CameraConfig(
                     camera_name="wrist",
-                    resolution=(128, 128), 
+                    resolution=(256, 256), 
                     camera_color_image_topic="/camera/camera/color/image_rect_raw",
                     camera_color_info_topic="/camera/camera/color/camera_info"
                     )
@@ -210,10 +206,12 @@ class SACActor:
                                                          gripper_config=gripper_config, 
                                                          camera_configs=[primary_config, wrist_config])
                 env = ManipulatorCartesianEnv(config = manipulator_env_config)
+                env = SafetyBoundingBoxWrapper(env)
                 env = SparseHeightRewardWrapper(env)
             else:
                 manipulator_env_config = NoCamFrankaEnvConfig(max_episode_steps=self.config.episode_length, control_frequency=self.config.control_frequency)
                 env = ManipulatorCartesianEnv(config = manipulator_env_config)
+                env = SafetyBoundingBoxWrapper(env)
                 env = SparseHeightRewardWrapper(env)
         env.observation_space.dtype = np.float32
         self.env_info_queue.put(env.action_space)

@@ -11,7 +11,7 @@ from crisp_gym.manipulator_env import ManipulatorCartesianEnv
 
 from rlmb.data.buffers_cleanrl import ReplayBuffer
 from rlmb.data.utils import load_buffer_from_lerobot_dataset
-from rlmb.agents.sac.config import SAC_Config
+from rlmb.agents.rlpd.config import RLPD_Config
 
 
 def main():
@@ -19,37 +19,44 @@ def main():
     parser.add_argument("lerobot_id", type=str, help="The LeRobot dataset ID (e.g. danielsanjosepro/clean-up-table).")
     parser.add_argument("rb_save_path", type=str, help="Save location for the replay buffer pickle file.")
     parser.add_argument("--rb_file_name", type=str, default=None, help="File name for the replay buffer pickle file. If not set, uses the lerobot_id as file name.")
-    parser.add_argument("--num_eps", type=int, default=None, help="Number of episodes to load from the dataset into the replay buffer (default: all).")
     args = parser.parse_args()
 
     ds = LeRobotDataset(args.lerobot_id)
     rb_file_name = args.lerobot_id.split("/")[-1] if args.rb_file_name is None else args.rb_file_name
     os.makedirs(args.rb_save_path, exist_ok=True)
-    buffer_size = len(ds)
+    ds_length = len(ds)
 
-    sac_config = SAC_Config()
-    gripper_config = GripperConfig(min_value=0.0, max_value=1.0)
-    camera_config = CameraConfig(
-        resolution=(128, 128), 
+    rlpd_config = RLPD_Config()
+    gripper_config = GripperConfig(min_value=0.0, max_value=1.0)    
+    primary_config = CameraConfig(
+        camera_name="primary",
+        resolution=(256, 256), 
         camera_color_image_topic="/camera/camera/color/image_rect_raw",
         camera_color_info_topic="/camera/camera/color/camera_info"
         )
-    manipulator_env_config = FrankaEnvConfig(max_episode_steps=100, control_frequency=sac_config.control_frequency, gripper_config=gripper_config, camera_configs=[camera_config])
+    wrist_config = CameraConfig(
+        camera_name="wrist",
+        resolution=(256, 256), 
+        camera_color_image_topic="/camera/camera/color/image_rect_raw",
+        camera_color_info_topic="/camera/camera/color/camera_info"
+        )
+    manipulator_env_config = FrankaEnvConfig(max_episode_steps=100, control_frequency=rlpd_config.control_frequency, gripper_config=gripper_config, camera_configs=[primary_config, wrist_config])
     env = ManipulatorCartesianEnv(config = manipulator_env_config)
-    device = "cuda" if sac_config.cuda and torch.cuda.is_available() else "cpu"
-    rb = ReplayBuffer(buffer_size, 
+    device = "cuda" if rlpd_config.cuda and torch.cuda.is_available() else "cpu"
+    rb = ReplayBuffer(ds_length, 
                       env.observation_space, 
                       [None for _ in env.cameras], 
                       env.action_space, 
                       device=device,
                       handle_timeout_termination=False)
-
-    num_eps = args.num_eps if args.num_eps is not None else len(ds)
-    load_buffer_from_lerobot_dataset(ds, rb, num_eps)
+    
+    print("Converting dataset to replay buffer...")
+    load_buffer_from_lerobot_dataset(ds, rb, ds_length)
     if not os.path.exists(args.rb_save_path):
         os.makedirs(args.rb_save_path)
     rb.save_buffer(os.path.join(args.rb_save_path, rb_file_name + ".pkl"))
     env.close()
+    print("Done.")
 
 
 if __name__ == "__main__":
