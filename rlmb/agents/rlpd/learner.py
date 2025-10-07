@@ -142,7 +142,7 @@ class RLPDLearner:
         self.checkpoint_path = os.path.join("checkpoints", self.run_name)
         os.makedirs(self.checkpoint_path, exist_ok=True)
   
-    def run(self, data_queue: mp.Queue):
+    def run(self, data_queue: mp.Queue, episode_is_running: mp.Event):
         """Main process loop for the RLPD learner."""
         try:
             global_time_step = 0
@@ -161,21 +161,20 @@ class RLPDLearner:
             logging.info("Learner starts training...")
 
             while global_time_step < self.config.total_timesteps:
-                for _ in range(int(self.config.update_policy_after * self.config.utd_ratio)):
-                    # perform enough training steps to match the utd ratio
-                    self._train_step(self.writer, current_training_step)
-                    current_training_step += 1
-                # send updated policy parameters to the actor
-                self._sync_nodes()
-
-                for _ in range(self.config.update_policy_after):
-                    # move next batch of data from the queue to the replay buffer
+                episode_is_running.wait()  # Wait until the actor signals that an episode is running
+                while episode_is_running.is_set() or not data_queue.empty():
                     obs, action, reward, new_obs, terminated, truncated, info = data_queue.get()
                     self.replay_buffer.add(
-                        obs=obs, next_obs=new_obs, action=action, reward=reward,
-                        done=terminated or truncated, infos=info
-                    )
+                            obs=obs, next_obs=new_obs, action=action, reward=reward,
+                            done=terminated or truncated, infos=info
+                        )
+                    self._train_step(self.writer, current_training_step)
+                    current_training_step += 1
                     global_time_step += 1
+                    print(current_training_step)
+
+                # episode end
+                self._sync_nodes()
 
         except KeyboardInterrupt:
             logging.info("Keyboard interrupt received. Terminating learner process...")
@@ -187,42 +186,43 @@ class RLPDLearner:
     def _train_step(self, writer, current_training_step):
         """Perform a single training step using data from the replay buffer.
         This updates both the critics and the policy networks."""
-        online_data = self.replay_buffer.sample(self.config.batch_size // 2)
-        expert_data = self.expert_buffer.sample(self.config.batch_size // 2)
+        for step in range(int(self.config.utd_ratio)):
+            online_data = self.replay_buffer.sample(self.config.batch_size // 2)
+            expert_data = self.expert_buffer.sample(self.config.batch_size // 2)
 
-        observations = torch.cat((online_data.observations, expert_data.observations), dim=0)
-        actions = torch.cat((online_data.actions, expert_data.actions), dim=0)
-        rewards = torch.cat((online_data.rewards, expert_data.rewards), dim=0)
-        next_observations = torch.cat((online_data.next_observations, expert_data.next_observations), dim=0)
-        dones = torch.cat((online_data.dones, expert_data.dones), dim=0) 
+            observations = torch.cat((online_data.observations, expert_data.observations), dim=0)
+            actions = torch.cat((online_data.actions, expert_data.actions), dim=0)
+            rewards = torch.cat((online_data.rewards, expert_data.rewards), dim=0)
+            next_observations = torch.cat((online_data.next_observations, expert_data.next_observations), dim=0)
+            dones = torch.cat((online_data.dones, expert_data.dones), dim=0) 
 
-        with torch.no_grad():
-            next_state_actions, next_state_log_pis, _ = self.actor.get_action(next_observations)
-            # pick two random Q-networks from the ensemble
-            ensemble_samples = random.sample(range(self.config.num_critics), self.config.critic_subset_size)
-            qf_next_targets = [self.q_target_networks[i](next_observations, next_state_actions).view(-1) for i in ensemble_samples]
-            min_qf_next_targets = torch.min(torch.stack(qf_next_targets), dim=0)[0] - self.alpha * next_state_log_pis.view(-1)
-            next_q_values = rewards.flatten() + (1 - dones.flatten()) * self.config.gamma * (min_qf_next_targets).view(-1)
+            with torch.no_grad():
+                next_state_actions, next_state_log_pis, _ = self.actor.get_action(next_observations)
+                # pick two random Q-networks from the ensemble
+                ensemble_samples = random.sample(range(self.config.num_critics), self.config.critic_subset_size)
+                qf_next_targets = [self.q_target_networks[i](next_observations, next_state_actions).view(-1) for i in ensemble_samples]
+                min_qf_next_targets = torch.min(torch.stack(qf_next_targets), dim=0)[0] - self.alpha * next_state_log_pis.view(-1)
+                next_q_values = rewards.flatten() + (1 - dones.flatten()) * self.config.gamma * (min_qf_next_targets).view(-1)
 
-        qf_a_values = [self.q_networks[i](observations, actions).view(-1) for i in range(self.config.num_critics)]
-        qf_losses = [F.mse_loss(qf_a_values[i], next_q_values) for i in range(self.config.num_critics)]
-        qf_loss = sum(qf_losses)
+            qf_a_values = [self.q_networks[i](observations, actions).view(-1) for i in range(self.config.num_critics)]
+            qf_losses = [F.mse_loss(qf_a_values[i], next_q_values) for i in range(self.config.num_critics)]
+            qf_loss = sum(qf_losses)
 
-        # optimize the q functions, image encoder and policy
-        if self.use_camera_inputs:
-            self.img_encoder_optimizer.zero_grad()
-        self.q_optimizer.zero_grad()
-        self.actor_optimizer.zero_grad()
+            # optimize the q functions, image encoder and policy
+            if self.use_camera_inputs:
+                self.img_encoder_optimizer.zero_grad()
+            self.q_optimizer.zero_grad()
+            self.actor_optimizer.zero_grad()
 
-        if self.use_camera_inputs:
-            # retain graph for image encoder update
-            qf_loss.backward(retain_graph=True)
-        else:
-            qf_loss.backward()
-        self.q_optimizer.step()
+            if self.use_camera_inputs and step == int(self.config.utd_ratio) - 1:
+                # retain graph for image encoder update
+                qf_loss.backward(retain_graph=True)
+            else:
+                qf_loss.backward()
+            self.q_optimizer.step()
 
-        if self.use_camera_inputs:
-            self.img_encoder_optimizer.step()
+            if self.use_camera_inputs:
+                self.img_encoder_optimizer.step()
         
         obs = observations.clone().detach()
         pi, log_pi, _ = self.actor.get_action(obs)

@@ -86,7 +86,7 @@ class RLPDActor:
   
             self._sync_nodes() # Wait for the learner to put the initial policy parameters in the queue
 
-    def run(self, data_queue: mp.Queue, continue_training_event: mp.Event, truncation_event: mp.Event):
+    def run(self, data_queue: mp.Queue, continue_training_event: mp.Event, truncation_event: mp.Event, episode_is_running: mp.Event):
         """Main process loop for the RLPD actor.
         This method will execture actions in the environment
         and send the s,a,r,s' tuples to the data queue."""
@@ -104,6 +104,7 @@ class RLPDActor:
             episode_num = 0
 
             for global_step in range(self.config.total_timesteps):
+                episode_is_running.set()
                 if self.args.cli_training:
                     continue_training_event.wait()  # Wait until the CLI signals to start a new episode
                 if global_step < self.learning_starts \
@@ -122,10 +123,6 @@ class RLPDActor:
 
                     action, _, _ = self.actor.get_action(obs_input)
                     action = action.view(-1).detach().cpu().numpy()
-                    
-                    # sync policy every "self.policy_update_after" steps
-                    if (global_step - self.learning_starts) % self.update_policy_after == 0 and not self.args.eval:
-                        self._sync_nodes()
 
                 next_obs, reward, termination, truncation, info = self.env.step(action)
                 if self.args.cli_training and not continue_training_event.is_set():
@@ -149,6 +146,7 @@ class RLPDActor:
                 obs = next_obs
                 done = termination or truncation
                 if done:
+                    episode_is_running.clear()
                     if not self.args.eval:
                         self.writer.add_scalar(f"charts/episodic_return", episode_return, global_step)
                         self.writer.add_scalar(f"charts/episodic_length", episode_length, global_step)
@@ -160,11 +158,18 @@ class RLPDActor:
                         self.writer.add_scalar(f"charts/eps_return_std", eps_return_std, global_step)
 
                     # reset the episode variables
+                    logging.info(f"Episode length: {episode_length}")
                     episode_return = 0
                     episode_length = 0
                     if not self.is_gymnasium_env:
+                        logging.info("Resetting the environment to the home position...")
                         self.env.home()
-                    obs, _ = self.env.reset()
+                    obs, _ = self.env.reset() 
+
+                    if not self.args.eval:
+                        logging.info(f"Waiting for the learner to finish gradient updates...")
+                        self._sync_nodes()
+                        logging.info(f"Learner fininshed gradient updates.")
 
         except KeyboardInterrupt:
             logging.info("Keyboard interrupt received. Terminating actor process...")

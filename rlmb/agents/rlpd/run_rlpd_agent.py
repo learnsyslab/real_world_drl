@@ -28,6 +28,8 @@ def launch_processes(args):
     continue_training_event = ctx.Event()
     # event to signal episode truncation
     truncation_event = ctx.Event()
+    # event to signal the end of an episode to the learner
+    episode_is_running = ctx.Event()
 
     config = RLPD_Config()
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -49,6 +51,7 @@ def launch_processes(args):
                                                                run_name,
                                                                continue_training_event,
                                                                truncation_event,
+                                                               episode_is_running,
                                                                reward_queue))
         actor_process.start()
         logging.info(f"RLPD actor process started with PID: {actor_process.pid}")
@@ -59,7 +62,8 @@ def launch_processes(args):
                                                                     data_queue, 
                                                                     env_info_queue,
                                                                     parameters_queue,
-                                                                    run_name))
+                                                                    run_name,
+                                                                    episode_is_running))
             learner_process.start()
             logging.info(f"RLPD learner process started with PID: {learner_process.pid}")
 
@@ -100,7 +104,7 @@ def launch_processes(args):
             logging.info("All nodes terminated.")
 
 
-def launch_actor(args, data_queue, env_info_queue, parameters_queue, run_name, continue_training_event, truncation_event, reward_queue):
+def launch_actor(args, data_queue, env_info_queue, parameters_queue, run_name, continue_training_event, truncation_event, episode_is_running, reward_queue):
     logging.basicConfig(level=logging.INFO)
     try:
         actor = RLPDActor(args, env_info_queue, parameters_queue, run_name, reward_queue)
@@ -109,12 +113,12 @@ def launch_actor(args, data_queue, env_info_queue, parameters_queue, run_name, c
         return
 
     try:
-        actor.run(data_queue, continue_training_event, truncation_event)
+        actor.run(data_queue, continue_training_event, truncation_event, episode_is_running)
     finally:
         actor.close()
         
 
-def launch_learner(args, data_queue, env_info_queue, parameters_queue, run_name):
+def launch_learner(args, data_queue, env_info_queue, parameters_queue, run_name, episode_is_running):
     logging.basicConfig(level=logging.INFO)
 
     # get environment info from actor node
@@ -131,7 +135,7 @@ def launch_learner(args, data_queue, env_info_queue, parameters_queue, run_name)
         return
 
     try:
-        learner.run(data_queue)
+        learner.run(data_queue, episode_is_running)
     finally:
         learner.close()
 
