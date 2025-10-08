@@ -103,18 +103,10 @@ class RLPDActor:
         if not self.args.eval:
             self.writer = SummaryWriter(runs_path / run_name)
 
-<<<<<<< HEAD
-    def run(self, data_queue: mp.Queue, continue_training_event: mp.Event, truncation_event: mp.Event, episode_is_running: mp.Event):
-=======
             self._sync_nodes()  # Wait for the learner to put the initial policy parameters in the queue
 
-    def run(
-        self,
-        data_queue: mp.Queue,
-        continue_training_event: mp.Event,
-        truncation_event: mp.Event,
-    ):
->>>>>>> feat-real-world-deployment
+    def run(self, data_queue: mp.Queue, continue_training_event: mp.Event, truncation_event: mp.Event, episode_is_running: mp.Event):
+
         """Main process loop for the RLPD actor.
         This method will execture actions in the environment
         and send the s,a,r,s' tuples to the data queue."""
@@ -155,15 +147,6 @@ class RLPDActor:
 
                     action, _, _ = self.actor.get_action(obs_input)
                     action = action.view(-1).detach().cpu().numpy()
-<<<<<<< HEAD
-=======
-
-                    # sync policy every "self.policy_update_after" steps
-                    if (
-                        global_step - self.learning_starts
-                    ) % self.update_policy_after == 0 and not self.args.eval:
-                        self._sync_nodes()
->>>>>>> feat-real-world-deployment
 
                 next_obs, reward, termination, truncation, info = self.env.step(action)
                 if self.args.cli_training and not continue_training_event.is_set():
