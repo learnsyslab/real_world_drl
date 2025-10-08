@@ -25,7 +25,7 @@ import os
 import gymnasium as gym
 
 
-@ dataclass
+@dataclass
 class RLPD_Config:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
@@ -38,7 +38,7 @@ class RLPD_Config:
 
     # Algorithm specific arguments
     env_name: str = "FrankaCartesianEnv"
-    #env_name: str = "Pendulum-v1"
+    # env_name: str = "Pendulum-v1"
     """the environment id of the task"""
     use_cameras: bool = True
     """if true, use camera image observations"""
@@ -54,7 +54,7 @@ class RLPD_Config:
     """target smoothing coefficient (default: 0.005)"""
     batch_size: int = 256
     """the batch size of sample from the reply memory"""
-    learning_starts: int = int(20)
+    learning_starts: int = int(1)
     """timestep to start learning"""
     policy_lr: float = 3e-4
     """the learning rate of the policy network optimizer"""
@@ -72,13 +72,14 @@ class RLPD_Config:
     """Entropy regularization coefficient."""
     autotune: bool = True
     """automatic tuning of the entropy coefficient"""
-    max_action: float = 0.05 if not env_name in list(gym.envs.registry.keys()) else None
+    max_action: float = 0.05 if env_name not in list(gym.envs.registry.keys()) else None
     """the maximum norm of an action value the policy can output"""
     control_frequency: int = 10
     """the frequency at which the control commands are sent to the robot"""
 
-    ## sparse rewards settings ## 
+    ## sparse rewards settings ##
     success_reward: float = 100.0
     """the reward given for task success"""
     failure_reward: float = -10.0
     """the reward given for task failure"""
+
