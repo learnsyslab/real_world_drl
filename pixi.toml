@@ -60,7 +60,7 @@ ros-humble-rmw-cyclonedds-cpp = "*"
 [pypi-dependencies]
 rlmb = { path = ".", editable = true }
 torch = "*"
-crisp_gym = { path = "../crisp_gym_mod", editable = false }
+crisp_gym = { path = "../crisp_gym", editable = false }
 tensorboard = ">=2.20.0, <3"
 gymnasium = { version = ">=0.29.1, <2", extras = ["classic-control"] }
 
