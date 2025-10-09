@@ -48,10 +48,10 @@ class SparseHeightRewardWrapper(RewardWrapper):
         """
         eef_pose = self.robot.end_effector_pose
         z = eef_pose.position[2]
-        if z > 0.9:
-            reward = 100.0
-        else:
-            reward = - 0.1 * np.linalg.norm(action)
+        #if z > 0.9:
+        #    reward = 100.0
+        #else:
+        #    reward = - 0.1 * np.linalg.norm(action)
         return reward
     
     def step(self, action):
@@ -88,12 +88,12 @@ class SafetyBoundingBoxWrapper(ActionWrapper):
         self.cameras = self.env.cameras
         self.gripper = self.env.gripper
 
-        self.x_min = 0.15
+        self.x_min = 0.25
         self.x_max = 0.6
-        self.y_min = -0.25
-        self.y_max = 0.25
-        self.z_min = 0.1
-        self.z_max = 0.7
+        self.y_min = -0.15
+        self.y_max = 0.15
+        self.z_min = 0.18
+        self.z_max = 0.5
     
     def action(self, action):
         """Modifies the :attr:`env` :meth:`step` reward using :meth:`self.reward`."""

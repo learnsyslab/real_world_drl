@@ -22,6 +22,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import gymnasium as gym
 from gymnasium.spaces import Dict, Box
 
 from rlmb.data.utils import get_input_size_from_dict_space
@@ -67,6 +68,7 @@ class Actor(nn.Module):
         else:
             raise NotImplementedError("Observation space type not supported")
         self.config = config
+        self.is_gymnasium_env = self.config.env_name in list(gym.envs.registry.keys())
         self.fc1 = nn.Linear(input_size, 256)
         self.fc2 = nn.Linear(256, 256)
         self.fc_mean = nn.Linear(256, np.prod(action_space.shape))

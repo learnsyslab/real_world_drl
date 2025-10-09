@@ -154,6 +154,7 @@ class RLPDActor:
                     reward = (
                         self.reward_queue.get()
                     )  # Get the sparse reward from the CLI
+                    self._clear_queue(self.reward_queue)
 
                 if truncation and self.args.cli_training:
                     truncation_event.set()
@@ -262,6 +263,8 @@ class RLPDActor:
                 # env = ManipulatorCartesianEnv(config=manipulator_env_config)
                 env = make_env("rl_setup", control_type="cartesian", namespace="right")
                 env.robot.config.home_config = home_close_to_table
+                env.config.control_frequency = self.config.control_frequency
+                env.config.max_episode_steps = self.config.episode_length
                 env.robot.reset_targets()
                 env = SafetyBoundingBoxWrapper(env)
                 env = SparseHeightRewardWrapper(env)
@@ -289,3 +292,7 @@ class RLPDActor:
         logging.info(
             "Actor received updated parameters for the policy and vision encoder."
         )
+
+    def _clear_queue(self, queue: mp.Queue):
+        while not queue.empty():
+            _ = queue.get()

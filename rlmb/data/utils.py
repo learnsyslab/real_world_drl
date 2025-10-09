@@ -105,7 +105,8 @@ def load_buffer_from_lerobot_dataset(dataset, buffer, num_episodes: int):
             next_obs['observation.state.cartesian'] = batch['observation.state.cartesian'][i].numpy()
             next_obs['observation.state.gripper'] = np.expand_dims(batch['observation.state.gripper'][i].numpy(), axis=0)
             action = batch['action'][i].numpy()
-            reward = - np.linalg.norm(action)
+            #reward = - np.linalg.norm(action)
+            reward = np.zeros(1)
             done = np.zeros(1, dtype=bool)
 
             # check for new episode
