@@ -3,6 +3,8 @@ from gymnasium.wrappers import TimeLimit
 import numpy as np
 from crisp_gym.manipulator_env import ManipulatorCartesianEnv
 
+from rlmb.agents.rlpd.config import RLPD_Config
+
 class MaximizeHeightRewardWrapper(RewardWrapper):
     def __init__(self, env):
         super().__init__(env)
@@ -81,19 +83,20 @@ class SparseHeightRewardWrapper(RewardWrapper):
 
 
 class SafetyBoundingBoxWrapper(ActionWrapper):
-    def __init__(self, env):
+    def __init__(self, env, config: SparseHeightRewardWrapper):
         super().__init__(env)
 
         self.robot = self.env.robot
         self.cameras = self.env.cameras
         self.gripper = self.env.gripper
+        self.config = config
 
         self.x_min = 0.25
-        self.x_max = 0.6
+        self.x_max = 0.60
         self.y_min = -0.15
         self.y_max = 0.15
-        self.z_min = 0.18
-        self.z_max = 0.5
+        self.z_min = 0.08
+        self.z_max = 0.50
     
     def action(self, action):
         """Modifies the :attr:`env` :meth:`step` reward using :meth:`self.reward`."""
@@ -112,7 +115,9 @@ class SafetyBoundingBoxWrapper(ActionWrapper):
         if not np.array_equal(next_pos, clipped_pos):
             delta = clipped_pos - current_pos
             action = np.concatenate([delta, action[3:]])  # Keep orientation part unchanged
-            
+        
+        if np.any((action[:3] < -self.config.max_action) | (action[:3] > self.config.max_action)):
+            raise RuntimeError(f"Action {action} exceeds the maximum action!")
         return action
     
     def close(self):

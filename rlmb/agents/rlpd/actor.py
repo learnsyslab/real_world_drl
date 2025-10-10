@@ -266,7 +266,7 @@ class RLPDActor:
                 env.config.control_frequency = self.config.control_frequency
                 env.config.max_episode_steps = self.config.episode_length
                 env.robot.reset_targets()
-                env = SafetyBoundingBoxWrapper(env)
+                env = SafetyBoundingBoxWrapper(env, self.config)
                 env = SparseHeightRewardWrapper(env)
             else:
                 manipulator_env_config = NoCamFrankaEnvConfig(
