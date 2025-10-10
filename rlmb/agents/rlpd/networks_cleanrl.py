@@ -112,7 +112,13 @@ class Actor(nn.Module):
         normal = torch.distributions.Normal(mean, std)
         x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
         y_t = torch.tanh(x_t)
-        action = y_t * self.action_scale + self.action_bias
+
+        # in crisp_gym envs, last action item is gripper value between 0 and 1
+        if not self.is_gymnasium_env:
+            action = y_t * self.action_scale + self.action_bias
+            action[:,6] = (y_t[:,6] + 1) / 2
+        else:
+            action = y_t * self.action_scale + self.action_bias
         log_prob = normal.log_prob(x_t)
         # Enforcing Action Bound
         # log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)
