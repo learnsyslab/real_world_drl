@@ -100,11 +100,17 @@ def load_buffer_from_lerobot_dataset(dataset, buffer, num_episodes: int):
         for i in range(1, batch['action'].shape[0]):
             # extract observations
             obs = next_obs
-            next_obs['observation.images.primary'] = batch['observation.images.primary'][i].numpy() * 255.0
-            next_obs['observation.images.wrist'] = batch['observation.images.wrist'][i].numpy() * 255.0
             next_obs['observation.state.cartesian'] = batch['observation.state.cartesian'][i].numpy()
             next_obs['observation.state.gripper'] = np.expand_dims(batch['observation.state.gripper'][i].numpy(), axis=0)
+            next_obs['observation.images.primary'] = batch['observation.images.primary'][i].numpy() * 255.0
+            next_obs['observation.images.wrist'] = batch['observation.images.wrist'][i].numpy() * 255.0
+
             action = batch['action'][i].numpy()
+
+            # transpose image channel dim to last dim and change dtype
+            next_obs['observation.images.primary'] = np.transpose(next_obs['observation.images.primary'], (1,2,0)).astype(np.uint8)
+            next_obs['observation.images.wrist'] = np.transpose(next_obs['observation.images.wrist'], (1,2,0)).astype(np.uint8)
+
             #reward = - np.linalg.norm(action)
             reward = np.zeros(1)
             done = np.zeros(1, dtype=bool)
