@@ -195,7 +195,6 @@ class RLPDLearner:
             next_observations = torch.cat((online_data.next_observations, expert_data.next_observations), dim=0)
             dones = torch.cat((online_data.dones, expert_data.dones), dim=0) 
 
-            breakpoint()
             with torch.no_grad():
                 next_state_actions, next_state_log_pis, _ = self.actor.get_action(next_observations)
                 # pick two random Q-networks from the ensemble
