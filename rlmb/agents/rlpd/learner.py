@@ -110,8 +110,8 @@ class RLPDLearner:
 
         # initializing the replay buffer
         if self.args.resume_training is not None:
-            self.replay_buffer = load_buffer_from_file(f"checkpoints/{self.args.resume_training}/replay_buffer.pkl", self.image_encoders)
-            logging.info(f"Loaded replay buffer from checkpoints/{self.args.resume_training}/replay_buffer.pkl")
+            self.replay_buffer = load_buffer_from_file(f"checkpoints/{self.args.resume_training}/replay_buffer.joblib", self.image_encoders)
+            logging.info(f"Loaded replay buffer from checkpoints/{self.args.resume_training}/replay_buffer.joblib")
         else:
             self.replay_buffer = ReplayBuffer(
                 buffer_size=self.config.buffer_size,

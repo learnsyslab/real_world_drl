@@ -87,7 +87,7 @@ def main():
     load_buffer_from_lerobot_dataset(ds, rb, ds_length)
     if not os.path.exists(args.rb_save_path):
         os.makedirs(args.rb_save_path)
-    rb.save_buffer(os.path.join(args.rb_save_path, rb_file_name + ".pkl"))
+    rb.save_buffer(os.path.join(args.rb_save_path, rb_file_name + ".joblib"))
     env.close()
     print("Done.")
 

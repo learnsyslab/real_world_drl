@@ -31,7 +31,7 @@ from typing import Any, NamedTuple
 import numpy as np
 import torch as th
 from gymnasium import spaces
-import pickle
+from joblib import dump, load
 
 from rlmb.data.utils import crisp_batch_obs_to_tensor
 
@@ -148,8 +148,7 @@ def load_buffer_from_file(path: str, image_encoders) -> BaseBuffer:
     
     :param path: Path to the file from which to load the buffer
     """
-    with open(path, 'rb') as f:
-        buffer = pickle.load(f)
+    buffer = load(path)
     
     buffer.image_encoders = image_encoders
     return buffer
@@ -278,10 +277,9 @@ class BaseBuffer(ABC):
 
         :param path: Path to the file
         """
-        if not path.endswith(".pkl"):
-            path = f"{path}/replay_buffer.pkl"
-        with open(path, "wb") as f:
-            pickle.dump(self, f)
+        if not path.endswith(".joblib"):
+            path = f"{path}/replay_buffer.joblib"
+        dump(self, path)
 
 
 class ReplayBuffer(BaseBuffer):
