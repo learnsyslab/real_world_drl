@@ -92,37 +92,45 @@ def load_buffer_from_lerobot_dataset(dataset, buffer, num_episodes: int):
     config = RLPD_Config()
     total_recorded_steps = len(dataset)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, num_workers=8)
-    obs = {}
-    next_obs = {}
-    new_episode = True
+    
+    prev_obs = None
 
     for batch in dataloader:
-        for i in range(1, batch['action'].shape[0]):
-            # extract observations
-            obs = next_obs
-            next_obs['observation.state.cartesian'] = batch['observation.state.cartesian'][i].numpy()
-            next_obs['observation.state.gripper'] = np.expand_dims(batch['observation.state.gripper'][i].numpy(), axis=0)
-            next_obs['observation.images.primary'] = batch['observation.images.primary'][i].numpy() * 255.0
-            next_obs['observation.images.wrist'] = batch['observation.images.wrist'][i].numpy() * 255.0
+        for i in range(batch['action'].shape[0]):
+            # Create new observation dictionaries for each step
+            current_obs = {
+                'observation.state.cartesian': batch['observation.state.cartesian'][i].numpy().copy(),
+                'observation.state.gripper': np.expand_dims(batch['observation.state.gripper'][i].numpy(), axis=0).copy(),
+                'observation.images.primary': np.transpose(batch['observation.images.primary'][i].numpy() * 255.0, (1,2,0)).astype(np.uint8),
+                'observation.images.wrist': np.transpose(batch['observation.images.wrist'][i].numpy() * 255.0, (1,2,0)).astype(np.uint8)
+            }
 
-            action = batch['action'][i].numpy()
-
-            # transpose image channel dim to last dim and change dtype
-            next_obs['observation.images.primary'] = np.transpose(next_obs['observation.images.primary'], (1,2,0)).astype(np.uint8)
-            next_obs['observation.images.wrist'] = np.transpose(next_obs['observation.images.wrist'], (1,2,0)).astype(np.uint8)
-
-            #reward = - np.linalg.norm(action)
-            reward = np.zeros(1)
-            done = np.zeros(1, dtype=bool)
-
-            # check for new episode
-            if batch['frame_index'][i].item() == 0:
-                reward = config.success_reward
-                done = np.ones(1, dtype=bool)
-                new_episode = True
-                buffer.add(obs, obs, action, reward, done, {})
+            action = batch['action'][i].numpy().copy()
             
-            if not new_episode:
-                buffer.add(obs, next_obs, action, reward, done, {})
-            else:
-                new_episode = False
+            # Check if this is the start of a new episode
+            is_episode_start = batch['frame_index'][i].item() == 0
+            
+            # If we have a previous observation, add the transition to replay buffer
+            if prev_obs is not None:
+                # Check if the previous step was the end of an episode
+                # (current step is start of new episode)
+                if is_episode_start:
+                    reward = np.array([config.success_reward])
+                    done = np.ones(1, dtype=bool)
+                else:
+                    reward = np.zeros(1)
+                    done = np.zeros(1, dtype=bool)
+                
+                # Add transition from previous observation to current observation
+                buffer.add(prev_obs, current_obs, prev_action, reward, done, {})
+            
+            # Store current observation and action for next iteration
+            prev_obs = current_obs
+            prev_action = action
+
+    # Handle the last transition in the dataset
+    if prev_obs is not None:
+        # Last step of the dataset should be marked as done with success reward
+        reward = np.array([config.success_reward])
+        done = np.ones(1, dtype=bool)
+    buffer.add(prev_obs, prev_obs, prev_action, reward, done, {})
