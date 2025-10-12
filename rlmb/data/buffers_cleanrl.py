@@ -21,8 +21,6 @@
 
 from __future__ import annotations
 
-from copyreg import pickle
-from importlib.resources import path
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Generator

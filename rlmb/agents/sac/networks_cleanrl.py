@@ -22,6 +22,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import gymnasium as gym
 from gymnasium.spaces import Dict, Box
 
 from rlmb.data.utils import get_input_size_from_dict_space
@@ -65,6 +66,7 @@ class Actor(nn.Module):
         else:
             raise NotImplementedError("Observation space type not supported")
         self.config = config
+        self.is_gymnasium_env = self.config.env_name in list(gym.envs.registry.keys())
         self.fc1 = nn.Linear(input_size, 256)
         self.fc2 = nn.Linear(256, 256)
         self.fc_mean = nn.Linear(256, np.prod(action_space.shape))
@@ -108,7 +110,12 @@ class Actor(nn.Module):
         normal = torch.distributions.Normal(mean, std)
         x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
         y_t = torch.tanh(x_t)
+
+        # in crisp_gym envs, last action item is gripper value between 0 and 1
         action = y_t * self.action_scale + self.action_bias
+        if not self.is_gymnasium_env:
+            action[:,6] = (y_t[:,6] + 1) / 2
+
         log_prob = normal.log_prob(x_t)
         # Enforcing Action Bound
         # log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)

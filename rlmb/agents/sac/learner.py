@@ -111,8 +111,8 @@ class SACLearner:
 
         # initializing the replay buffer
         if self.args.resume_training is not None:
-            self.replay_buffer = load_buffer_from_file(f"checkpoints/{self.args.resume_training}/replay_buffer.pkl", self.image_encoders)
-            logging.info(f"Loaded replay buffer from checkpoints/{self.args.resume_training}/replay_buffer.pkl")
+            self.replay_buffer = load_buffer_from_file(f"checkpoints/{self.args.resume_training}/replay_buffer.joblib", self.image_encoders)
+            logging.info(f"Loaded replay buffer from checkpoints/{self.args.resume_training}/replay_buffer.joblib")
         else:
             self.replay_buffer = ReplayBuffer(
                 buffer_size=self.config.buffer_size,
@@ -290,8 +290,9 @@ class SACLearner:
         torch.save(self.qf1_target.state_dict(), os.path.join(self.checkpoint_path, "qf1_target_state_dict.pth"))
         torch.save(self.qf2_target.state_dict(), os.path.join(self.checkpoint_path, "qf2_target_state_dict.pth"))
         torch.save(self.log_alpha, os.path.join(self.checkpoint_path, "log_alpha.pth"))
-        for i, encoder in enumerate(self.image_encoders):
-            torch.save(encoder.fc.state_dict(), os.path.join(self.checkpoint_path, f"image_encoder_{i}_state_dict.pth"))
+        if self.use_camera_inputs:
+            for i, encoder in enumerate(self.image_encoders):
+                torch.save(encoder.fc.state_dict(), os.path.join(self.checkpoint_path, f"image_encoder_{i}_state_dict.pth"))
         self.replay_buffer.save_buffer(self.checkpoint_path)
         torch.cuda.empty_cache()
         logging.info("Model parameters saved successfully.")

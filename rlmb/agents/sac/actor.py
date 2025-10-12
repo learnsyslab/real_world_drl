@@ -10,7 +10,8 @@ import numpy as np
 from crisp_gym.manipulator_env_config import NoCamFrankaEnvConfig, FrankaEnvConfig
 from crisp_py.camera.camera_config import CameraConfig
 from crisp_py.gripper.gripper import GripperConfig
-from crisp_gym.manipulator_env import ManipulatorCartesianEnv
+from crisp_gym.manipulator_env import ManipulatorCartesianEnv, make_env
+from crisp_gym.config.home import home_close_to_table
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.models import resnet18, ResNet18_Weights
 from pathlib import Path
@@ -18,7 +19,7 @@ from copy import deepcopy
 
 from rlmb.agents.sac.config import SAC_Config
 from rlmb.agents.sac.networks_cleanrl import Actor
-from rlmb.agents.sac.env_wrappers import SparseHeightRewardWrapper, MaximizeHeightRewardWrapper
+from rlmb.agents.sac.env_wrappers import SparseHeightRewardWrapper, MaximizeHeightRewardWrapper, SafetyBoundingBoxWrapper, MoveToBlockWrapper
 from rlmb.data.utils import crisp_obs_to_tensor
 from rlmb.training.training_cli import clear_terminal
 
@@ -192,29 +193,21 @@ class SACActor:
             env = gym.make(self.config.env_name)
         else:
             if self.use_camera_inputs:
-                gripper_config = GripperConfig(min_value=0.0, max_value=1.0)
-                primary_config = CameraConfig(
-                    camera_name="primary",
-                    resolution=(128, 128), 
-                    camera_color_image_topic="/camera/camera/color/image_rect_raw",
-                    camera_color_info_topic="/camera/camera/color/camera_info"
-                    )
-                wrist_config = CameraConfig(
-                    camera_name="wrist",
-                    resolution=(128, 128), 
-                    camera_color_image_topic="/camera/camera/color/image_rect_raw",
-                    camera_color_info_topic="/camera/camera/color/camera_info"
-                    )
-                manipulator_env_config = FrankaEnvConfig(max_episode_steps=self.config.episode_length, 
-                                                         control_frequency=self.config.control_frequency, 
-                                                         gripper_config=gripper_config, 
-                                                         camera_configs=[primary_config, wrist_config])
-                env = ManipulatorCartesianEnv(config = manipulator_env_config)
+                env = make_env("rl_setup", control_type="cartesian", namespace="right")
+                env.robot.config.home_config = home_close_to_table
+                env.config.control_frequency = self.config.control_frequency
+                env.config.max_episode_steps = self.config.episode_length
+                env.robot.reset_targets()
+                env = SafetyBoundingBoxWrapper(env, self.config)
                 env = SparseHeightRewardWrapper(env)
             else:
-                manipulator_env_config = NoCamFrankaEnvConfig(max_episode_steps=self.config.episode_length, control_frequency=self.config.control_frequency)
-                env = ManipulatorCartesianEnv(config = manipulator_env_config)
-                env = SparseHeightRewardWrapper(env)
+                env = make_env("no_cam_franka", control_type="cartesian", namespace="right")
+                env.robot.config.home_config = home_close_to_table
+                env.config.control_frequency = self.config.control_frequency
+                env.config.max_episode_steps = self.config.episode_length
+                env.robot.reset_targets()
+                env = SafetyBoundingBoxWrapper(env, self.config)
+                env = MoveToBlockWrapper(env)
         env.observation_space.dtype = np.float32
         self.env_info_queue.put(env.action_space)
         self.env_info_queue.put(env.observation_space)
