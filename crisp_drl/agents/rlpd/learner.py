@@ -13,9 +13,9 @@ from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
 from copy import deepcopy
 
-from rlmb.data.buffers_cleanrl import ReplayBuffer, load_buffer_from_file
-from rlmb.agents.rlpd.config import RLPD_Config
-from rlmb.agents.rlpd.networks_cleanrl import SoftQNetwork, Actor
+from crisp_drl.data.buffers_cleanrl import ReplayBuffer, load_buffer_from_file
+from crisp_drl.agents.rlpd.config import RLPD_Config
+from crisp_drl.agents.rlpd.networks_cleanrl import SoftQNetwork, Actor
 
 class RLPDLearner:
     def __init__(self,

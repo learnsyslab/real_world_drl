@@ -58,7 +58,7 @@ rosdep = "*"
 ros-humble-rmw-cyclonedds-cpp = "*"
 
 [pypi-dependencies]
-rlmb = { path = ".", editable = true }
+crisp_drl = { path = ".", editable = true }
 torch = "*"
 crisp_gym = { path = "../crisp_gym", editable = false }
 tensorboard = ">=2.20.0, <3"

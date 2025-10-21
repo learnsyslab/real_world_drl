@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from torchvision.models import ResNet18_Weights
 from collections import defaultdict
 
-from rlmb.agents.rlpd.config import RLPD_Config
+from crisp_drl.agents.rlpd.config import RLPD_Config
 
 
 RESNET18_TRANSFORM = ResNet18_Weights.DEFAULT.transforms(antialias=True)

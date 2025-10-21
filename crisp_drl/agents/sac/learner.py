@@ -14,9 +14,9 @@ from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
 from copy import deepcopy
 
-from rlmb.data.buffers_cleanrl import ReplayBuffer, load_buffer_from_file
-from rlmb.agents.sac.config import SAC_Config
-from rlmb.agents.sac.networks_cleanrl import SoftQNetwork, Actor
+from crisp_drl.data.buffers_cleanrl import ReplayBuffer, load_buffer_from_file
+from crisp_drl.agents.sac.config import SAC_Config
+from crisp_drl.agents.sac.networks_cleanrl import SoftQNetwork, Actor
 
 class SACLearner:
     def __init__(self,

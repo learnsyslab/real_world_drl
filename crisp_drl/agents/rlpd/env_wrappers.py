@@ -18,7 +18,7 @@ from crisp_gym.manipulator_env import ManipulatorCartesianEnv
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
 
-from rlmb.agents.rlpd.config import RLPD_Config
+from crisp_drl.agents.rlpd.config import RLPD_Config
 
 class MaximizeHeightRewardWrapper(RewardWrapper):
     def __init__(self, env):

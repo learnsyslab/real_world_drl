@@ -9,9 +9,9 @@ from crisp_py.camera.camera_config import CameraConfig
 from crisp_py.gripper.gripper import GripperConfig
 from crisp_gym.manipulator_env import ManipulatorCartesianEnv, make_env, make_env_config
 
-from rlmb.data.buffers_cleanrl import ReplayBuffer
-from rlmb.data.utils import load_buffer_from_lerobot_dataset
-from rlmb.agents.rlpd.config import RLPD_Config
+from crisp_drl.data.buffers_cleanrl import ReplayBuffer
+from crisp_drl.data.utils import load_buffer_from_lerobot_dataset
+from crisp_drl.agents.rlpd.config import RLPD_Config
 
 
 def main():

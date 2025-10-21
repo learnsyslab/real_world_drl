@@ -16,15 +16,15 @@ from torchvision.models import resnet18, ResNet18_Weights
 from pathlib import Path
 from copy import deepcopy
 
-from rlmb.agents.rlpd.config import RLPD_Config
-from rlmb.agents.rlpd.networks_cleanrl import Actor
-from rlmb.agents.rlpd.env_wrappers import (
+from crisp_drl.agents.rlpd.config import RLPD_Config
+from crisp_drl.agents.rlpd.networks_cleanrl import Actor
+from crisp_drl.agents.rlpd.env_wrappers import (
     SparseHeightRewardWrapper,
     MaximizeHeightRewardWrapper,
     SafetyBoundingBoxWrapper,
 )
-from rlmb.data.utils import crisp_obs_to_tensor
-from rlmb.training.training_cli import clear_terminal
+from crisp_drl.data.utils import crisp_obs_to_tensor
+from crisp_drl.training.training_cli import clear_terminal
 
 
 class RLPDActor:

@@ -8,11 +8,11 @@ import os
 
 from argparse import ArgumentParser
 
-from rlmb.agents.rlpd.actor import RLPDActor
-from rlmb.agents.rlpd.env_wrappers import ActionTimeStampWrapper, CLIWrapper, ContainerWatcherWrapper, FarAwayTerminationWrapper, ImageEncoderWrapper, InsertionResetWrapper, LastObservationWrapper, ObservationConcatWrapper, TimeMeasurementWrapper
-from rlmb.agents.rlpd.learner import RLPDLearner
-from rlmb.agents.rlpd.config import RLPD_Config
-from rlmb.training.training_cli import TrainingCLI
+from crisp_drl.agents.rlpd.actor import RLPDActor
+from crisp_drl.agents.rlpd.env_wrappers import ActionTimeStampWrapper, CLIWrapper, ContainerWatcherWrapper, FarAwayTerminationWrapper, ImageEncoderWrapper, InsertionResetWrapper, LastObservationWrapper, ObservationConcatWrapper, TimeMeasurementWrapper
+from crisp_drl.agents.rlpd.learner import RLPDLearner
+from crisp_drl.agents.rlpd.config import RLPD_Config
+from crisp_drl.training.training_cli import TrainingCLI
 from crisp_gym.manipulator_env import make_env
 from crisp_gym.util.rl_utils import load_actions_safe
 

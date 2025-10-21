@@ -17,11 +17,11 @@ from torchvision.models import resnet18, ResNet18_Weights
 from pathlib import Path
 from copy import deepcopy
 
-from rlmb.agents.sac.config import SAC_Config
-from rlmb.agents.sac.networks_cleanrl import Actor
-from rlmb.agents.sac.env_wrappers import SparseHeightRewardWrapper, MaximizeHeightRewardWrapper, SafetyBoundingBoxWrapper, MoveToBlockWrapper
-from rlmb.data.utils import crisp_obs_to_tensor
-from rlmb.training.training_cli import clear_terminal
+from crisp_drl.agents.sac.config import SAC_Config
+from crisp_drl.agents.sac.networks_cleanrl import Actor
+from crisp_drl.agents.sac.env_wrappers import SparseHeightRewardWrapper, MaximizeHeightRewardWrapper, SafetyBoundingBoxWrapper, MoveToBlockWrapper
+from crisp_drl.data.utils import crisp_obs_to_tensor
+from crisp_drl.training.training_cli import clear_terminal
 
 
 class SACActor:

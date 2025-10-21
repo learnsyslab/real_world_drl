@@ -3,7 +3,7 @@ __pycache__
 .vscode
 runs_actor/
 runs_learner/
-rlmb.egg-info
+crisp_drl.egg-info
 checkpoints/
 pixi.lock
 parquet/

@@ -31,7 +31,7 @@ import torch as th
 from gymnasium import spaces
 from joblib import dump, load
 
-from rlmb.data.utils import crisp_batch_obs_to_tensor
+from crisp_drl.data.utils import crisp_batch_obs_to_tensor
 
 try:
     # Check memory used by replay buffer when possible

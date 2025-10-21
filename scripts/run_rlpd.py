@@ -6,10 +6,10 @@ import os
 
 from argparse import ArgumentParser
 
-from rlmb.agents.rlpd.actor import RLPDActor
-from rlmb.agents.rlpd.learner import RLPDLearner
-from rlmb.agents.rlpd.config import RLPD_Config
-from rlmb.training.training_cli import TrainingCLI
+from crisp_drl.agents.rlpd.actor import RLPDActor
+from crisp_drl.agents.rlpd.learner import RLPDLearner
+from crisp_drl.agents.rlpd.config import RLPD_Config
+from crisp_drl.training.training_cli import TrainingCLI
 
 
 def launch_processes(args):

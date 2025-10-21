@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rlmb"
+name = "crisp_drl"
 version = "0.1.0"
-description = "A base repository that enables the integration of reinforcement learning implementations with crisp_gym manipulation environments."
+description = "Deep Reinforcement Learning (DRL) setup for robot manipulation in the real world. It natively integrates well with the low-level CRISP Controllers."
 authors = [{name = "Luka Hofer", email = "luka.hofer@tum.de"}]
 readme = "README.md"
 requires-python = ">=3.11"

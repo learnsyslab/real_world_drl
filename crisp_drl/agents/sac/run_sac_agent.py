@@ -6,10 +6,10 @@ import os
 
 from argparse import ArgumentParser
 
-from rlmb.agents.rlpd.actor import RLPDActor
-from rlmb.agents.rlpd.learner import RLPDLearner
-from rlmb.agents.rlpd.config import RLPD_Config
-from rlmb.training.training_cli import TrainingCLI
+from crisp_drl.agents.sac.actor import SACActor
+from crisp_drl.agents.sac.learner import SACLearner
+from crisp_drl.agents.sac.config import SAC_Config
+from crisp_drl.training.training_cli import TrainingCLI
 
 
 def launch_processes(args):
@@ -28,10 +28,8 @@ def launch_processes(args):
     continue_training_event = ctx.Event()
     # event to signal episode truncation
     truncation_event = ctx.Event()
-    # event to signal the end of an episode to the learner
-    episode_is_running = ctx.Event()
 
-    config = RLPD_Config()
+    config = SAC_Config()
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     algo_name = str(os.path.dirname(__file__).split("/")[-1])
     if args.run_name is not None:
@@ -51,7 +49,6 @@ def launch_processes(args):
                                                                run_name,
                                                                continue_training_event,
                                                                truncation_event,
-                                                               episode_is_running,
                                                                reward_queue))
         actor_process.start()
         logging.info(f"RLPD actor process started with PID: {actor_process.pid}")
@@ -62,8 +59,7 @@ def launch_processes(args):
                                                                     data_queue, 
                                                                     env_info_queue,
                                                                     parameters_queue,
-                                                                    run_name,
-                                                                    episode_is_running))
+                                                                    run_name))
             learner_process.start()
             logging.info(f"RLPD learner process started with PID: {learner_process.pid}")
 
@@ -104,38 +100,38 @@ def launch_processes(args):
             logging.info("All nodes terminated.")
 
 
-def launch_actor(args, data_queue, env_info_queue, parameters_queue, run_name, continue_training_event, truncation_event, episode_is_running, reward_queue):
+def launch_actor(args, data_queue, env_info_queue, parameters_queue, run_name, continue_training_event, truncation_event, reward_queue):
     logging.basicConfig(level=logging.INFO)
     try:
-        actor = RLPDActor(args, env_info_queue, parameters_queue, run_name, reward_queue)
+        actor = SACActor(args, env_info_queue, parameters_queue, run_name, reward_queue)
     except Exception as e:
-        logging.error(f"Failed to initialize RLPD Actor: {e}", exc_info=True)
+        logging.error(f"Failed to initialize SAC Actor: {e}", exc_info=True)
         return
 
     try:
-        actor.run(data_queue, continue_training_event, truncation_event, episode_is_running)
+        actor.run(data_queue, continue_training_event, truncation_event)
     finally:
         actor.close()
         
 
-def launch_learner(args, data_queue, env_info_queue, parameters_queue, run_name, episode_is_running):
+def launch_learner(args, data_queue, env_info_queue, parameters_queue, run_name):
     logging.basicConfig(level=logging.INFO)
 
     # get environment info from actor node
     action_space = env_info_queue.get()
     observation_space = env_info_queue.get()
     try:
-        learner = RLPDLearner(args,
+        learner = SACLearner(args,
                              action_space, 
                              observation_space,
                              parameters_queue,
                              run_name)
     except Exception as e:
-        logging.info(f"Failed to initialize RLPD Learner: {e}", exc_info=True)
+        logging.info(f"Failed to initialize SAC Learner: {e}", exc_info=True)
         return
 
     try:
-        learner.run(data_queue, episode_is_running)
+        learner.run(data_queue)
     finally:
         learner.close()
 
@@ -143,7 +139,6 @@ def launch_learner(args, data_queue, env_info_queue, parameters_queue, run_name,
 def main():
     logging.basicConfig(level=logging.INFO)
     argparse = ArgumentParser()
-    argparse.add_argument("expert_buffer_path", type=str, help="Path to the prerecorded expert buffer.")
     argparse.add_argument("--run_name", type=str, default=None, help="Set the checkpoint name for the experiment. Per default the timestamp is used.")
     argparse.add_argument("--load_policy", type=str, help="Checkpoint name of policy to be loaded.")
     argparse.add_argument("--resume_training", type=str, help="Checkpoint name to be resumed from. This will load the policy, image encoder and replay buffer.")
