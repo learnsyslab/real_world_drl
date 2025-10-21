@@ -297,6 +297,12 @@ class ImageEncoderWrapper(ObservationWrapper):
             device=self.device
         )
 
+        self._gpu_input_cpu = torch.zeros(
+            (2, 3, 224, 224),
+            dtype=torch.float32,
+            device=self.device
+        )
+
         # Normalization constants for ResNet
         self._mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1).to(self.device)
         self._std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1).to(self.device)
@@ -312,20 +318,20 @@ class ImageEncoderWrapper(ObservationWrapper):
 
         # Collect image keys
         image_keys = [k for k in observation.keys() if k.startswith("observation.images.")]
-        n_images = len(image_keys)
         t1 = time.time()
 
         # Convert images to GPU tensor directly and center crop
         for i, key in enumerate(image_keys):
-            img = torch.tensor(observation[key], dtype=torch.float32, device=self.device) / 255.0
+            img = torch.tensor(observation[key], dtype=torch.float32) / 255.0
             if img.shape[0] != 3:
                 img = img.permute(2, 0, 1)  # HWC -> CHW
             img = self._center_crop(img, size=224)
-            self._gpu_input[i] = img
+            self._gpu_input_cpu[i] = img
         t2 = time.time()
 
+
         # Normalize batch
-        batch_input = (self._gpu_input[:n_images] - self._mean) / self._std
+        batch_input = (self._gpu_input - self._mean) / self._std
         t3 = time.time()
 
         # Forward pass with TorchScript model
@@ -451,6 +457,7 @@ class InsertionResetWrapper(Wrapper):
 
         obs, info = self.env.reset(seed=seed, options=options)
         time.sleep(0.5)
+        info["reset.randomize.insert"] = randomize_insert_action
         return obs, info
     
     def step(self, action, block=False):

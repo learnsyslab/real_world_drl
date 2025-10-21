@@ -224,14 +224,16 @@ def main():
     os.mkdir(f"rollouts/{run_name}")
     run_number = 0
 
-    # load_actions_safe("v2_crafted_rel_acts_insert_plus32.json")
+    insert_trajectory = load_actions_safe("v3_put_down.json")
 
-    action_source = PlaybackActionSource([np.array([0.0, 0.0, 0.001, 0.0, 0.0, 0.0, 0.0])] * 150)
+    # action_source = PlaybackActionSource([np.array([0.0, 0.0, 0.001, 0.0, 0.0, 0.0, 0.0])] * 150)
 
     
     while True:
         obs, info = env.reset()
-        action_source.reset()
+
+        reset_action = -info["reset.randomize.insert"]
+        action_source = PlaybackActionSource(np.concatenate(([reset_action], [np.zeros(7)] * 5, insert_trajectory), axis=0))
 
 
         played_actions = []
