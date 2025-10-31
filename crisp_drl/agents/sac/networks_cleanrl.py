@@ -43,11 +43,13 @@ class SoftQNetwork(nn.Module):
         )
         self.fc2 = nn.Linear(256, 256)
         self.fc3 = nn.Linear(256, 1)
+        self.ln1 = nn.LayerNorm(256)
+        self.ln2 = nn.LayerNorm(256)
 
     def forward(self, x, a):
         x = torch.cat([x, a], 1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
+        x = F.relu(self.ln1(self.fc1(x)))
+        x = F.relu(self.ln2(self.fc2(x)))
         x = self.fc3(x)
         return x
 
@@ -72,7 +74,7 @@ class Actor(nn.Module):
         self.fc_mean = nn.Linear(256, np.prod(action_space.shape))
         self.fc_logstd = nn.Linear(256, np.prod(action_space.shape))
         # action rescaling
-        if self.config.max_action:
+        if self.config.max_action is not None:
             scale = self.config.max_action
             bias = 0.0
         else:
@@ -113,8 +115,8 @@ class Actor(nn.Module):
 
         # in crisp_gym envs, last action item is gripper value between 0 and 1
         action = y_t * self.action_scale + self.action_bias
-        if not self.is_gymnasium_env:
-            action[:,6] = (y_t[:,6] + 1) / 2
+        # if not self.is_gymnasium_env:
+        #    action[:,6] = (y_t[:,6] + 1) / 2
 
         log_prob = normal.log_prob(x_t)
         # Enforcing Action Bound

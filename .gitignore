@@ -8,3 +8,8 @@ checkpoints/
 pixi.lock
 parquet/
 *parquet*
+rollouts
+recordings
+tensorboard_logs
+expert_buffers
+*.mp4

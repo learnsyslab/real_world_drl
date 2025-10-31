@@ -1,4 +1,6 @@
+import copy
 import multiprocessing
+import os
 import time
 from typing import Any
 from gymnasium import RewardWrapper, ActionWrapper, ObservationWrapper, Wrapper
@@ -12,7 +14,8 @@ from torchvision.models import resnet18, ResNet18_Weights
 from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
 import torch.multiprocessing as mp
 from pynput import keyboard
-from crisp_gym.manipulator_env import ManipulatorCartesianEnv
+from gymnasium import spaces
+import imageio
 
 # Make cuDNN deterministic for consistent inference
 torch.backends.cudnn.benchmark = False
@@ -147,51 +150,6 @@ def append_or_insert(dictionary, key, value):
     else:
         dictionary[key] = [value]
 
-# class ImageEncoderWrapper(ObservationWrapper):
-#     def __init__(self, env):
-#         self.device = 'cuda:0'
-#         self.resnet18_transform = ResNet18_Weights.DEFAULT.transforms(antialias=True).to(self.device)
-#         self.resnet_18 = (
-#             resnet18(weights=ResNet18_Weights.DEFAULT, progress=False)
-#             .eval()
-#             .requires_grad_(False)
-#         )
-#         self.resnet_18.fc = torch.nn.modules.Identity()
-#         self.resnet_18.to(self.device)
-        
-#         super().__init__(env)
-
-#     def observation(self, observation):
-#         t0 = time.time()
-#         image_keys = list(filter(lambda k: k.startswith("observation.images."), observation.keys()))
-#         # Batch images and rescale to [0.0,1.0]
-#         image_tensor = torch.tensor(np.array(list(map(lambda key: observation[key], image_keys))), dtype=torch.float) / 255.0
-#         t1 = time.time()
-#         # Reshape to B,C,H,W
-#         if image_tensor.shape[1] != 3:
-#             image_tensor = image_tensor.permute(0, 3, 1, 2)
-#         # Apply pre-transform and resnet
-#         t2 = time.time()
-#         img_tensor = image_tensor.to(self.device)
-#         t3 = time.time()
-#         img_tensor = self.resnet18_transform(img_tensor)
-#         t4 = time.time()
-#         features = self.resnet_18(img_tensor)
-#         t5 = time.time()
-#         features = features.cpu()
-#         t6 = time.time()
-#         print(f"Image pre-processing took: Batching {(t1-t0)*1000:.3f}, Reshaping {(t2-t1)*1000:3f}, cpu->gpu {(t3-t2)*1000:.3f}, Pre-processing {(t4-t3)*1000:.3f}, resnet: {(t5-t4)*1000:.3f}, gpu->cpu {(t6-t5)*1000:.3f}")
-#         # un-batch images
-#         for i, key in enumerate(image_keys):
-#             observation[key] = features[i]
-#         return observation
-    
-    # def step(
-    #     self, action, block=False
-    # ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
-    #     observation, reward, terminated, truncated, info = self.env.step(action, block=block)
-    #     return self.observation(observation), reward, terminated, truncated, info
-
 class ImageEncoderWrapper(ObservationWrapper):
     # def __init__(self, env):
     #     self.device = 'cuda:0'
@@ -274,71 +232,75 @@ class ImageEncoderWrapper(ObservationWrapper):
 
     #     return observation
 
-    def __init__(self, env):
+    def __init__(self, env, n_cameras, image_size):
         self.device = 'cuda:0'
+        self.n_cameras = n_cameras
+        assert image_size == (256, 256), f"Only image size 256x256 supported, {image_size} was provided."
 
         super().__init__(env)
+        # Normalization constants for ResNet
+        self._mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1).to(self.device) * 255.0
+        self._std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1).to(self.device) * 255.0
 
         # Load ResNet-18 and remove classifier
-        model = resnet18(weights=ResNet18_Weights.DEFAULT)
-        model.eval()
-        model.fc = nn.Identity()  # remove the final classification layer
+        class Normalize(nn.Module):
+            def __init__(self, mean, std):
+                super().__init__()
+                # register buffers so they move with the model (.to(device)) and are not trained
+                self.register_buffer("mean", torch.tensor(mean).view(1, 3, 1, 1))
+                self.register_buffer("std", torch.tensor(std).view(1, 3, 1, 1))
+
+            def forward(self, x: torch.Tensor):
+                return (x.permute(0, 3, 1, 2) - self.mean) / self.std
+
+
+        # Load ResNet-18 backbone
+        backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
+        backbone.fc = nn.Identity()  # remove final classification layer
+
+        # Wrap model with normalization
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32) * 255.0  # ImageNet means
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32) * 255.0   # ImageNet stds
+        model = nn.Sequential(
+            Normalize(mean, std),
+            backbone
+        )
+
+        # model = resnet18(weights=ResNet18_Weights.DEFAULT)
+        # model.eval()
+        # model.fc = nn.Identity()  # remove the final classification layer
         model.to(self.device)
 
         # TorchScript trace for fast inference
-        dummy_input = torch.zeros(2, 3, 224, 224).to(self.device)
+        dummy_input = torch.zeros(self.n_cameras, 224, 224, 3, dtype=torch.float32).to(self.device)
         self.model = torch.jit.trace(model, dummy_input)
         self.model.eval()
 
-        # Pre-allocate GPU input tensor
         self._gpu_input = torch.zeros(
-            (2, 3, 224, 224),
+            (2, 224, 224, 3),
             dtype=torch.float32,
             device=self.device
         )
 
-        self._gpu_input_cpu = torch.zeros(
-            (2, 3, 224, 224),
-            dtype=torch.float32,
-            device=self.device
-        )
-
-        # Normalization constants for ResNet
-        self._mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1).to(self.device)
-        self._std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1).to(self.device)
-
-    def _center_crop(self, img, size=224):
-        _, h, w = img.shape
-        top = (h - size) // 2
-        left = (w - size) // 2
-        return img[:, top:top+size, left:left+size]
 
     def observation(self, observation):
-        t0 = time.time()
-
         # Collect image keys
         image_keys = [k for k in observation.keys() if k.startswith("observation.images.")]
+        assert len(image_keys) == self.n_cameras, f"Found {len(image_keys)} cameras, but specified was {self.n_cameras}"
+
+        t0 = time.time()
+        #torch.cuda.synchronize()
         t1 = time.time()
-
-        # Convert images to GPU tensor directly and center crop
         for i, key in enumerate(image_keys):
-            img = torch.tensor(observation[key], dtype=torch.float32) / 255.0
-            if img.shape[0] != 3:
-                img = img.permute(2, 0, 1)  # HWC -> CHW
-            img = self._center_crop(img, size=224)
-            self._gpu_input_cpu[i] = img
+            self._gpu_input[i] = torch.from_numpy(observation[key][16:240, 16:240])
+        #torch.cuda.synchronize()
         t2 = time.time()
-
-
-        # Normalize batch
-        batch_input = (self._gpu_input - self._mean) / self._std
-        t3 = time.time()
 
         # Forward pass with TorchScript model
         with torch.no_grad():
-            torch.cuda.synchronize()
-            features = self.model(batch_input)
-            torch.cuda.synchronize()
+            # torch.cuda.synchronize()
+            features = self.model(self._gpu_input)
+            # torch.cuda.synchronize()
         t4 = time.time()
 
         # Move features to CPU and assign back to observation
@@ -346,17 +308,15 @@ class ImageEncoderWrapper(ObservationWrapper):
         t5 = time.time()
         for i, key in enumerate(image_keys):
             observation[key] = features_cpu[i]
-        t6 = time.time()
 
         # Print detailed timings
-        print(f"Image pre-processing took: "
-              f"Collect keys {(t1-t0)*1000:.3f} ms, "
-              f"CPU->GPU + crop {(t2-t1)*1000:.3f} ms, "
-              f"Normalization {(t3-t2)*1000:.3f} ms, "
-              f"Inference {(t4-t3)*1000:.3f} ms, "
-              f"GPU->CPU {(t5-t4)*1000:.3f} ms, "
-              f"Assign back {(t6-t5)*1000:.3f} ms")
-
+        # print(f"Image pre-processing took: "
+        #       F"Total: {(t5-t0)*1000:.3f} ms, "
+        #       # F"Sync: {(t1-t0)*1000:.3f} ms, "
+        #       f"to GPU {(t2-t1)*1000:.3f} ms, "
+        #       f"Inference {(t4-t2)*1000:.3f} ms, "
+        #       f"GPU->CPU {(t5-t4)*1000:.3f} ms, "
+        #     )
         return observation
 
     def step(
@@ -371,12 +331,16 @@ class LastObservationWrapper(Wrapper):
         super().__init__(env)
         self.last_cartesian_state = None
         self.last_gripper_state = None
+        self.last_cartesian_error = None
+        self.last_gripper_error = None
     
     def reset(self, *, seed = None, options = None):
         observation, info = self.env.reset(seed=seed, options=options)
         current_cartesian_state = observation['observation.state.cartesian'][:3]
         current_gripper_state = observation["observation.state.gripper"]
         observation["observation.previous.action"] = np.zeros(self.env.action_space.shape)
+        observation["observation.previous.error.cartesian"] = np.zeros(3)
+        observation["observation.previous.error.gripper"] = np.zeros(1)
 
         observation["observation.velocity.cartesian"] = np.zeros_like(current_cartesian_state)
         observation["observation.error.cartesian"] = observation["observation.state.target"][:3] - current_cartesian_state
@@ -385,6 +349,8 @@ class LastObservationWrapper(Wrapper):
         
         self.last_cartesian_state = current_cartesian_state
         self.last_gripper_state = current_gripper_state
+        self.last_cartesian_error = observation["observation.error.cartesian"]
+        self.last_gripper_error = observation["observation.error.gripper"]
         return observation, info
     
     def step(self, action, block=False):
@@ -393,6 +359,8 @@ class LastObservationWrapper(Wrapper):
         current_gripper_state = observation["observation.state.gripper"]
 
         observation["observation.previous.action"] = action
+        observation["observation.previous.error.cartesian"] = self.last_cartesian_error
+        observation["observation.previous.error.gripper"] = self.last_gripper_error
 
         observation["observation.velocity.cartesian"] = current_cartesian_state - self.last_cartesian_state if self.last_cartesian_state is not None else np.zeros_like(current_cartesian_state)
         observation["observation.error.cartesian"] = observation["observation.state.target"][:3] - current_cartesian_state
@@ -401,16 +369,25 @@ class LastObservationWrapper(Wrapper):
         
         self.last_cartesian_state = current_cartesian_state
         self.last_gripper_state = current_gripper_state
+        self.last_cartesian_error = observation["observation.error.cartesian"]
+        self.last_gripper_error = observation["observation.error.gripper"]
         return observation, reward, terminated, truncated, info
 
 
-class ObservationConcatWrapper(ObservationWrapper):
-    def __init__(self, env, key_ranges):
+class ObservationFormatterWrapper(ObservationWrapper):
+    def __init__(self, env, keys_ranges_scales):
         super().__init__(env)
-        self.key_ranges = key_ranges
+        self.keys_ranges_scales = keys_ranges_scales
+        n_dim = sum(map(lambda krs: krs[1][1]-krs[1][0], self.keys_ranges_scales))  
+        self.observation_space = spaces.Box(low=np.full(n_dim, -np.inf), high=np.full(n_dim, np.inf))
+
 
     def observation(self, observation):
-        return np.concatenate((list(map(lambda kr: np.array(observation[kr[0]])[kr[1][0]:kr[1][1]], self.key_ranges))))
+        obs_list = []
+        for key, range_, scale in self.keys_ranges_scales:
+            extracted = np.array(observation[key])[range_[0]:range_[1]]
+            obs_list.append(extracted if scale == 1.0 else extracted * scale)
+        return np.concatenate(obs_list)
     
     def step(
         self, action, block=False
@@ -418,14 +395,58 @@ class ObservationConcatWrapper(ObservationWrapper):
         observation, reward, terminated, truncated, info = self.env.step(action, block=block)
         return self.observation(observation), reward, terminated, truncated, info
 
+class NoRotationActionWrapper(Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.action_space = spaces.Box(-np.inf, np.inf, (4,))
+
+    def action(self, action):
+        used_action = np.zeros(7)
+        used_action[:3] = action[:3]
+        used_action[6] = action[3]
+        return used_action
+    
+    def step(
+        self, action, block=False
+    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        return self.env.step(self.action(action), block=block)
+    
+class NoRotationNoGripperActionWrapper(Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.action_space = spaces.Box(-np.inf, np.inf, (3,))
+
+    def action(self, action):
+        return np.concatenate((action, np.zeros(4)))
+    
+    def step(
+        self, action, block=False
+    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        return self.env.step(self.action(action), block=block)
+
+class NoRotationNoGripperNoZActionWrapper(Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.action_space = spaces.Box(-np.inf, np.inf, (2,))
+
+    def action(self, action):
+        return np.concatenate((action, np.zeros(5)))
+    
+    def step(
+        self, action, block=False
+    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        return self.env.step(self.action(action), block=block)
+
+
 
 class InsertionResetWrapper(Wrapper):
-    def __init__(self, env, initial_pos, grasp_randomization_bounds, insert_randomization_bounds, action_sequence):
+    def __init__(self, env, initial_pos, grasp_randomization_bounds, insert_randomization_bounds, action_sequence_to_grasp, action_sequence_after_grasp):
         super().__init__(env)
         self.initial_pos = initial_pos
         self.grasp_randomization_bounds = grasp_randomization_bounds
         self.insert_randomization_bounds = insert_randomization_bounds
-        self.action_sequence = action_sequence
+        self.action_sequence_to_grasp = action_sequence_to_grasp
+        self.action_sequence_after_grasp = action_sequence_after_grasp
 
     
     def reset(
@@ -446,23 +467,47 @@ class InsertionResetWrapper(Wrapper):
         time.sleep(0.5)
         print("Reached starting state.")
 
-        for act in self.action_sequence:
+        for act in self.action_sequence_to_grasp:
             obs, *_ = self.env.step(act, block=True)
+        time.sleep(0.5)
+        obs = self.env._get_obs()
+        reset_grasped_position = obs['observation.state.cartesian'][:3].copy()
+        print("Executed grasp sequence")
+        for act in self.action_sequence_after_grasp:
+            obs, *_ = self.env.step(act, block=True)
+
+        randomize_grasp_action[0] = 0
+        randomize_grasp_action[2] = 0
+
         obs, *_ = self.env.step(-randomize_grasp_action, block=True)
         obs, *_ = self.env.step(randomize_insert_action, block=True)
         while np.linalg.norm(obs['observation.state.cartesian'][:3] - obs['observation.state.target'][:3]) > 0.003:
             obs, *_ = self.env.step(np.zeros(7), block=True)
         time.sleep(0.5)
-        print("Executed reset-sequence")
+        print("Executed randomization sequence")
 
         obs, info = self.env.reset(seed=seed, options=options)
         time.sleep(0.5)
         info["reset.randomize.insert"] = randomize_insert_action
+        info["reset.grasped.position"] = reset_grasped_position
         return obs, info
     
     def step(self, action, block=False):
         return self.env.step(action, block=block)
 
+
+class PrintCartesianInfoWrapper(Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+
+    def step(self, action, block=False):
+        observation, reward, terminated, truncated, info = self.env.step(action, block=block)
+        cartesian_error = observation['observation.state.target'][:3] - observation['observation.state.cartesian'][:3]
+        cartessian_state = observation['observation.state.cartesian'][:3]
+        with np.printoptions(precision=2, suppress=True):
+            print(f"Cartesian state: {cartessian_state*1000} mm")
+            print(f"Cartesian error: {cartesian_error*1000} mm")
+        return observation, reward, terminated, truncated, info
 
 class ActionTimeStampWrapper(ActionWrapper):
     def __init__(self, env):
@@ -484,54 +529,178 @@ class FarAwayTerminationWrapper(Wrapper):
         observation, reward, terminated, truncated, info = self.env.step(action, block=block)
 
         if np.linalg.norm(observation['observation.state.cartesian'][:3] - self.approximate_goal_pos) > self.max_distance:
+            append_or_insert(info, "custom_events", (time.time(), "E_FAR_AWAY"))
             terminated = True
-            append_or_insert(info, "custom_events", "E_FAR_AWAY")
             print(f"Terminated for being far away ({observation['observation.state.cartesian'][:3]} for goal pose {self.approximate_goal_pos})")
 
         return observation, reward, terminated, truncated, info
     
+class BelowZTerminationWrapper(Wrapper):
+    def __init__(self, env, min_z):
+        super().__init__(env)
+        self.min_z = min_z
 
+    def step(self, action, block=False):
+        observation, reward, terminated, truncated, info = self.env.step(action, block=block)
+
+        if observation['observation.state.cartesian'][2] < self.min_z:
+            append_or_insert(info, "custom_events", (time.time(), "E_BELOW_Z"))
+            terminated = True
+            print(f"Terminated for being too low ({observation['observation.state.cartesian'][2]} for min_z {self.min_z})")
+
+        return observation, reward, terminated, truncated, info
+
+class DictObservationToInfoMover(Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+    
+    def step(
+        self, action, block=False
+    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        observation, reward, terminated, truncated, info = self.env.step(action, block=block)
+        image_keys = [k for k in observation.keys() if k.startswith("observation.images.")]
+        info["observation"] = copy.copy(observation)
+        for key in image_keys:
+            info["observation"].pop(key)
+        return observation, reward, terminated, truncated, info
+    
+    def reset(self, *, seed = None, options = None):
+        obs, info = self.env.reset(seed=seed, options=options)
+        image_keys = [k for k in obs.keys() if k.startswith("observation.images.")]
+        info["observation"] = copy.copy(obs)
+        for key in image_keys:
+            info["observation"].pop(key)
+        return obs, info
+
+class VideoWrapper(Wrapper):
+    def __init__(self, env, video_dir, fps=30, camera_keys=[]):
+        super().__init__(env)
+        self.video_dir = video_dir
+        self.fps = fps
+        self.camera_keys = camera_keys
+        self.frames = [[] for _ in camera_keys]
+        os.makedirs(self.video_dir, exist_ok=True)
+        self.i = 0
+
+    def step(self, action, block=False):
+        observation, reward, terminated, truncated, info = self.env.step(action, block=block)
+        for cam_idx, cam_key in enumerate(self.camera_keys):
+            frame = observation[cam_key]
+            self.frames[cam_idx].append(frame)
+        return observation, reward, terminated, truncated, info
+    
+    def reset(self, *, seed = None, options = None):
+        obs, info = self.env.reset(seed=seed, options=options)
+        if len(self.frames[0]) > 0:
+            for cam_idx, cam_key in enumerate(self.camera_keys):
+                # with open(os.path.join(self.video_dir, f"episode_{self.i}_{cam_key}.mp4"), "w") as f:
+
+                imageio.mimwrite(os.path.join(self.video_dir, f"episode_{self.i}_{cam_key}.mp4"), self.frames[cam_idx], fps=self.fps, format='mp4', codec='libx264')
+            self.frames = [[obs[cam_key]] for cam_key in self.camera_keys]
+            self.i += 1
+        return obs, info
+    
+class NaiveToGoalPositionWrapper(ActionWrapper):
+    def __init__(self, env, step_size_xy=0.001, step_size_z=0.00033, xy_threshold=0.005, base_goal_position=np.array([0.541, -0.034,  0.0435]), ideal_grasp_position=np.array([0.58833, -0.13817,  0.04229]), coarse=False, randomize=False):
+        super().__init__(env)
+        self.step_size_xy = step_size_xy
+        self.step_size_z = step_size_z
+        self.xy_threshold = xy_threshold
+        self.base_goal_position = base_goal_position
+        self.ideal_grasp_pos = ideal_grasp_position
+        self.goal_position = None
+        self._obs = None
+        self.randomize = randomize
+        self.coarse = coarse
+
+    def reset(self, *, seed = None, options = None):
+        obs, info = self.env.reset(seed=seed, options=options)
+        actual_grasp_pos = info["reset.grasped.position"]
+        # compute actual goal position based on where the object was grasped
+        self.goal_position = self.base_goal_position.copy()
+        self.goal_position[0] += actual_grasp_pos[0] - self.ideal_grasp_pos[0] 
+        self.goal_position[2] += actual_grasp_pos[2] - self.ideal_grasp_pos[2]
+        if self.randomize:
+            self.goal_position[:2] += np.random.uniform(-self.xy_threshold / 2, self.xy_threshold / 2)
+        self._obs = obs
+        return obs, info
+
+    def step(self, base_action, block=False) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        # if xy close, go directly to goal, otherwise move only in xy direction
+        current_pos = self._obs['observation.state.cartesian'][:3]
+        action = np.zeros(7)
+        delta = self.goal_position - current_pos
+        norm_xy = np.linalg.norm(delta[:2])
+
+        if not self.coarse or norm_xy > self.xy_threshold:
+            action[:2] = delta[:2] * min(self.step_size_xy / norm_xy, 1.0)
+        else: # elif abs(self._obs['observation.state.target'][2] - self._obs['observation.state.cartesian'][2]) < 0.00175:
+            action[2] = delta[2] * min(self.step_size_z / abs(delta[2]), 1.0)
+
+        observation, reward, terminated, truncated, info = self.env.step(base_action + action, block=block)
+        # info['action.naive'] = np.copy(action)
+        self._obs = observation
+        return observation, reward, terminated, truncated, info
+    
 
 def controller_container_watcher(out_queue):
     # until first line of current.log split at " " changes
+    env = os.environ.copy()
+    env.pop("LD_LIBRARY_PATH", None)
+    env.pop("DYLD_LIBRARY_PATH", None)  # For macOS
+    env.pop("SSL_CERT_FILE", None)
+    env.pop("OPENSSL_CONF", None)
     while True:
-        t = threading.Timer(1.0, lambda: None)
-        t.start()
-        error_string = subprocess.run(["ssh", "linusschwarz@franka", r"grep -P 'cartesian_reflex|communication_constraints_violation|franka::NetworkException' /home/linusschwarz/crisp_controllers_demos/current.log"], capture_output=True, text=True).stdout
+
+        error_out = subprocess.run(["ssh", "linusschwarz@franka", r"grep -P 'cartesian_reflex|communication_constraints_violation|franka::NetworkException' /home/linusschwarz/crisp_controllers_demos/current.log"], capture_output=True, text=True, env=env)
+        error_string = error_out.stdout
         if len(error_string) < 5:
-            t.join()
+            error_err = error_out.stderr
+            if len(error_err) > 0:
+                print(f"Container watcher finished with error {error_err}")
+            time.sleep(0.5)
             continue
+
+        print(f"[CONTROLLER] Error: {error_string}")
         
         # look for the time code when the container crashed
         crash_time_str = error_string.split(" ")[0].strip("[]") # Time code in format 2025-10-16_10:45:26.554086 
-        t.cancel()
         crash_time_struct = time.strptime(crash_time_str.split(".")[0], "%Y-%m-%d_%H:%M:%S")
         crash_timestamp = time.mktime(crash_time_struct) + float("0." + crash_time_str.split(".")[1])
 
 
-        last_start_time_containing_string = subprocess.run(["ssh", "linusschwarz@franka", r"head -n 1 /home/linusschwarz/crisp_controllers_demos/current.log"], capture_output=True, text=True).stdout.split(" ")[0]
+        last_start_time_containing_proc = subprocess.run(["ssh", "linusschwarz@franka", r"head -n 1 /home/linusschwarz/crisp_controllers_demos/current.log"], capture_output=True, text=True, env=env)
+        last_start_time_containing_string = last_start_time_containing_proc.stdout.split(" ")[0]
 
         if 'cartesian_reflex' in error_string:
+            print(f"[CONTROLLER] Cartesian reflex")
             out_queue.put((crash_timestamp, "E_TORQUE"))
         else:
             out_queue.put((crash_timestamp, "E_CONTROLLER_ISSUE"))
+            print(f"[CONTROLLER] Controller issue")
+
+        last_start_time_containing_proc_err = last_start_time_containing_proc.stderr
+        if len(last_start_time_containing_proc_err) > 0:
+            print(f"Last time code extraction finished with error {last_start_time_containing_proc_err}")
         
         time.sleep(20)
 
         # wait until new container has launched
-        while subprocess.run(["ssh", "linusschwarz@franka", r"head -n 1 /home/linusschwarz/crisp_controllers_demos/current.log"], capture_output=True, text=True).stdout.split(" ")[0] == last_start_time_containing_string:
+        while subprocess.run(["ssh", "linusschwarz@franka", r"head -n 1 /home/linusschwarz/crisp_controllers_demos/current.log"], capture_output=True, text=True, env=env).stdout.split(" ")[0] == last_start_time_containing_string:
             time.sleep(2)
         
         # wait until topics are available
-        while "/joint_trajectory_controller/state" not in subprocess.run(["ssh", "linusschwarz@franka", r"source /opt/ros/humble/setup.bash && ROS_DOMAIN_ID=101 ros2 topic list"], capture_output=True, text=True).stdout:
+        while "/joint_trajectory_controller/state" not in subprocess.run(["ssh", "linusschwarz@franka", r"source /opt/ros/humble/setup.bash && ROS_DOMAIN_ID=101 ros2 topic list"], capture_output=True, text=True, env=env).stdout:
             time.sleep(5)
         out_queue.put((time.time(), "E_CONTROLLER_READY"))
+        print(f"[CONTROLLER] Controller READY")
 
 class ContainerWatcherWrapper(Wrapper):
     def __init__(self, env, ctx: mp.SpawnContext):
         super().__init__(env)
         self.controller_container_watcher_event_queue = ctx.Queue()
         self.controller_container_watcher_thread = multiprocessing.Process(target=controller_container_watcher, args=(self.controller_container_watcher_event_queue,))
+        self.controller_container_watcher_thread.daemon = True # such that it is automatically stopped when the main thread exits
         self.controller_container_watcher_thread.start()
         self.is_running = True
 
@@ -544,18 +713,19 @@ class ContainerWatcherWrapper(Wrapper):
         temp_events = []
         while not self.controller_container_watcher_event_queue.empty():
             _timestamp, event = self.controller_container_watcher_event_queue.get()
-            print(f"[CONTROLLER] Event: {event}")
+            print(f"[CONTROLLER] [RESET-backlog] Event: {event}")
             temp_events.append(event)
         if len(temp_events) > 0 and temp_events[-1] != "E_CONTROLLER_READY":
             self.is_running = False
 
         # Wait for E_READY
         while not self.is_running:
+            print(f"[CONTROLLER] [RESET] Not ready, waiting...")
             while self.controller_container_watcher_event_queue.empty():
                 time.sleep(0.3)
             _timestamp, event = self.controller_container_watcher_event_queue.get()
-            if event == "E_CONTAINER_READY":
-                print(f"[CONTROLLER] Event: {event}")
+            if event == "E_CONTROLLER_READY":
+                print(f"[CONTROLLER] [RESET-wait-ready] Event: {event}")
                 self.is_running = True
             else:
                 print(f"[CONTROLLER] Warning Skipping {event}, should have been container ready")
@@ -572,12 +742,13 @@ class ContainerWatcherWrapper(Wrapper):
         temp_events = []
         while not self.controller_container_watcher_event_queue.empty():
             timestamp, event = self.controller_container_watcher_event_queue.get()
-            print(f"[CONTROLLER] Event: {event}")
+            print(f"[CONTROLLER] [STEP] Event: {event}")
             temp_events.append((timestamp, event))
 
         # Terminater on Torque limit, truncate on container issue
         if len(temp_events) > 0:
             assert len(temp_events) == 1, f"At most one concurrent container event allowed, found {temp_events}"
+            self.is_running = False
 
             append_or_insert(info, "custom_events", temp_events[0])
             if temp_events[0][1] == "E_TORQUE":
@@ -603,65 +774,87 @@ class TimeMeasurementWrapper(Wrapper):
         info[f"dt_{self.n}"] = after - before
         return observation, reward, terminated, truncated, info
 
+
+def observation_has_z_pressure(observation, error_threshold=0.005, previous_error_threshold=0.003, min_z_height=0.055):
+    return abs(observation["observation.error.cartesian"][2]) > error_threshold and abs(observation["observation.previous.error.cartesian"][2]) > previous_error_threshold and observation["observation.state.cartesian"][2] < min_z_height 
+
+def observation_has_z_pressure_or_below(observation, error_threshold=0.005, previous_error_threshold=0.003, min_z_height=0.055, terminate_z_height=0.0475):
+    return (abs(observation["observation.error.cartesian"][2]) > error_threshold 
+            and abs(observation["observation.previous.error.cartesian"][2]) > previous_error_threshold 
+            and observation["observation.state.cartesian"][2] < min_z_height) or observation["observation.state.cartesian"][2] < terminate_z_height
+
+
 class CLIWrapper(Wrapper):
-    def  __init__(self, env, gripper_threshold):
+    def  __init__(self, env, termination_fn):
         super().__init__(env)
-        self.gripper_threshold = gripper_threshold
+        self.termination_fn = termination_fn
         self.listener = keyboard.Listener(on_press=self.on_press)
         self.listener.start()
         self.ready_key = 'r'
         self.environment_ready = False
         self.other_key = None
-        self.other_keys_to_check = ['s', 'f', 't']
-        self.other_key_to_event = {'s': "E_SUCCESS", 'f': "E_FAIL", 't': "E_TRUNCATE"}
+        self.other_keys_to_check = "sfub"
 
 
     def step(self, action, block=False):
         observation, reward, terminated, truncated, info = self.env.step(action, block=block)
         # wait for s/f when gripper open
-        if observation["observation.state.gripper"] > self.gripper_threshold:
+        if self.termination_fn(observation):
             terminated = True
             print("Place successful? ([s]uccess/[f]ail)")
             while True:
                 while self.other_key is None:
                     time.sleep(0.05)
-                if self.other_key not in "sf":
+                if self.other_key not in "sfu":
                     print(f"[CLI] Ignoring {self.other_key}, waiting for whether the run was success.")
                     self.other_key = None
                     continue
                 now = time.time()
-                event = self.other_key_to_event[self.other_key]
+                event = {'s': "E_SUCCESS", 'f': "E_FAIL", 'u': "E_ROLLOUT_UNUSABLE"}[self.other_key]
                 self.other_key = None
 
                 print(f"[CLI] {event}")
                 append_or_insert(info, "custom_events", (now, event))
                 break
 
-        elif self.other_key == "t":
-            truncated = True
-            event = self.other_key_to_event[self.other_key]
-            append_or_insert(info, "custom_events", (time.time(), event))
+        elif self.other_key is not None:
+            if self.other_key == "u":
+                truncated = True
+                append_or_insert(info, "custom_events", (time.time(), "E_ROLLOUT_UNUSABLE"))
+            elif self.other_key == "b":
+                terminated = True
+                append_or_insert(info, "custom_events", (time.time(), "E_BAD_BEHAVIOR"))
+            elif self.other_key == "s":
+                terminated = True
+                append_or_insert(info, "custom_events", (time.time(), "E_SUCCESS"))
+            elif self.other_key == "f":
+                terminated = True
+                append_or_insert(info, "custom_events", (time.time(), "E_FAIL"))
+            print(f"[CLI] processed {self.other_key}")
             self.other_key = None
-            print(f"[CLI] {event}")
                 
         return observation, reward, terminated, truncated, info
 
     def reset(self, *, seed = None, options = None):
         # wait for key "r"
         print(f"[CLI] Waiting for ready")
-        while not self.environment_ready:
-            time.sleep(0.1)
+        # while not self.environment_ready:
+        #     time.sleep(0.1)
         self.environment_ready = False
-        return self.env.reset(seed=seed, options=options)
-
+        obs, info = self.env.reset(seed=seed, options=options)
+        if self.other_key is not None and self.other_key != "u":
+            self.other_key = None
+        return obs, info 
 
 
     def on_press(self, key):
         try:
-            if key.char == self.ready_key:
+            char = key.char
+            if char == self.ready_key:
                 self.environment_ready = True
-            if key.char in self.other_keys_to_check:
+            elif char is not None and char in self.other_keys_to_check:
                 print(f"{key.char} is pressed!")
+                self.other_key = key.char
         except AttributeError:
             pass  # Special keys like shift, ctrl, etc.
 

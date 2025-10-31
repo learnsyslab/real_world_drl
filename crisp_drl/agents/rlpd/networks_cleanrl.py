@@ -66,7 +66,7 @@ class Actor(nn.Module):
         elif isinstance(observation_space, Box):
             input_size = observation_space.shape[0]
         else:
-            raise NotImplementedError("Observation space type not supported")
+            raise NotImplementedError(f"Observation space type {observation_space} not supported")
         self.config = config
         self.is_gymnasium_env = self.config.env_name in list(gym.envs.registry.keys())
         self.fc1 = nn.Linear(input_size, 256)
@@ -74,7 +74,7 @@ class Actor(nn.Module):
         self.fc_mean = nn.Linear(256, np.prod(action_space.shape))
         self.fc_logstd = nn.Linear(256, np.prod(action_space.shape))
         # action rescaling
-        if self.config.max_action:
+        if self.config.max_action is not None:
             scale = self.config.max_action
             bias = 0.0
         else:
@@ -114,11 +114,11 @@ class Actor(nn.Module):
         y_t = torch.tanh(x_t)
 
         # in crisp_gym envs, last action item is gripper value between 0 and 1
-        if not self.is_gymnasium_env:
-            action = y_t * self.action_scale + self.action_bias
-            action[:,6] = (y_t[:,6] + 1) / 2
-        else:
-            action = y_t * self.action_scale + self.action_bias
+        # if not self.is_gymnasium_env:
+        #     action = y_t * self.action_scale + self.action_bias
+        #     action[:,6] = (y_t[:,6] + 1) / 2
+        # else:
+        action = y_t * self.action_scale + self.action_bias
         log_prob = normal.log_prob(x_t)
         # Enforcing Action Bound
         # log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)

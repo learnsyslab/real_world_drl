@@ -19,10 +19,11 @@
 # copies or substantial portions of the Software.
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Tuple
 import os
 import gymnasium as gym
+import numpy as np
 
 
 @dataclass
@@ -37,7 +38,7 @@ class RLPD_Config:
     """if toggled, cuda will be enabled by default"""
 
     # Algorithm specific arguments
-    env_name: str = "FrankaCartesianEnv"
+    env_name: str = "my_env" #" FrankaCartesianEnv"
     # env_name: str = "Pendulum-v1"
     """the environment id of the task"""
     use_cameras: bool = True
@@ -66,15 +67,15 @@ class RLPD_Config:
     """number of Q networks to use for calculating the target value"""
     update_policy_after: int = 1
     """number of time steps after which the policy is updated"""
-    utd_ratio: float = 2.0
+    utd_ratio: float = 4.0
     """the ratio of policy updates to environment steps taken"""
     alpha: float = 0.2
     """Entropy regularization coefficient."""
     autotune: bool = True
     """automatic tuning of the entropy coefficient"""
-    max_action: float = 0.05 if env_name not in list(gym.envs.registry.keys()) else None
+    max_action: np.ndarray = field(default_factory=lambda: np.array([0.003, 0.003, 0.003])) if env_name not in list(gym.envs.registry.keys()) else None
     """the maximum norm of an action value the policy can output"""
-    control_frequency: int = 10
+    control_frequency: int = 15
     """the frequency at which the control commands are sent to the robot"""
 
     ## sparse rewards settings ##

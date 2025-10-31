@@ -31,7 +31,7 @@ import torch as th
 from gymnasium import spaces
 from joblib import dump, load
 
-from crisp_drl.data.utils import crisp_batch_obs_to_tensor
+from crisp_drl.data.utils import crisp_batch_concat_obs_to_tensor, crisp_batch_obs_to_tensor
 
 try:
     # Check memory used by replay buffer when possible
@@ -161,7 +161,6 @@ class BaseBuffer(ABC):
     :param action_space: Action space
     :param device: PyTorch device
         to which the values will be converted
-    :param n_envs: Number of parallel environments
     """
 
     observation_space: spaces.Space
@@ -174,13 +173,11 @@ class BaseBuffer(ABC):
         image_encoders: list[th.nn.Module],
         action_space: spaces.Space,
         device: th.device | str = "auto",
-        n_envs: int = 1,
     ):
         super().__init__()
         self.buffer_size = buffer_size
         self.observation_space = observation_space
         self.image_encoders = image_encoders
-        self.is_dict_observation = isinstance(observation_space, spaces.Dict)
         self.action_space = action_space
         self.obs_shape = get_obs_shape(observation_space)  # type: ignore[assignment]
 
@@ -188,22 +185,6 @@ class BaseBuffer(ABC):
         self.pos = 0
         self.full = False
         self.device = get_device(device)
-        self.n_envs = n_envs
-
-    @staticmethod
-    def swap_and_flatten(arr: np.ndarray) -> np.ndarray:
-        """
-        Swap and then flatten axes 0 (buffer_size) and 1 (n_envs)
-        to convert shape from [n_steps, n_envs, ...] (when ... is the shape of the features)
-        to [n_steps * n_envs, ...] (which maintain the order)
-
-        :param arr:
-        :return:
-        """
-        shape = arr.shape
-        if len(shape) < 3:
-            shape = (*shape, 1)
-        return arr.swapaxes(0, 1).reshape(shape[0] * shape[1], *shape[2:])
 
     def size(self) -> int:
         """
@@ -261,13 +242,29 @@ class BaseBuffer(ABC):
             by reference). This argument is inoperative if the device is not the CPU.
         :return:
         """
-        if array.dtype == np.dtype("O"):
-            return crisp_batch_obs_to_tensor(array, self.image_encoders, self.device, copy=copy)
+
+        if copy:
+            return th.tensor(array, device=self.device)
         else:
-            if copy:
-                return th.tensor(array, device=self.device)
-            else:
-                return th.as_tensor(array, device=self.device)
+            return th.as_tensor(array, device=self.device)
+        
+    def obs_to_torch(self, array, copy: bool = True) -> th.Tensor:
+        """
+        Convert buffer data array to a PyTorch tensor.
+        Note: it copies the data by default
+
+        :param array:
+        :param copy: Whether to copy or not the data (may be useful to avoid changing things
+            by reference). This argument is inoperative if the device is not the CPU.
+        :return:
+        """
+
+        if len(self.image_encoders) > 0:
+            return crisp_batch_concat_obs_to_tensor(array, self.image_encoders, self.device)
+        if copy:
+            return th.tensor(array, device=self.device)
+        else:
+            return th.as_tensor(array, device=self.device)
     
     def save_buffer(self, path: str) -> None:
         """
@@ -289,23 +286,13 @@ class ReplayBuffer(BaseBuffer):
     :param image_encoders: list of projection image encoders
     :param action_space: Action space
     :param device: PyTorch device
-    :param n_envs: Number of parallel environments
-    :param optimize_memory_usage: Enable a memory efficient variant
-        of the replay buffer which reduces by almost a factor two the memory used,
-        at a cost of more complexity.
-        See https://github.com/DLR-RM/stable-baselines3/issues/37#issuecomment-637501195
-        and https://github.com/DLR-RM/stable-baselines3/pull/28#issuecomment-637559274
-        Cannot be used in combination with handle_timeout_termination.
-    :param handle_timeout_termination: Handle timeout termination (due to timelimit)
-        separately and treat the task as infinite horizon task.
-        https://github.com/DLR-RM/stable-baselines3/issues/284
     """
 
     observations: np.ndarray
     next_observations: np.ndarray
     actions: np.ndarray
     rewards: np.ndarray
-    dones: np.ndarray
+    terminateds: np.ndarray
     timeouts: np.ndarray
 
     def __init__(
@@ -315,58 +302,32 @@ class ReplayBuffer(BaseBuffer):
         image_encoders: list[th.nn.Module],
         action_space: spaces.Space,
         device: th.device | str = "auto",
-        n_envs: int = 1,
-        optimize_memory_usage: bool = False,
-        handle_timeout_termination: bool = True,
     ):
-        super().__init__(buffer_size, observation_space, image_encoders, action_space, device, n_envs=n_envs)
+        super().__init__(buffer_size, observation_space, image_encoders, action_space, device)
 
         # Adjust buffer size
-        self.buffer_size = max(buffer_size // n_envs, 1)
+        self.buffer_size = max(buffer_size, 1)
 
         # Check that the replay buffer can fit into the memory
         if psutil is not None:
             mem_available = psutil.virtual_memory().available
 
-        # there is a bug if both optimize_memory_usage and handle_timeout_termination are true
-        # see https://github.com/DLR-RM/stable-baselines3/issues/934
-        if optimize_memory_usage and handle_timeout_termination:
-            raise ValueError(
-                "ReplayBuffer does not support optimize_memory_usage = True "
-                "and handle_timeout_termination = True simultaneously."
-            )
-        self.optimize_memory_usage = optimize_memory_usage
-
-        # check type of observation space (dict like in crisp_gym or box like in gymnasium)
-        if self.is_dict_observation:
-            self.observations = np.empty((self.buffer_size, self.n_envs, 1), dtype=object)
-            if not optimize_memory_usage:
-                # When optimizing memory, `observations` contains also the next observation
-                self.next_observations = np.empty((self.buffer_size, self.n_envs, 1), dtype=object)
-        else:
-            self.observations = np.zeros((self.buffer_size, self.n_envs, *self.obs_shape), dtype=np.float32)
-            if not optimize_memory_usage:
-                # When optimizing memory, `observations` contains also the next observation
-                self.next_observations = np.zeros((self.buffer_size, self.n_envs, *self.obs_shape), dtype=np.float32)
+        self.observations = np.zeros((self.buffer_size, *self.obs_shape), dtype=np.float32)
+        self.next_observations = np.zeros((self.buffer_size, *self.obs_shape), dtype=np.float32)
 
         self.actions = np.zeros(
-            (self.buffer_size, self.n_envs, self.action_dim), dtype=self._maybe_cast_dtype(action_space.dtype)
+            (self.buffer_size, self.action_dim), dtype=self._maybe_cast_dtype(action_space.dtype)
         )
 
-        self.rewards = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
-        self.dones = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
-        # Handle timeouts termination properly if needed
-        # see https://github.com/DLR-RM/stable-baselines3/issues/284
-        self.handle_timeout_termination = handle_timeout_termination
-        self.timeouts = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
+        self.rewards = np.zeros((self.buffer_size), dtype=np.float32)
+        self.terminateds = np.zeros((self.buffer_size), dtype=np.float32)
 
         if psutil is not None:
             total_memory_usage: float = (
-                self.observations.nbytes + self.actions.nbytes + self.rewards.nbytes + self.dones.nbytes
+                self.observations.nbytes + self.actions.nbytes + self.rewards.nbytes + self.terminateds.nbytes
             )
 
-            if not optimize_memory_usage:
-                total_memory_usage += self.next_observations.nbytes
+            total_memory_usage += self.next_observations.nbytes
 
             if total_memory_usage > mem_available:
                 # Convert to GB
@@ -377,83 +338,57 @@ class ReplayBuffer(BaseBuffer):
                     f"replay buffer {total_memory_usage:.2f}GB > {mem_available:.2f}GB"
                 )
 
-    def add(
+    def add_rollout(
         self,
-        obs: np.ndarray,
-        next_obs: np.ndarray,
-        action: np.ndarray,
-        reward: np.ndarray,
-        done: np.ndarray,
-        infos: list[dict[str, Any]],
+        obs: np.ndarray, # shape B+1, D_OBS
+        action: np.ndarray, # shape B, D_ACT
+        reward: np.ndarray, # shape B,
+        terminated: bool,
     ) -> None:
-        # Reshape needed when using multiple envs with discrete observations
-        # as numpy cannot broadcast (n_discrete,) to (n_discrete, 1)
-        if isinstance(self.observation_space, spaces.Discrete):
-            obs = obs.reshape((self.n_envs, *self.obs_shape))
-            next_obs = next_obs.reshape((self.n_envs, *self.obs_shape))
+        if isinstance(obs, th.Tensor):
+            obs = obs.cpu().numpy()
+        if isinstance(action, th.Tensor):
+            action = action.cpu().numpy()
+        if isinstance(reward, th.Tensor):
+            reward = reward.cpu().numpy()
+        batch_size, *_ = action.shape
+        # First handle before runover
+        if self.pos + batch_size > self.buffer_size:
+            self.observations[self.pos:] = obs[:self.buffer_size - self.pos]
+            self.next_observations[self.pos:] = obs[1:self.buffer_size - self.pos + 1]
+            self.actions[self.pos:] = action[:self.buffer_size - self.pos]
+            self.rewards[self.pos:] = reward[:self.buffer_size - self.pos]
+            self.terminateds[self.pos:] = False
 
-        # Reshape to handle multi-dim and discrete action spaces, see GH #970 #1392
-        action = action.reshape((self.n_envs, self.action_dim))
 
-        # Copy to avoid modification by reference
-        self.observations[self.pos] = obs
+            obs = obs[self.buffer_size - self.pos:]
+            action = action[self.buffer_size - self.pos:]
+            reward = reward[self.buffer_size - self.pos:]
 
-        if self.optimize_memory_usage:
-            self.observations[(self.pos + 1) % self.buffer_size] = next_obs
-        else:
-            self.next_observations[self.pos] = next_obs
+            batch_size -= self.buffer_size - self.pos
+            self.pos = 0
+            self.full = True
 
-        self.actions[self.pos] = np.array(action)
-        self.rewards[self.pos] = np.array(reward)
-        self.dones[self.pos] = np.array(done)
+        self.observations[self.pos:self.pos+batch_size] = obs[:-1]
+        self.next_observations[self.pos:self.pos+batch_size] = obs[1:]
+        self.actions[self.pos:self.pos+batch_size] = action
+        self.rewards[self.pos:self.pos+batch_size] = reward
+        self.terminateds[self.pos:self.pos+batch_size-1] = False
+        self.terminateds[self.pos+batch_size-1] = terminated
+            
 
-        if self.handle_timeout_termination:
-            self.timeouts[self.pos] = np.array([info.get("TimeLimit.truncated", False) for info in infos])
-
-        self.pos += 1
+        self.pos += batch_size
         if self.pos == self.buffer_size:
             self.full = True
             self.pos = 0
 
-    def sample(self, batch_size: int) -> ReplayBufferSamples:
-        """
-        Sample elements from the replay buffer.
-        Custom sampling when using memory efficient variant,
-        as we should not sample the element with index `self.pos`
-        See https://github.com/DLR-RM/stable-baselines3/pull/28#issuecomment-637559274
-
-        :param batch_size: Number of element to sample
-        :return:
-        """
-        if not self.optimize_memory_usage:
-            return super().sample(batch_size)
-        # Do not sample the element with index `self.pos` as the transitions is invalid
-        # (we use only one array to store `obs` and `next_obs`)
-        if self.full:
-            batch_inds = (np.random.randint(1, self.buffer_size, size=batch_size) + self.pos) % self.buffer_size
-        else:
-            batch_inds = np.random.randint(0, self.pos, size=batch_size)
-        return self._get_samples(batch_inds)
-
     def _get_samples(self, batch_inds: np.ndarray) -> ReplayBufferSamples:
-        # Sample randomly the env idx
-        env_indices = np.random.randint(0, high=self.n_envs, size=(len(batch_inds),))
-
-        if self.optimize_memory_usage:
-            next_obs = self.observations[(batch_inds + 1) % self.buffer_size, env_indices, :]
-        else:
-            next_obs = self.next_observations[batch_inds, env_indices, :]
-
-        data = (
-            self.observations[batch_inds, env_indices, :],
-            self.actions[batch_inds, env_indices, :],
-            next_obs,
-            # Only use dones that are not due to timeouts
-            # deactivated by default (timeouts is initialized as an array of False)
-            (self.dones[batch_inds, env_indices] * (1 - self.timeouts[batch_inds, env_indices])).reshape(-1, 1),
-            self.rewards[batch_inds, env_indices].reshape(-1, 1),
-        )
-        return ReplayBufferSamples(*tuple(map(self.to_torch, data)))
+        return ReplayBufferSamples(
+            self.obs_to_torch(self.observations[batch_inds, :]), 
+            self.to_torch(self.actions[batch_inds, :]),
+            self.obs_to_torch(self.next_observations[batch_inds, :]), 
+            self.to_torch(self.terminateds[batch_inds].reshape(-1, 1)),
+            self.to_torch(self.rewards[batch_inds].reshape(-1, 1)))
 
     @staticmethod
     def _maybe_cast_dtype(dtype: np.typing.DTypeLike) -> np.typing.DTypeLike:

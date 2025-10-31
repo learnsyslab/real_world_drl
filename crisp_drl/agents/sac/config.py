@@ -19,12 +19,12 @@
 # copies or substantial portions of the Software.
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 import gymnasium as gym
+import numpy as np
 
-
-@ dataclass
+@dataclass
 class SAC_Config:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
@@ -41,13 +41,13 @@ class SAC_Config:
     """the environment id of the task"""
     use_cameras: bool = True
     """if true, use camera image observations"""
-    total_timesteps: int = 100000
+    total_timesteps: int = 100_000
     """total timesteps of the experiments"""
     episode_length: int = 100
     """the maximum length of an episode"""
-    buffer_size: int = int(1e6)
+    buffer_size: int = 100_000
     """the replay memory buffer size"""
-    gamma: float = 0.99
+    gamma: float = 0.97
     """the discount factor gamma"""
     tau: float = 0.005
     """target smoothing coefficient (default: 0.005)"""
@@ -59,17 +59,21 @@ class SAC_Config:
     """the learning rate of the policy network optimizer"""
     q_lr: float = 5e-4
     """the learning rate of the Q network network optimizer"""
+    num_critics: int = 10
+    """number of Q networks to sample for calculating the target value"""
+    critic_subset_size: int = 2
+    """number of Q networks to use for calculating the target value"""
     update_policy_after: int = 1
     """number of time steps after which the policy is updated"""
-    utd_ratio: float = 1.0
+    utd_ratio: float = 2.0
     """the ratio of policy updates to environment steps taken"""
     alpha: float = 0.2
     """Entropy regularization coefficient."""
     autotune: bool = True
     """automatic tuning of the entropy coefficient"""
-    max_action: float = 0.05 if not env_name in list(gym.envs.registry.keys()) else None
+    max_action: np.ndarray = field(default_factory=lambda: np.array([0.001, 0.001])) if env_name not in list(gym.envs.registry.keys()) else None
     """the maximum norm of an action value the policy can output"""
-    control_frequency: int = 10
+    control_frequency: int = 15
     """the frequency at which the control commands are sent to the robot"""
 
     ## sparse rewards settings ## 

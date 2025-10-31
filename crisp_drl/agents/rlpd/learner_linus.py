@@ -22,12 +22,14 @@ class RLPDLearner:
     def __init__(self,
                  args,
                  action_space,
-                 observation_space,
+                 observation_space_networks,
+                 observation_space_buffers,
                  parameters_queue: mp.Queue,
-                 run_name: str):
+                 run_name: str, 
+                 n_cameras: int):
         
         # Store the configuration parameters
-        self.config = RLPD_Config
+        self.config = RLPD_Config()
         assert int(self.config.update_policy_after * self.config.utd_ratio) > 0, \
             "Invalid combination of update_policy_after and utd_ratio. " \
             "Ensure that int(update_policy_after * utd_ratio) > 0."
@@ -43,7 +45,7 @@ class RLPDLearner:
         torch.backends.cudnn.deterministic = self.config.torch_deterministic
 
         self.action_space = action_space
-        self.observation_space = observation_space
+        self.observation_space_networks = observation_space_networks
         self.parameters_queue = parameters_queue
 
         # summary writer for tensorboard
@@ -61,9 +63,9 @@ class RLPDLearner:
         self.load_model = args.resume_training or args.load_policy
 
         # initializing networks
-        self.actor = Actor(observation_space, action_space, self.config).to(self.device)
-        self.q_networks = [SoftQNetwork(self.observation_space, self.action_space).to(self.device) for _ in range(self.config.num_critics)]
-        self.q_target_networks = [SoftQNetwork(self.observation_space, self.action_space).to(self.device) for _ in range(self.config.num_critics)]
+        self.actor = Actor(self.observation_space_networks, action_space, self.config).to(self.device)
+        self.q_networks = [SoftQNetwork(self.observation_space_networks, self.action_space).to(self.device) for _ in range(self.config.num_critics)]
+        self.q_target_networks = [SoftQNetwork(self.observation_space_networks, self.action_space).to(self.device) for _ in range(self.config.num_critics)]
         
         # load model if specified
         if self.load_model is not None:
@@ -81,20 +83,20 @@ class RLPDLearner:
             self.image_encoders = [
                 torch.nn.Sequential(
                     torch.nn.Linear(512, 128), torch.nn.ReLU(), torch.nn.Linear(128, 128)
-                )
-                for _ in range(len(self.env.cameras))
+                ).to(self.device)
+                for _ in range(n_cameras)
             ]
             if self.load_model is not None:
-                for i, projection_head in enumerate(self.image_encoders):
-                    projection_head.load_state_dict(
+                for i, image_encoder in enumerate(self.image_encoders):
+                    image_encoder.load_state_dict(
                         torch.load(
                             f"checkpoints/{self.load_model}/image_encoder_{i}_state_dict.pth"
                         )
                     )
             # image encoder optimizer
             params = []
-            for projection_head in self.image_encoders:
-                params += list(projection_head.parameters())
+            for image_encoder in self.image_encoders:
+                params += list(image_encoder.parameters())
             self.img_encoder_optimizer = optim.Adam(params, lr=self.config.policy_lr)
         else:
             self.image_encoders = None           
@@ -115,11 +117,10 @@ class RLPDLearner:
         else:
             self.replay_buffer = ReplayBuffer(
                 buffer_size=self.config.buffer_size,
-                observation_space=observation_space,
+                observation_space=observation_space_buffers,
                 image_encoders=self.image_encoders,
                 action_space=action_space,
                 device=self.device,
-                handle_timeout_termination=False
             )
         # load expert buffer
         self.expert_buffer = load_buffer_from_file(self.args.expert_buffer_path, self.image_encoders)
@@ -142,40 +143,35 @@ class RLPDLearner:
         self.checkpoint_path = os.path.join("checkpoints", self.run_name)
         os.makedirs(self.checkpoint_path, exist_ok=True)
   
-    def run(self, data_queue: mp.Queue, episode_is_running: mp.Event):
+    def run(self, data_queue: mp.Queue):
         """Main process loop for the RLPD learner."""
         try:
             global_time_step = 0
             # check if a model was loaded (in that case we do not need to fill the buffer)
-            if self.load_model is None:
-                # Wait for enough data in the replay buffer before starting training
-                logging.info("Learner is waiting for the replay buffer to fill with initial exploration samples...")
-                for _ in range(self.config.learning_starts):
-                    obs, action, reward, new_obs, terminated, truncated, info = data_queue.get()
-                    self.replay_buffer.add(
-                        obs=obs, next_obs=new_obs, action=action, reward=reward, done=terminated or truncated, infos=[info]
-                    )
-                    global_time_step += 1
-            
+
             current_training_step = 0
             logging.info("Learner starts training...")
 
             while global_time_step < self.config.total_timesteps:
                 while data_queue.empty():
                     time.sleep(0.1)
-                while not data_queue.empty():
-                    obs, action, reward, new_obs, terminated, truncated, info = data_queue.get()
-                    self.replay_buffer.add(
-                            obs=obs, next_obs=new_obs, action=action, reward=reward,
-                            done=terminated or truncated, infos=info
-                        )
+                while not data_queue.empty():            
+                    obervations, actions, rewards, terminated = data_queue.get()
+                    episode_len = len(actions)
+                    self.replay_buffer.add_rollout(
+                        obs=np.array(obervations), action=np.array(actions), reward=np.array(rewards), terminated=terminated
+                    )
+                for _ in range(episode_len):
                     self._train_step(self.writer, current_training_step)
                     current_training_step += 1
                     global_time_step += 1
+                print(f"Learner finished training.")
 
-                # episode end
                 self._sync_nodes()
 
+        except SystemExit:
+            logging.info("Quit training request received. Closing learner process...")
+            self.close() 
         except KeyboardInterrupt:
             logging.info("Keyboard interrupt received. Terminating learner process...")
             self.close()
@@ -255,7 +251,7 @@ class RLPDLearner:
             if self.config.autotune:
                 writer.add_scalar("losses/alpha_loss", alpha_loss.item(), current_training_step)
             if self.use_camera_inputs:
-                writer.add_scalar("weights_img_encoder", self.image_encoders[0].fc[0].weight.data.norm().cpu().item(), current_training_step)
+                writer.add_scalar("weights_img_encoder", self.image_encoders[0][0].weight.data.norm().cpu().item(), current_training_step)
             writer.add_scalar("entropy", -log_pi.mean().item(), current_training_step)
             
             # model checkpoint
@@ -274,7 +270,7 @@ class RLPDLearner:
 
         proj_heads_parameters = None
         if self.use_camera_inputs:
-            proj_heads_parameters = [encoder.fc.state_dict() for encoder in self.image_encoders]
+            proj_heads_parameters = [encoder.state_dict() for encoder in self.image_encoders]
         self.parameters_queue.put((actor_parameters, proj_heads_parameters))
 
     def close(self):
@@ -289,7 +285,7 @@ class RLPDLearner:
             torch.save(self.q_target_networks[idx].state_dict(), os.path.join(self.checkpoint_path, f"qf{idx+1}_target_state_dict.pth"))
         torch.save(self.log_alpha, os.path.join(self.checkpoint_path, "log_alpha.pth"))
         for i, encoder in enumerate(self.image_encoders):
-            torch.save(encoder.fc.state_dict(), os.path.join(self.checkpoint_path, f"image_encoder_{i}_state_dict.pth"))
+            torch.save(encoder.state_dict(), os.path.join(self.checkpoint_path, f"image_encoder_{i}_state_dict.pth"))
         self.replay_buffer.save_buffer(self.checkpoint_path)
         torch.cuda.empty_cache()
         logging.info("Model parameters saved successfully.")
