@@ -13,7 +13,7 @@ from crisp_drl.agents.rlpd.actor import RLPDActor
 from crisp_drl.agents.rlpd.env_wrappers import ActionTimeStampWrapper, BelowZTerminationWrapper, CLIWrapper, DictObservationToInfoMover, ContainerWatcherWrapper, FarAwayTerminationWrapper, ImageEncoderWrapper, InsertionResetWrapper, LastObservationWrapper, ObservationFormatterWrapper, PrintCartesianInfoWrapper, TimeMeasurementWrapper, VideoWrapper, observation_has_z_pressure
 from crisp_drl.agents.rlpd.learner import RLPDLearner
 from crisp_drl.agents.rlpd.config import RLPD_Config
-from crisp_drl.agents.rlpd.rewards import place_reward, prune_after_async_termination
+from crisp_drl.agents.rlpd.rewards import sparse_place_reward, prune_after_async_termination
 from crisp_gym.manipulator_env import make_env
 from crisp_gym.util.rl_utils import load_actions_safe
 
@@ -94,10 +94,13 @@ class PlaybackActionSource:
         
 
 class NaiveToGoalPositionPolicy:
-    def __init__(self, goal_position, step_size=0.001):
-        self.i = 0
+    def __init__(self, goal_position, step_size_xy=0.001, step_size_z=0.00033, epsilon_magnitude=0.5, epsilon_direction=0.5):
+        self.step_size_xy = step_size_xy
+        self.step_size_z = step_size_z
         self.goal_position = goal_position
-        self.step_size = step_size
+        self.epsilon_magnitude = epsilon_magnitude
+        self.epsilon_direction = epsilon_direction
+
 
     def next(self, obs):
         # if xy close, go directly to goal, otherwise go in xy direction
@@ -105,9 +108,23 @@ class NaiveToGoalPositionPolicy:
         delta = self.goal_position - current_pos
         action = np.zeros(7)
         norm_xy = np.linalg.norm(delta[:2])
-        action[:2] = delta[:2] * min(self.step_size / norm_xy, 1.0)
-        if norm_xy <= 0.005:
-            action[2] = delta[2] * min(self.step_size / 2 / abs(delta[2]), 1.0)
+
+        do_random_direction = np.random.rand() > self.epsilon_direction
+        if do_random_direction:
+            angle = np.random.rand() * 2 * np.pi
+            random_magnitude = np.random.rand() * self.step_size_xy
+            action[:2] = np.array([np.cos(angle), np.sin(angle)]) * random_magnitude
+        else:
+            do_random_magnitude = np.random.rand() > self.epsilon_magnitude
+            if do_random_magnitude: 
+                random_magnitude = np.random.rand() * self.step_size_xy
+                action[:2] = delta[:2] / norm_xy * random_magnitude
+            else:
+                action[:2] = delta[:2] * min(self.step_size_xy / norm_xy, 1.0)
+                
+        
+        
+        action[2] = -self.step_size_z
         return action
 
 def launch_actor(args, run_name,):
@@ -139,24 +156,39 @@ def main():
     env.wait_until_ready()
     print("Env ready.")
 
-    env = InsertionResetWrapper(env, initial_pos=np.array([0.200, -0.020, -0.200]), grasp_randomization_bounds=(np.array([-0.003, -0.003, -0.001]), np.array([0.003, 0.003, 0.0015])), 
-                                insert_randomization_bounds=(np.array([-0.01, -0.01, 0.0]), np.array([0.01, 0.01, 0.005])), action_sequence_to_grasp=load_actions_safe("v3_go_to_pick.json"), action_sequence_after_grasp=load_actions_safe("v3_after_pick.json"))
+    # env = InsertionResetWrapper(env, initial_pos=np.array([0.200, -0.020, -0.200]), grasp_randomization_bounds=(np.array([-0.003, -0.003, -0.001]), np.array([0.003, 0.003, 0.0015])), 
+    #                             insert_randomization_bounds=(np.array([-0.01, -0.01, 0.0]), np.array([0.01, 0.01, 0.005])), action_sequence_to_grasp=load_actions_safe("v3_go_to_pick.json"), action_sequence_after_grasp=load_actions_safe("v3_after_pick.json"))
+    # env = ActionTimeStampWrapper(env)
+    # # env = PrintCartesianInfoWrapper(env)
+    # env = LastObservationWrapper(env)
+    # env = BelowZTerminationWrapper(env, min_z=0.0475)
+    # env = FarAwayTerminationWrapper(env, approximate_goal_pos=np.array([539.75, -33,  50]) * 0.001, max_distance=0.055)
+    # env = ContainerWatcherWrapper(env, ctx=mp.get_context("spawn"))
+
+    # env = CLIWrapper(env, termination_fn = functools.partial(observation_has_z_pressure, error_threshold=0.005, previous_error_threshold=0.003, min_z_height=0.055))
+    # env = VideoWrapper(env, video_dir=f"recordings/{run_name}", camera_keys = ["observation.images.wrist_camera", "observation.images.side_camera"], fps=15)
+
+    # env = ImageEncoderWrapper(env, n_cameras=2, image_size=(256, 256))
+    # env = DictObservationToInfoMover(env)
+    # # env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,3), 10.0), ('observation.previous.action', (6,7), 20.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0), ('observation.velocity.gripper', (0, 1), 20.0),
+    # #                                         ('observation.error.gripper', (0, 1), 20.0), ('observation.state.gripper', (0, 1), 1.0), ('observation.target.gripper', (0, 1), 1.0), ('observation.images.wrist_camera', (0, 512), 1.0), ('observation.images.side_camera', (0, 512), 1.0)])
+    # env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,3), 10.0), ('observation.previous.error.cartesian', (0,3), 10.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0), 
+    #                                                            ('observation.images.wrist_camera', (0, 512), 1.0), ('observation.images.side_camera', (0, 512), 1.0)]) # 268 or 1036
+
+    env = InsertionResetWrapper(env, initial_pos=np.array([0.200, -0.020, -0.200]), grasp_randomization_bounds=(np.array([-0.002, -0.002, -0.001]), np.array([0.002, 0.002, 0.001])), 
+                                insert_randomization_bounds=(np.array([-0.015, -0.015, 0.01]), np.array([0.015, 0.015, 0.02])), action_sequence_to_grasp=load_actions_safe("v3_go_to_pick.json"), action_sequence_after_grasp=load_actions_safe("v3_after_pick.json"))
     env = ActionTimeStampWrapper(env)
-    # env = PrintCartesianInfoWrapper(env)
     env = LastObservationWrapper(env)
-    env = BelowZTerminationWrapper(env, min_z=0.0475)
-    env = FarAwayTerminationWrapper(env, approximate_goal_pos=np.array([539.75, -33,  50]) * 0.001, max_distance=0.055)
     env = ContainerWatcherWrapper(env, ctx=mp.get_context("spawn"))
 
-    env = CLIWrapper(env, termination_fn = functools.partial(observation_has_z_pressure, error_threshold=0.005, previous_error_threshold=0.003, min_z_height=0.055))
-    env = VideoWrapper(env, video_dir=f"recordings/{run_name}", camera_keys = ["observation.images.wrist_camera", "observation.images.side_camera"], fps=15)
-
-    env = ImageEncoderWrapper(env, n_cameras=2, image_size=(256, 256))
+    env = CLIWrapper(env, termination_fn = lambda _obs: False) # obs["observation.state.cartesian"][2] < 0.049) # functools.partial(observation_has_z_pressure_or_below, error_threshold=0.005, previous_error_threshold=0.003, min_z_height=0.055, terminate_z_height = 0.0475))
+    env = VideoWrapper(env, video_dir=f"recordings/{run_name}", camera_keys = ["observation.images.wrist_camera"], fps=15)
+    env = ImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))
     env = DictObservationToInfoMover(env)
-    # env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,3), 10.0), ('observation.previous.action', (6,7), 20.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0), ('observation.velocity.gripper', (0, 1), 20.0),
-    #                                         ('observation.error.gripper', (0, 1), 20.0), ('observation.state.gripper', (0, 1), 1.0), ('observation.target.gripper', (0, 1), 1.0), ('observation.images.wrist_camera', (0, 512), 1.0), ('observation.images.side_camera', (0, 512), 1.0)])
-    env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,3), 10.0), ('observation.previous.error.cartesian', (0,3), 10.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0), 
-                                                               ('observation.images.wrist_camera', (0, 512), 1.0), ('observation.images.side_camera', (0, 512), 1.0)]) # 268 or 1036
+    env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,2), 10.0), ('observation.previous.error.cartesian', (0,3), 10.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0), 
+                                                            ('observation.images.wrist_camera', (0, 512), 1.0), 
+                                                            # ('observation.images.side_camera', (0, 512), 1.0)
+                                                            ]) # 268 or 1036
 
     argparse = ArgumentParser()
     argparse.add_argument("--run_name", type=str, default=None, help="Set the checkpoint name for the experiment. Per default the timestamp is used.")
@@ -176,10 +208,10 @@ def main():
 
 
     while True:
-        obs, info = env.reset()
+        obs, reset_info = env.reset()
 
-        reset_action = -info["reset.randomize.insert"]
-        actual_grasp_pos = info["reset.grasped.position"]
+        reset_action = -reset_info["reset.randomize.insert"]
+        actual_grasp_pos = reset_info["reset.grasped.position"]
         # action_source = PlaybackActionSource(np.concatenate(([reset_action / 10] * 10, insert_trajectory), axis=0))
 
         # compute actual goal position based on where the object was grasped
@@ -188,13 +220,14 @@ def main():
         goal_position[0] += actual_grasp_pos[0] - ideal_grasp_pos[0] 
         goal_position[2] += actual_grasp_pos[2] - ideal_grasp_pos[2]
         print(f"actual grasped pos: {(actual_grasp_pos-ideal_grasp_pos) * 1000} mm")
-        policy = NaiveToGoalPositionPolicy(goal_position=goal_position, step_size=0.001)
+        policy = NaiveToGoalPositionPolicy(goal_position=goal_position, step_size_xy=0.0008, step_size_z=0.00025, epsilon_direction=0.25, epsilon_magnitude=0.25)
 
 
         all_actions = []
         action_timestamps = []
         all_observations = [obs]
         all_infos = []
+        info = reset_info
         # collect rollout
         while True:
             # step environment
@@ -205,15 +238,11 @@ def main():
 
             all_actions.append(action)
             action_timestamps.append(time.time())
-            try:
-                # print(action)
-                obs, _reward, terminated, truncated, info = env.step(action, block=True)
-                # print(f"Error: {obs[7:10] * 1000} mm")
-            except Exception as e:
-                print(e)
-                print("Interrupted")
-                env.close()
-                sys.exit(0)
+
+            # print(action)
+            obs, _reward, terminated, truncated, info = env.step(action, block=True)
+            # print(f"Error: {obs[7:10] * 1000} mm")
+
             all_observations.append(obs)
             all_infos.append(info)
             
@@ -224,15 +253,15 @@ def main():
             print("Truncated, continuing.")
             continue
         all_actions, all_observations, all_infos = prune_after_async_termination(all_actions, all_observations, all_infos, {"E_CONTROLLER_ISSUE", "E_TORQUE"})
-        all_rewards = place_reward(all_actions, all_observations, all_infos, {"E_TORQUE": -10.0, "E_FAR_AWAY": -3.0, "E_BELOW_Z": -3.0, "E_SUCCESS": 10.0, "E_FAIL": -1.0, "E_BAD_BEHAVIOR": -5.0, "E_CONTROLLER_ISSUE": 0.0})
-        if all_rewards[-1] > 0:
-            print(f"Got reward {all_rewards[-1]}, saving run")
-            # Save data for complete rollout
-            with open(f"rollouts/{run_name}/{run_number}.pkl", "wb") as f:
-                pickle.dump({"actions": all_actions, "rewards": all_rewards, "observations": all_observations, "infos": all_infos, "actual_grasped_pos": actual_grasp_pos}, f)
-                run_number += 1
-        else:
-            print(f"Got negative reward {all_rewards[-1]}, skipping run")
+        all_rewards = sparse_place_reward(all_actions, all_observations, all_infos, {"E_TORQUE": -10.0, "E_FAR_AWAY": -3.0, "E_BELOW_Z": -3.0, "E_SUCCESS": 10.0, "E_FAIL": -1.0, "E_BAD_BEHAVIOR": -5.0, "E_CONTROLLER_ISSUE": 0.0})
+
+        print(f"Got reward {all_rewards[-1]}, saving run")
+        # Save data for complete rollout
+        with open(f"rollouts/{run_name}/{run_number}.pkl", "wb") as f:
+            pickle.dump({"actions": all_actions, "rewards": all_rewards, "observations": all_observations, 
+                            "infos": all_infos, "reset_info": reset_info}, f)
+            run_number += 1
+
 
 
 

@@ -21,7 +21,7 @@ from pathlib import Path
 from copy import deepcopy
 
 
-from crisp_drl.agents.rlpd.rewards import dense_place_reward, place_reward, prune_after_async_termination
+from crisp_drl.agents.rlpd.rewards import dense_place_reward, sparse_place_reward, prune_after_async_termination, xy_dense_place_reward
 from crisp_drl.agents.sac.config import SAC_Config
 from crisp_drl.agents.sac.networks_cleanrl import Actor
 from crisp_drl.agents.rlpd.env_wrappers import ActionTimeStampWrapper, BelowZTerminationWrapper, CLIWrapper, DictObservationToInfoMover, ContainerWatcherWrapper, FarAwayTerminationWrapper, ImageEncoderWrapper, InsertionResetWrapper, LastObservationWrapper, NaiveToGoalPositionWrapper, NoRotationActionWrapper, NoRotationNoGripperActionWrapper, NoRotationNoGripperNoZActionWrapper, ObservationFormatterWrapper, TimeMeasurementWrapper, observation_has_z_pressure, observation_has_z_pressure_or_below
@@ -75,9 +75,7 @@ class SACActor:
             if self.load_model is not None:
                 for i, image_encoder in enumerate(self.image_encoders):
                     image_encoder.load_state_dict(
-                        torch.load(
-                            f"checkpoints/{self.load_model}/image_encoder_{i}_state_dict.pth"
-                        )
+                        torch.load(f"checkpoints/{self.load_model}/image_encoder_{i}_state_dict.pth")
                     )
         else:
             self.image_encoders = None
@@ -97,12 +95,12 @@ class SACActor:
     
         try:
             # reset the episode variables
-            obs, info = self.env.reset(seed=self.config.seed)
-            actual_grasp_pos = info["reset.grasped.position"]
+            obs, reset_info = self.env.reset(seed=self.config.seed)
+            actual_grasp_pos = reset_info["reset.grasped.position"]
 
             all_actions = []
             all_observations = [obs]
-            all_infos = []
+            all_infos = [reset_info]
             t3 = None
             dts = {"enc": [], "actor": [], "step": [], "out": [], "loop": []}
 
@@ -143,10 +141,11 @@ class SACActor:
 
                     if "custom_events" in info and "E_ROLLOUT_UNUSABLE" in map(lambda entry: entry[1], info["custom_events"]):
                         global_step -= 1
-                        obs, info = self.env.reset() 
+                        obs, reset_info = self.env.reset() 
                         all_actions = []
                         all_observations = [obs]
-                        all_infos = [] 
+                        all_infos = [reset_info] 
+                        actual_grasp_pos = reset_info["reset.grasped.position"]
                         t3 = None
                         dts = {"enc": [], "actor": [], "step": [], "out": [], "loop": []}
                         continue
@@ -155,7 +154,11 @@ class SACActor:
                         all_actions, all_observations, all_infos = prune_after_async_termination(all_actions, all_observations, all_infos, {"E_CONTROLLER_ISSUE", "E_TORQUE"})
                         # all_rewards = dense_place_reward(all_actions, all_observations, all_infos, {"E_TORQUE": -10.0, "E_FAR_AWAY": -3.0, "E_BELOW_Z": -3.0, "E_SUCCESS": 10.0, "E_FAIL": -1.0, "E_BAD_BEHAVIOR": -5.0, "E_CONTROLLER_ISSUE": 0.0},
                         #              max_rew=0.01, ideal_goal_pos=[0.53975, -0.033,  0.05], ideal_grasp_pos=np.array([0.58833, -0.13817,  0.04229]), actual_grasp_pos=actual_grasp_pos, k_xy=0.005, k_z=0.002)
-                        all_rewards = place_reward(all_actions, all_observations, all_infos, {"E_TORQUE": -10.0, "E_FAR_AWAY": -3.0, "E_BELOW_Z": -3.0, "E_SUCCESS": 10.0, "E_FAIL": -2.0, "E_BAD_BEHAVIOR": -5.0, "E_CONTROLLER_ISSUE": 0.0})
+                        all_rewards = sparse_place_reward(all_actions, all_observations, all_infos)
+                        # all_rewards = xy_dense_place_reward(all_actions, all_observations, all_infos, max_rew=0.01, max_action_magnitude=0.0008,
+                        #                                      ideal_goal_pos_xy=np.array([0.53975, -0.033]), ideal_grasp_pos_xy=np.array([0.58833, -0.13817]), 
+                        #                                      actual_grasp_pos_xy=actual_grasp_pos[:2])
+                    
                         
                         data_queue.put((all_observations, all_actions, all_rewards, termination))
                         
@@ -185,12 +188,12 @@ class SACActor:
                     logging.info(f"Episode length: {episode_length}")
                     episode_length = 0
 
-                    obs, info = self.env.reset()
-                    actual_grasp_pos = info["reset.grasped.position"]
+                    obs, reset_info = self.env.reset()
+                    actual_grasp_pos = reset_info["reset.grasped.position"]
 
                     all_actions = []
                     all_observations = [obs]
-                    all_infos = [] 
+                    all_infos = [reset_info] 
                     t3 = None
                     dts = {"enc": [], "actor": [], "step": [], "out": [], "loop": []}
 
@@ -201,12 +204,11 @@ class SACActor:
 
         except SystemExit:
             logging.info("Quit Training request received. Terminating actor process...")
-            self.close()
         except KeyboardInterrupt:
             logging.info("Keyboard interrupt received. Terminating actor process...")
-            self.close()
         except Exception as e:
-            logging.error(f"An error occurred in the RLPD Actor: {e}", exc_info=True)
+            logging.error(f"An error occurred in the SAC Actor: {e}", exc_info=True)
+        finally:
             self.close()
 
     def close(self):
@@ -225,25 +227,22 @@ class SACActor:
         env.wait_until_ready()
         print("Env ready.")
 
-        env = InsertionResetWrapper(env, initial_pos=np.array([0.200, -0.020, -0.200]), grasp_randomization_bounds=(np.array([-0.002, -0.002, -0.001]), np.array([0.002, 0.002, 0.001])), 
-                                    insert_randomization_bounds=(np.array([-0.0001, -0.0001, 0.00]), np.array([0.0001, 0.0001, 0.0001])), action_sequence_to_grasp=load_actions_safe("v3_go_to_pick.json"), action_sequence_after_grasp=load_actions_safe("v3_after_pick.json"))
+        env = InsertionResetWrapper(env, initial_pos=np.array([0.200, -0.020, -0.200]), grasp_randomization_bounds=(np.array([-0.002, -0.002, -0.001]), np.array([0.002, 0.002, 0.001])),                             
+                                    insert_randomization_bounds=(np.array([-0.002, -0.002, 0.0]), np.array([0.002, 0.002, 0.0])), action_sequence_to_grasp=load_actions_safe("v4_go_to_pick.json"), action_sequence_after_grasp=load_actions_safe("v4_after_pick.json"))
         env = ActionTimeStampWrapper(env)
         env = LastObservationWrapper(env)
-        # env = BelowZTerminationWrapper(env, min_z=0.046)
-        # env = FarAwayTerminationWrapper(env, approximate_goal_pos=np.array([539.75, -33,  50]) * 0.001, max_distance=0.055)
         env = ContainerWatcherWrapper(env, ctx=multiprocessing.get_context("spawn"))
-
         env = CLIWrapper(env, termination_fn = lambda _obs: False) # obs["observation.state.cartesian"][2] < 0.049) # functools.partial(observation_has_z_pressure_or_below, error_threshold=0.005, previous_error_threshold=0.003, min_z_height=0.055, terminate_z_height = 0.0475))
-        env = NaiveToGoalPositionWrapper(env, coarse=True, randomize=False, step_size_xy=0.001, step_size_z=0.00025, xy_threshold=0.05, 
-                                         base_goal_position=np.array([0.541, -0.034,  0.0435]), ideal_grasp_position=np.array([0.58833, -0.13817,  0.04229]))
+        env = NaiveToGoalPositionWrapper(env, coarse=True, randomize=False, step_size_xy=0.01, step_size_z=0.00025, xy_threshold=0.1, 
+                                         base_goal_position=np.array([0.541, -0.034,  0.0435]), ideal_grasp_position=np.array([0.57155, -0.03254,  0.04243])) # [0.58833, -0.13817,  0.04229]))
         env = ImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))
         env = DictObservationToInfoMover(env)
         # env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,3), 10.0), ('observation.previous.action', (6,7), 20.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0), ('observation.velocity.gripper', (0, 1), 20.0),
         #                                         ('observation.error.gripper', (0, 1), 20.0), ('observation.state.gripper', (0, 1), 1.0), ('observation.target.gripper', (0, 1), 1.0), ('observation.images.wrist_camera', (0, 512), 1.0), ('observation.images.side_camera', (0, 512), 1.0)])
         env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,2), 10.0), ('observation.previous.error.cartesian', (0,3), 10.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0), 
-                                                                ('observation.images.wrist_camera', (0, 512), 1.0), 
-                                                                # ('observation.images.side_camera', (0, 512), 1.0)
-                                                                ]) # 268 or 1036
+                                                            ('observation.images.wrist_camera', (0, 512), 1.0), 
+                                                            # ('observation.images.side_camera', (0, 512), 1.0)
+                                                            ]) # 268 or 1036
         env = NoRotationNoGripperNoZActionWrapper(env)
 
         return env

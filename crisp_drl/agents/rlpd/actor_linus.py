@@ -1,5 +1,7 @@
 import functools
 import logging
+import multiprocessing
+import time
 import gymnasium as gym
 import torch
 import torch.multiprocessing as mp
@@ -7,7 +9,7 @@ import rclpy
 import random
 import numpy as np
 
-from crisp_drl.agents.rlpd.rewards import dense_place_reward, place_reward, prune_after_async_termination
+from crisp_drl.agents.rlpd.rewards import dense_place_reward, sparse_place_reward, prune_after_async_termination, xy_dense_place_reward
 from crisp_gym.manipulator_env_config import NoCamFrankaEnvConfig, FrankaEnvConfig
 from crisp_py.camera.camera_config import CameraConfig
 from crisp_py.gripper.gripper import GripperConfig
@@ -21,7 +23,7 @@ from copy import deepcopy
 
 from crisp_drl.agents.rlpd.config import RLPD_Config
 from crisp_drl.agents.rlpd.networks_cleanrl import Actor
-from crisp_drl.agents.rlpd.env_wrappers import ActionTimeStampWrapper, BelowZTerminationWrapper, CLIWrapper, DictObservationToInfoMover, ContainerWatcherWrapper, FarAwayTerminationWrapper, ImageEncoderWrapper, InsertionResetWrapper, LastObservationWrapper, NoRotationActionWrapper, NoRotationNoGripperActionWrapper, ObservationFormatterWrapper, TimeMeasurementWrapper, observation_has_z_pressure
+from crisp_drl.agents.rlpd.env_wrappers import ActionTimeStampWrapper, BelowZTerminationWrapper, CLIWrapper, DictObservationToInfoMover, ContainerWatcherWrapper, FarAwayTerminationWrapper, ImageEncoderWrapper, InsertionResetWrapper, LastObservationWrapper, NaiveToGoalPositionWrapper, NoRotationActionWrapper, NoRotationNoGripperActionWrapper, NoRotationNoGripperNoZActionWrapper, ObservationFormatterWrapper, TimeMeasurementWrapper, observation_has_z_pressure
 from crisp_drl.data.utils import crisp_batch_concat_obs_to_tensor, crisp_obs_to_tensor
 from crisp_drl.training.training_cli import clear_terminal
 
@@ -49,9 +51,7 @@ class RLPDActor:
         self.is_gymnasium_env = self.config.env_name in list(gym.envs.registry.keys())
 
         self.use_camera_inputs = self.config.use_cameras
-        self.device = torch.device(
-            "cuda" if torch.cuda.is_available() and self.config.cuda else "cpu"
-        )
+        self.device = torch.device("cuda" if torch.cuda.is_available() and self.config.cuda else "cpu")
         self.update_policy_after = self.config.update_policy_after
         self.learning_starts = self.config.learning_starts
         self.env = self._create_env()
@@ -60,13 +60,9 @@ class RLPDActor:
         self.load_model = args.resume_training or args.load_policy
 
         # policy
-        self.actor = Actor(
-            observation_space, self.env.action_space, self.config
-        ).to(self.device)
+        self.actor = Actor(observation_space, self.env.action_space, self.config).to(self.device)
         if self.load_model is not None:
-            self.actor.load_state_dict(
-                torch.load(f"checkpoints/{self.load_model}/actor_state_dict.pth")
-            )
+            self.actor.load_state_dict(torch.load(f"checkpoints/{self.load_model}/actor_state_dict.pth"))
 
         # image encoders
         if self.use_camera_inputs:
@@ -79,9 +75,7 @@ class RLPDActor:
             if self.load_model is not None:
                 for i, image_encoder in enumerate(self.image_encoders):
                     image_encoder.load_state_dict(
-                        torch.load(
-                            f"checkpoints/{self.load_model}/image_encoder_{i}_state_dict.pth"
-                        )
+                        torch.load(f"checkpoints/{self.load_model}/image_encoder_{i}_state_dict.pth")
                     )
         else:
             self.image_encoders = None
@@ -102,12 +96,14 @@ class RLPDActor:
 
         try:
             # reset the episode variables
-            obs, info = self.env.reset(seed=self.config.seed)
-            actual_grasp_pos = info["reset.grasped.position"]
+            obs, reset_info = self.env.reset(seed=self.config.seed)
+            actual_grasp_pos = reset_info["reset.grasped.position"]
 
             all_actions = []
             all_observations = [obs]
-            all_infos = []
+            all_infos = [reset_info]
+            t3 = None
+            dts = {"enc": [], "actor": [], "step": [], "out": [], "loop": []}
 
             episode_length = 0
             sum_of_returns = 0.0
@@ -115,25 +111,42 @@ class RLPDActor:
             episode_num = 0
 
             for global_step in range(self.config.total_timesteps):
+                t0 = time.perf_counter()
+                if t3 is not None:
+                    dts["out"].append(t0-t3)
                 obs_input = crisp_batch_concat_obs_to_tensor(torch.Tensor(obs).view(1, -1),  self.image_encoders, self.device)
+                t1 = time.perf_counter()
                 action, _, _ = self.actor.get_action(obs_input)
                 action = action.view(-1).detach().cpu().numpy()
 
+                t2 = time.perf_counter()
                 all_actions.append(action)
-                obs, _reward, termination, truncation, info = self.env.step(action)
+                obs, _reward, termination, truncation, info = self.env.step(action, block=True)
                 all_observations.append(obs)
                 all_infos.append(info)
+                done = termination or truncation
+
+
+                t3_ = time.perf_counter()
+                if not done:
+                    if t3 is not None:
+                        dts["loop"].append(t3_-t3)
+                    t3 = t3_
+                    dts["enc"].append(t1-t0)
+                    dts["actor"].append(t2-t1)
+                    dts["step"].append(t3-t2)
 
                 episode_length += 1
-
-                done = termination or truncation
                 if done:
                     if "custom_events" in info and "E_ROLLOUT_UNUSABLE" in map(lambda entry: entry[1], info["custom_events"]):
                         global_step -= 1
-                        obs, info = self.env.reset() 
+                        obs, reset_info = self.env.reset() 
                         all_actions = []
                         all_observations = [obs]
-                        all_infos = [] 
+                        all_infos = [reset_info] 
+                        actual_grasp_pos = reset_info["reset.grasped.position"]
+                        t3 = None
+                        dts = {"enc": [], "actor": [], "step": [], "out": [], "loop": []}
                         continue
 
 
@@ -141,54 +154,60 @@ class RLPDActor:
                     if not self.args.eval:
                         all_actions, all_observations, all_infos = prune_after_async_termination(all_actions, all_observations, all_infos, {"E_CONTROLLER_ISSUE", "E_TORQUE"})
                         # all_rewards = dense_place_reward(all_actions, all_observations, all_infos, {"E_TORQUE": -10.0, "E_FAR_AWAY": -3.0, "E_BELOW_Z": -3.0, "E_SUCCESS": 10.0, "E_FAIL": -1.0, "E_BAD_BEHAVIOR": -5.0, "E_CONTROLLER_ISSUE": 0.0}, max_rew=0.01, max_dist=0.05, ideal_goal_pos=np.array([0.53975, -0.033,  0.05]))
-                        all_rewards = dense_place_reward(all_actions, all_observations, all_infos, {"E_TORQUE": -10.0, "E_FAR_AWAY": -3.0, "E_BELOW_Z": -3.0, "E_SUCCESS": 10.0, "E_FAIL": -1.0, "E_BAD_BEHAVIOR": -5.0, "E_CONTROLLER_ISSUE": 0.0},
-                                        max_rew=0.01, ideal_goal_pos=[0.53975, -0.033,  0.05], ideal_grasp_pos=np.array([0.58833, -0.13817,  0.04229]), actual_grasp_pos=actual_grasp_pos, k_xy=0.005, k_z=0.002)
+                        # all_rewards = dense_place_reward(all_actions, all_observations, all_infos, {"E_TORQUE": -10.0, "E_FAR_AWAY": -3.0, "E_BELOW_Z": -3.0, "E_SUCCESS": 10.0, "E_FAIL": -1.0, "E_BAD_BEHAVIOR": -5.0, "E_CONTROLLER_ISSUE": 0.0},
+                        #                 max_rew=0.01, ideal_goal_pos=[0.53975, -0.033,  0.05], ideal_grasp_pos=np.array([0.58833, -0.13817,  0.04229]), actual_grasp_pos=actual_grasp_pos, k_xy=0.005, k_z=0.002)
+                        all_rewards = xy_dense_place_reward(all_actions, all_observations, all_infos, max_rew=0.01, max_action_magnitude=0.0008,
+                                        ideal_goal_pos_xy=np.array([0.53975, -0.033]), ideal_grasp_pos_xy=np.array([0.58833, -0.13817]), 
+                                        actual_grasp_pos_xy=actual_grasp_pos[:2])
                         data_queue.put((all_observations, all_actions, all_rewards, termination))
                         
                         episode_return = sum(all_rewards)
-                        self.writer.add_scalar(
-                            f"charts/episodic_return", episode_return, global_step
-                        )
-                        self.writer.add_scalar(
-                            f"charts/episodic_length", episode_length, global_step
-                        )
+                        self.writer.add_scalar(f"charts/episodic_return", episode_return, global_step)
+                        self.writer.add_scalar(f"charts/episodic_length", episode_length, global_step)
                         sum_of_returns += episode_return
-                        sum_of_squared_returns += episode_return**2
+                        sum_of_squared_returns += episode_return ** 2
                         episode_num += 1
-                        eps_return_std = (
-                            sum_of_squared_returns / episode_num
-                            - (sum_of_returns / episode_num) ** 2
-                        ) ** 0.5
-                        self.writer.add_scalar(
-                            f"charts/avg_return",
-                            sum_of_returns / episode_num,
-                            global_step,
-                        )
-                        self.writer.add_scalar(
-                            f"charts/eps_return_std", eps_return_std, global_step
-                        )
+                        eps_return_std = (sum_of_squared_returns / episode_num - (sum_of_returns / episode_num) ** 2) ** 0.5    
+                        self.writer.add_scalar(f"charts/avg_return", sum_of_returns / episode_num, global_step)
+                        self.writer.add_scalar(f"charts/eps_return_std", eps_return_std, global_step)
+
+                        self.writer.add_scalar(f"charts/t_encoding", np.mean(dts["enc"]), global_step)
+                        self.writer.add_scalar(f"charts/t_encoding_std", np.std(dts["enc"]), global_step)
+                        self.writer.add_scalar(f"charts/t_actor", np.mean(dts["actor"]), global_step)
+                        self.writer.add_scalar(f"charts/t_actor_std", np.std(dts["actor"]), global_step)
+                        self.writer.add_scalar(f"charts/t_stepping", np.mean(dts["step"]), global_step)
+                        self.writer.add_scalar(f"charts/t_stepping_std", np.std(dts["step"]), global_step)
+                        self.writer.add_scalar(f"charts/t_outside", np.mean(dts["out"]), global_step)
+                        self.writer.add_scalar(f"charts/t_outside_std", np.std(dts["out"]), global_step)
+                        self.writer.add_scalar(f"charts/t_loop", np.mean(dts["loop"]), global_step)
+                        self.writer.add_scalar(f"charts/t_loop_std", np.std(dts["loop"]), global_step)
 
                     # reset the episode variables
                     logging.info(f"Episode length: {episode_length}")
                     episode_length = 0
 
-                    obs, info = self.env.reset()
-                    actual_grasp_pos = info["reset.grasped.position"]
+                    obs, reset_info = self.env.reset()
+                    actual_grasp_pos = reset_info["reset.grasped.position"]
 
                     all_actions = []
                     all_observations = [obs]
-                    all_infos = [] 
+                    all_infos = [reset_info] 
+                    t3 = None
+                    dts = {"enc": [], "actor": [], "step": [], "out": [], "loop": []}
 
                     if not self.args.eval:
                         logging.info(f"Waiting for the learner to finish gradient updates...")
                         self._sync_nodes()
                         logging.info(f"Learner fininshed gradient updates.")
 
+
+        except SystemExit:
+            logging.info("Quit Training request received. Terminating actor process...")
         except KeyboardInterrupt:
             logging.info("Keyboard interrupt received. Terminating actor process...")
-            self.close()
         except Exception as e:
             logging.error(f"An error occurred in the RLPD Actor: {e}", exc_info=True)
+        finally:
             self.close()
 
     def close(self):
@@ -219,23 +238,23 @@ class RLPDActor:
         # env = ContainerWatcherWrapper(env, ctx=mp.get_context("spawn"))
         # env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,3), 10.0), ('observation.previous.action', (6,7), 20.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0), ('observation.velocity.gripper', (0, 1), 20.0),
         #                                         ('observation.error.gripper', (0, 1), 20.0), ('observation.state.gripper', (0, 1), 1.0), ('observation.target.gripper', (0, 1), 1.0), ('observation.images.wrist_camera', (0, 512), 1.0), ('observation.images.side_camera', (0, 512), 1.0)])
-        env = InsertionResetWrapper(env, initial_pos=np.array([0.200, -0.020, -0.200]), grasp_randomization_bounds=(np.array([-0.005, -0.005, -0.001]), np.array([0.005, 0.005, 0.002])), 
-                                    insert_randomization_bounds=(np.array([-0.01, -0.01, 0.0]), np.array([0.01, 0.01, 0.005])), action_sequence_to_grasp=load_actions_safe("v3_go_to_pick.json"), action_sequence_after_grasp=load_actions_safe("v3_after_pick.json"))
+        env = InsertionResetWrapper(env, initial_pos=np.array([0.200, -0.020, -0.200]), grasp_randomization_bounds=(np.array([-0.002, -0.002, -0.001]), np.array([0.002, 0.002, 0.001])),                             
+                                    insert_randomization_bounds=(np.array([-0.002, -0.002, 0.0]), np.array([0.002, 0.002, 0.0])), action_sequence_to_grasp=load_actions_safe("v3_go_to_pick.json"), action_sequence_after_grasp=load_actions_safe("v3_after_pick.json"))
         env = ActionTimeStampWrapper(env)
         env = LastObservationWrapper(env)
-        env = BelowZTerminationWrapper(env, min_z=0.0475)
-        env = FarAwayTerminationWrapper(env, approximate_goal_pos=np.array([539.75, -33,  50]) * 0.001, max_distance=0.055)
-        env = ContainerWatcherWrapper(env, ctx=mp.get_context("spawn"))
-
-        env = CLIWrapper(env, termination_fn = functools.partial(observation_has_z_pressure, error_threshold=0.005, previous_error_threshold=0.003, min_z_height=0.055))
-
-        env = ImageEncoderWrapper(env, n_cameras=2, image_size=(256, 256))
+        env = ContainerWatcherWrapper(env, ctx=multiprocessing.get_context("spawn"))
+        env = CLIWrapper(env, termination_fn = lambda _obs: False) # obs["observation.state.cartesian"][2] < 0.049) # functools.partial(observation_has_z_pressure_or_below, error_threshold=0.005, previous_error_threshold=0.003, min_z_height=0.055, terminate_z_height = 0.0475))
+        env = NaiveToGoalPositionWrapper(env, coarse=True, randomize=False, step_size_xy=0.01, step_size_z=0.00025, xy_threshold=0.1, 
+                                         base_goal_position=np.array([0.541, -0.034,  0.0435]), ideal_grasp_position=np.array([0.58833, -0.13817,  0.04229]))
+        env = ImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))
         env = DictObservationToInfoMover(env)
         # env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,3), 10.0), ('observation.previous.action', (6,7), 20.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0), ('observation.velocity.gripper', (0, 1), 20.0),
         #                                         ('observation.error.gripper', (0, 1), 20.0), ('observation.state.gripper', (0, 1), 1.0), ('observation.target.gripper', (0, 1), 1.0), ('observation.images.wrist_camera', (0, 512), 1.0), ('observation.images.side_camera', (0, 512), 1.0)])
-        env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,3), 10.0), ('observation.previous.error.cartesian', (0,3), 10.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0), 
-                                                                ('observation.images.wrist_camera', (0, 512), 1.0), ('observation.images.side_camera', (0, 512), 1.0)]) # 268 or 1036
-        env = NoRotationNoGripperActionWrapper(env)
+        env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,2), 10.0), ('observation.previous.error.cartesian', (0,3), 10.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0), 
+                                                            ('observation.images.wrist_camera', (0, 512), 1.0), 
+                                                            # ('observation.images.side_camera', (0, 512), 1.0)
+                                                            ]) # 268 or 1036
+        env = NoRotationNoGripperNoZActionWrapper(env)
 
         return env
 
@@ -247,9 +266,7 @@ class RLPDActor:
             for i, params in enumerate(proj_head_parameters):
                 self.image_encoders[i].load_state_dict(params)
 
-        logging.info(
-            "Actor received updated parameters for the policy and vision encoder."
-        )
+        logging.info("Actor received updated parameters for the policy and vision encoder.")
 
     def _clear_queue(self, queue: mp.Queue):
         while not queue.empty():

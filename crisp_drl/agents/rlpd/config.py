@@ -49,7 +49,7 @@ class RLPD_Config:
     """the maximum length of an episode"""
     buffer_size: int = int(1e6)
     """the replay memory buffer size"""
-    gamma: float = 0.99
+    gamma: float = 0.97
     """the discount factor gamma"""
     tau: float = 0.005
     """target smoothing coefficient (default: 0.005)"""
@@ -67,13 +67,13 @@ class RLPD_Config:
     """number of Q networks to use for calculating the target value"""
     update_policy_after: int = 1
     """number of time steps after which the policy is updated"""
-    utd_ratio: float = 4.0
+    utd_ratio: float = 2.0
     """the ratio of policy updates to environment steps taken"""
     alpha: float = 0.2
     """Entropy regularization coefficient."""
     autotune: bool = True
     """automatic tuning of the entropy coefficient"""
-    max_action: np.ndarray = field(default_factory=lambda: np.array([0.003, 0.003, 0.003])) if env_name not in list(gym.envs.registry.keys()) else None
+    max_action: np.ndarray = field(default_factory=lambda: np.array([0.001, 0.001])) if env_name not in list(gym.envs.registry.keys()) else None
     """the maximum norm of an action value the policy can output"""
     control_frequency: int = 15
     """the frequency at which the control commands are sent to the robot"""

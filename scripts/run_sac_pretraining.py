@@ -28,11 +28,6 @@ def launch_processes(args):
     rclpy.init()
     ctx = mp.get_context("spawn")
 
-    # for s, a, r, ns experience from the environment
-    data_queue = ctx.Queue()
-    # for policy parameters
-    parameters_queue = ctx.Queue()
-
     config = SAC_Config()
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     algo_name = str(os.path.dirname(__file__).split("/")[-1])
@@ -42,22 +37,12 @@ def launch_processes(args):
         run_name = f"{config.env_name}__{algo_name}__{timestamp}"
 
     try:
-        # start actor
-        actor_process = ctx.Process(target=launch_actor, args=(args,
-                                                               data_queue,
-                                                               parameters_queue,
-                                                               run_name,))
-        actor_process.start()
-        logging.info(f"RLPD actor process started with PID: {actor_process.pid}")
-
-        if not args.eval:
-            # start learner
-            learner_process = ctx.Process(target=launch_learner, args=(args,
-                                                                    data_queue, 
-                                                                    parameters_queue,
-                                                                    run_name))
-            learner_process.start()
-            logging.info(f"RLPD learner process started with PID: {learner_process.pid}")
+        # start learner
+        learner_process = ctx.Process(target=launch_learner, args=(args,
+                                                                None,
+                                                                run_name))
+        learner_process.start()
+        logging.info(f"SAC learner process started with PID: {learner_process.pid}")
 
         time.sleep(100000000)
 
@@ -66,45 +51,18 @@ def launch_processes(args):
 
     finally:
         with no_interrupts():
-            if "actor_process" in locals():
-                actor_process.join(timeout=10)
-                if not args.eval:
-                    learner_process.join(timeout=60)
 
-                if rclpy.ok():
-                    rclpy.shutdown()
+            learner_process.join(timeout=60)
+            if rclpy.ok():
+                rclpy.shutdown()
 
-                if actor_process.is_alive():
-                    logging.info(f"Trying to force terminating Actor Process.")
-                    actor_process.terminate()
-                    actor_process.join()
-                logging.info("SAC actor process terminated succesfully.")
+            if learner_process.is_alive():
+                logging.info(f"Trying to force terminating Learner Process with PID: {learner_process.pid}.")
+                learner_process.terminate()
+                learner_process.join()
+            logging.info("SAC learner process terminated succesfully.")
 
-                if not args.eval:
-                    if learner_process.is_alive():
-                        logging.info(f"Trying to force terminating Learner Process with PID: {learner_process.pid}.")
-                        learner_process.terminate()
-                        learner_process.join()
-                    logging.info("SAC learner process terminated succesfully.")
-                logging.info("All nodes terminated.")
-
-
-def launch_actor(args, data_queue, parameters_queue, run_name,):
-    logging.basicConfig(level=logging.INFO)
-    observation_space = spaces.Box(-np.inf, np.inf, (27,))
-    try:
-        actor = SACActor(args, parameters_queue, observation_space, run_name,)
-    except Exception as e:
-        logging.error(f"Failed to initialize SAC Actor: {e}", exc_info=True)
-        return
-
-    try:
-        actor.run(data_queue)
-    finally:
-        actor.close()
-        
-
-def launch_learner(args, data_queue, parameters_queue, run_name):
+def launch_learner(args, parameters_queue, run_name):
     logging.basicConfig(level=logging.INFO)
     action_space = spaces.Box(-np.inf, np.inf, (2,))
     observation_space_networks = spaces.Box(-np.inf, np.inf, (27,))
@@ -120,7 +78,9 @@ def launch_learner(args, data_queue, parameters_queue, run_name):
         return
 
     try:
-        learner.run(data_queue)
+        learner.pre_train()
+    except Exception as e:
+        logging.error(f"An error occurred in the SAC Learner: {e}", exc_info=True)
     finally:
         learner.close()
 

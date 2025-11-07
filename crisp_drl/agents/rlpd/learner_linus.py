@@ -82,7 +82,7 @@ class RLPDLearner:
         if self.use_camera_inputs:
             self.image_encoders = [
                 torch.nn.Sequential(
-                    torch.nn.Linear(512, 128), torch.nn.ReLU(), torch.nn.Linear(128, 128)
+                    torch.nn.Linear(512, 128), torch.nn.ReLU(), torch.nn.Linear(128, 16)
                 ).to(self.device)
                 for _ in range(n_cameras)
             ]

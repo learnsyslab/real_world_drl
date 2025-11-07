@@ -112,12 +112,17 @@ class SACLearner:
         if args.resume_training:
             self.q_optimizer.load_state_dict(torch.load(f"checkpoints/{self.load_model}/q_optimizer_state_dict.pth"))
             self.actor_optimizer.load_state_dict(torch.load(f"checkpoints/{self.load_model}/actor_optimizer_state_dict.pth"))
-        self._sync_nodes()
+
+        if self.args.pre_train is None:
+            self._sync_nodes()
 
         # initializing the replay buffer
         if self.args.resume_training is not None:
             self.replay_buffer = load_buffer_from_file(f"checkpoints/{self.args.resume_training}/replay_buffer.joblib", self.image_encoders)
             logging.info(f"Loaded replay buffer from checkpoints/{self.args.resume_training}/replay_buffer.joblib")
+        elif self.args.pre_train is not None:
+            self.replay_buffer = load_buffer_from_file(self.args.pre_train, self.image_encoders)
+            logging.info(f"Loaded pre-train buffer from {self.args.pre_train}")
         else:
             self.replay_buffer = ReplayBuffer(
                 buffer_size=self.config.buffer_size,
@@ -146,7 +151,24 @@ class SACLearner:
         self.run_name = os.path.basename(self.writer.log_dir)
         self.checkpoint_path = os.path.join("checkpoints", self.run_name)
         os.makedirs(self.checkpoint_path, exist_ok=True)
-  
+
+    def pre_train(self):
+        """Main process loop for the SAC learner."""
+        try:
+            logging.info("Learner starts training...")
+            for current_training_step in range(int(self.replay_buffer.size() * self.config.utd_ratio)):
+                self._train_step(self.writer, current_training_step)
+            print(f"Learner finished training.")
+
+        except SystemExit:
+            logging.info("Quit training request received. Closing learner process...") 
+        except KeyboardInterrupt:
+            logging.info("Keyboard interrupt received. Terminating learner process...")
+        except Exception as e:
+            logging.error(f"An error occurred in the RLPD Learner: {e}", exc_info=True)
+        finally:
+            self.close()
+
     def run(self, data_queue: mp.Queue):
         """Main process loop for the SAC learner."""
         try:

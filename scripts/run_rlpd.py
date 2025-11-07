@@ -79,7 +79,7 @@ def launch_processes(args):
 
 def launch_actor(args, data_queue, parameters_queue, run_name,):
     logging.basicConfig(level=logging.INFO)
-    observation_space = spaces.Box(-np.inf, np.inf, (268,))
+    observation_space = spaces.Box(-np.inf, np.inf, (27,))
     try:
         actor = RLPDActor(args, parameters_queue, observation_space, run_name)
     except Exception as e:
@@ -94,14 +94,13 @@ def launch_actor(args, data_queue, parameters_queue, run_name,):
 
 def launch_learner(args, data_queue, parameters_queue, run_name):
     logging.basicConfig(level=logging.INFO)
-    action_space = spaces.Box(-np.inf, np.inf, (3,))
-    observation_space_networks = spaces.Box(-np.inf, np.inf, (268,))
-    observation_space_buffers = spaces.Box(-np.inf, np.inf, (1036,))
+    action_space = spaces.Box(-np.inf, np.inf, (2,))
+    observation_space_networks = spaces.Box(-np.inf, np.inf, (27,))
+    observation_space_buffers = spaces.Box(-np.inf, np.inf, (523,))
     try:
         learner = RLPDLearner(args,
                               action_space, observation_space_networks=observation_space_networks, observation_space_buffers=observation_space_buffers,
-                             parameters_queue=parameters_queue,
-                             run_name=run_name, n_cameras=2)
+                             parameters_queue=parameters_queue, run_name=run_name, n_cameras=1)
     except Exception as e:
         logging.info(f"Failed to initialize RLPD Learner: {e}", exc_info=True)
         return
