@@ -5,10 +5,27 @@ import time
 import numpy as np
 import multiprocessing as mp
 
-from crisp_drl.agents.rlpd.env_wrappers import ActionTimeStampWrapper, BelowZTerminationWrapper, CLIWrapper, DictObservationToInfoMover, ContainerWatcherWrapper, FarAwayTerminationWrapper, ImageEncoderWrapper, InsertionResetWrapper, LastObservationWrapper, NaiveToGoalPositionWrapper, NoRotationActionWrapper, NoRotationNoGripperActionWrapper, ObservationFormatterWrapper, TimeMeasurementWrapper, observation_has_z_pressure
+from crisp_drl.agents.rlpd.env_wrappers import (
+    ActionTimeStampWrapper,
+    BelowZTerminationWrapper,
+    CLIWrapper,
+    DictObservationToInfoMover,
+    ContainerWatcherWrapper,
+    FarAwayTerminationWrapper,
+    ImageEncoderWrapper,
+    InsertionResetWrapper,
+    LastObservationWrapper,
+    NaiveToGoalPositionWrapper,
+    NoRotationActionWrapper,
+    NoRotationNoGripperActionWrapper,
+    ObservationFormatterWrapper,
+    TimeMeasurementWrapper,
+    observation_has_z_pressure,
+)
 
 from crisp_gym.manipulator_env import make_env
 from crisp_gym.util.rl_utils import load_actions_safe
+
 # %% === Circle Parameters ===
 RADIUS = 0.1  # [m]
 CENTER = np.array([0.5, -0.15, 0.3])
@@ -20,7 +37,7 @@ SIN_FREQ = 0.1  # frequency of circular motion in Hz
 env = make_env("my_env")
 env.wait_until_ready()
 
-# env = InsertionResetWrapper(env, initial_pos=np.array([0.200, -0.020, -0.200]), grasp_randomization_bounds=(np.array([-0.005, -0.005, -0.001]), np.array([0.005, 0.005, 0.002])), 
+# env = InsertionResetWrapper(env, initial_pos=np.array([0.200, -0.020, -0.200]), grasp_randomization_bounds=(np.array([-0.005, -0.005, -0.001]), np.array([0.005, 0.005, 0.002])),
 #                             insert_randomization_bounds=(np.array([-0.01, -0.01, 0.0]), np.array([0.01, 0.01, 0.005])), action_sequence_to_grasp=load_actions_safe("v3_go_to_pick.json"), action_sequence_after_grasp=load_actions_safe("v3_after_pick.json"))
 env = ActionTimeStampWrapper(env)
 env = LastObservationWrapper(env)
@@ -34,8 +51,15 @@ env = LastObservationWrapper(env)
 env = DictObservationToInfoMover(env)
 # env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,3), 10.0), ('observation.previous.action', (6,7), 20.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0), ('observation.velocity.gripper', (0, 1), 20.0),
 #                                         ('observation.error.gripper', (0, 1), 20.0), ('observation.state.gripper', (0, 1), 1.0), ('observation.target.gripper', (0, 1), 1.0), ('observation.images.wrist_camera', (0, 512), 1.0), ('observation.images.side_camera', (0, 512), 1.0)])
-env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,3), 10.0), ('observation.previous.error.cartesian', (0,3), 10.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0), 
- ]) # ('observation.images.wrist_camera', (0, 512), 1.0), ('observation.images.side_camera', (0, 512), 1.0)]) # 268 or 1036
+env = ObservationFormatterWrapper(
+    env,
+    keys_ranges_scales=[
+        ("observation.previous.action", (0, 3), 10.0),
+        ("observation.previous.error.cartesian", (0, 3), 10.0),
+        ("observation.velocity.cartesian", (0, 3), 100.0),
+        ("observation.error.cartesian", (0, 3), 10.0),
+    ],
+)  # ('observation.images.wrist_camera', (0, 512), 1.0), ('observation.images.side_camera', (0, 512), 1.0)]) # 268 or 1036
 env = NoRotationNoGripperActionWrapper(env)
 
 # %% === Move to Starting Point ===
@@ -77,7 +101,10 @@ try:
         delta = time.time() - t0
         diffs = np.diff(ts)
         std = np.std(diffs)
-        print(f"Completed circle of {steps=} in {delta:.2f} seconds, effective freq: {steps / delta:.2f} Hz, std dev: {std*1000:.2f} ms")
+        print(
+            f"Completed circle of {steps=} in {delta:.2f} seconds, effective freq: {steps / delta:.2f} Hz, "
+            f"std dev: {std * 1000:.2f} ms"
+        )
         obs, _ = env.reset()
 
 except KeyboardInterrupt:
@@ -86,9 +113,3 @@ except KeyboardInterrupt:
     env.home()
 
     env.close()
-
-
-
-
-
-

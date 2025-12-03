@@ -27,6 +27,9 @@ from gymnasium.spaces import Dict, Box
 
 from crisp_drl.data.utils import get_input_size_from_dict_space
 
+ACTOR_HIDDEN_SIZE = 128
+Q_HIDDEN_SIZE = 128
+
 
 class SoftQNetwork(nn.Module):
     def __init__(self, observation_space, action_space):
@@ -39,12 +42,12 @@ class SoftQNetwork(nn.Module):
             raise NotImplementedError("Observation space type not supported")
         self.fc1 = nn.Linear(
             obs_size + np.prod(action_space.shape),
-            256,
+            Q_HIDDEN_SIZE,
         )
-        self.fc2 = nn.Linear(256, 256)
-        self.fc3 = nn.Linear(256, 1)
-        self.ln1 = nn.LayerNorm(256)
-        self.ln2 = nn.LayerNorm(256)
+        self.fc2 = nn.Linear(Q_HIDDEN_SIZE, Q_HIDDEN_SIZE)
+        self.fc3 = nn.Linear(Q_HIDDEN_SIZE, 1)
+        self.ln1 = nn.LayerNorm(Q_HIDDEN_SIZE)
+        self.ln2 = nn.LayerNorm(Q_HIDDEN_SIZE)
 
     def forward(self, x, a):
         x = torch.cat([x, a], 1)
@@ -69,10 +72,10 @@ class Actor(nn.Module):
             raise NotImplementedError("Observation space type not supported")
         self.config = config
         self.is_gymnasium_env = self.config.env_name in list(gym.envs.registry.keys())
-        self.fc1 = nn.Linear(input_size, 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc_mean = nn.Linear(256, np.prod(action_space.shape))
-        self.fc_logstd = nn.Linear(256, np.prod(action_space.shape))
+        self.fc1 = nn.Linear(input_size, ACTOR_HIDDEN_SIZE)
+        self.fc2 = nn.Linear(ACTOR_HIDDEN_SIZE, ACTOR_HIDDEN_SIZE)
+        self.fc_mean = nn.Linear(ACTOR_HIDDEN_SIZE, np.prod(action_space.shape))
+        self.fc_logstd = nn.Linear(ACTOR_HIDDEN_SIZE, np.prod(action_space.shape))
         # action rescaling
         if self.config.max_action is not None:
             scale = self.config.max_action
@@ -80,7 +83,7 @@ class Actor(nn.Module):
         else:
             scale = (action_space.high - action_space.low) / 2.0
             bias = (action_space.high + action_space.low) / 2.0
-            
+
         self.register_buffer(
             "action_scale",
             torch.tensor(
@@ -102,7 +105,9 @@ class Actor(nn.Module):
         mean = self.fc_mean(x)
         log_std = self.fc_logstd(x)
         log_std = torch.tanh(log_std)
-        log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)  # From SpinUp / Denis Yarats
+        log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (
+            log_std + 1
+        )  # From SpinUp / Denis Yarats
 
         return mean, log_std
 

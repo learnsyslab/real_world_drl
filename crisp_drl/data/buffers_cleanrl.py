@@ -31,7 +31,10 @@ import torch as th
 from gymnasium import spaces
 from joblib import dump, load
 
-from crisp_drl.data.utils import crisp_batch_concat_obs_to_tensor, crisp_batch_obs_to_tensor
+from crisp_drl.data.utils import (
+    crisp_batch_concat_obs_to_tensor,
+    crisp_batch_obs_to_tensor,
+)
 
 try:
     # Check memory used by replay buffer when possible
@@ -92,7 +95,7 @@ def get_action_dim(action_space: spaces.Space) -> int:
 
 
 def get_obs_shape(
-    observation_space: spaces.Space
+    observation_space: spaces.Space,
 ) -> tuple[int, ...] | dict[str, tuple[int, ...]]:
     """
     Get the shape of the observation (useful for the buffers).
@@ -112,9 +115,16 @@ def get_obs_shape(
         # Number of binary features
         return observation_space.shape
     elif isinstance(observation_space, spaces.Dict):
-        return {key: get_obs_shape(subspace) for (key, subspace) in observation_space.spaces.items() if not key in ["observation.state.joint", "task", "observation.state.target"]}  # type: ignore[misc]
+        return {
+            key: get_obs_shape(subspace)
+            for (key, subspace) in observation_space.spaces.items()
+            if key
+            not in ["observation.state.joint", "task", "observation.state.target"]
+        }  # type: ignore[misc]
     else:
-        raise NotImplementedError(f"{observation_space} observation space is not supported")
+        raise NotImplementedError(
+            f"{observation_space} observation space is not supported"
+        )
 
 
 def get_device(device: th.device | str = "auto") -> th.device:
@@ -143,11 +153,11 @@ def get_device(device: th.device | str = "auto") -> th.device:
 def load_buffer_from_file(path: str, image_encoders) -> BaseBuffer:
     """
     Load the replay buffer from a file.
-    
+
     :param path: Path to the file from which to load the buffer
     """
     buffer = load(path)
-    
+
     buffer.image_encoders = image_encoders
     return buffer
 
@@ -225,7 +235,9 @@ class BaseBuffer(ABC):
         return self._get_samples(batch_inds)
 
     @abstractmethod
-    def _get_samples(self, batch_inds: np.ndarray) -> ReplayBufferSamples | RolloutBufferSamples:
+    def _get_samples(
+        self, batch_inds: np.ndarray
+    ) -> ReplayBufferSamples | RolloutBufferSamples:
         """
         :param batch_inds:
         :return:
@@ -247,7 +259,7 @@ class BaseBuffer(ABC):
             return th.tensor(array, device=self.device)
         else:
             return th.as_tensor(array, device=self.device)
-        
+
     def obs_to_torch(self, array, copy: bool = True) -> th.Tensor:
         """
         Convert buffer data array to a PyTorch tensor.
@@ -260,12 +272,14 @@ class BaseBuffer(ABC):
         """
 
         if len(self.image_encoders) > 0:
-            return crisp_batch_concat_obs_to_tensor(array, self.image_encoders, self.device)
+            return crisp_batch_concat_obs_to_tensor(
+                array, self.image_encoders, self.device
+            )
         if copy:
             return th.tensor(array, device=self.device)
         else:
             return th.as_tensor(array, device=self.device)
-    
+
     def save_buffer(self, path: str) -> None:
         """
         Save the buffer to a file.
@@ -303,7 +317,9 @@ class ReplayBuffer(BaseBuffer):
         action_space: spaces.Space,
         device: th.device | str = "auto",
     ):
-        super().__init__(buffer_size, observation_space, image_encoders, action_space, device)
+        super().__init__(
+            buffer_size, observation_space, image_encoders, action_space, device
+        )
 
         # Adjust buffer size
         self.buffer_size = max(buffer_size, 1)
@@ -312,11 +328,16 @@ class ReplayBuffer(BaseBuffer):
         if psutil is not None:
             mem_available = psutil.virtual_memory().available
 
-        self.observations = np.zeros((self.buffer_size, *self.obs_shape), dtype=np.float32)
-        self.next_observations = np.zeros((self.buffer_size, *self.obs_shape), dtype=np.float32)
+        self.observations = np.zeros(
+            (self.buffer_size, *self.obs_shape), dtype=np.float32
+        )
+        self.next_observations = np.zeros(
+            (self.buffer_size, *self.obs_shape), dtype=np.float32
+        )
 
         self.actions = np.zeros(
-            (self.buffer_size, self.action_dim), dtype=self._maybe_cast_dtype(action_space.dtype)
+            (self.buffer_size, self.action_dim),
+            dtype=self._maybe_cast_dtype(action_space.dtype),
         )
 
         self.rewards = np.zeros((self.buffer_size), dtype=np.float32)
@@ -324,7 +345,10 @@ class ReplayBuffer(BaseBuffer):
 
         if psutil is not None:
             total_memory_usage: float = (
-                self.observations.nbytes + self.actions.nbytes + self.rewards.nbytes + self.terminateds.nbytes
+                self.observations.nbytes
+                + self.actions.nbytes
+                + self.rewards.nbytes
+                + self.terminateds.nbytes
             )
 
             total_memory_usage += self.next_observations.nbytes
@@ -340,9 +364,9 @@ class ReplayBuffer(BaseBuffer):
 
     def add_rollout(
         self,
-        obs: np.ndarray, # shape B+1, D_OBS
-        action: np.ndarray, # shape B, D_ACT
-        reward: np.ndarray, # shape B,
+        obs: np.ndarray,  # shape B+1, D_OBS
+        action: np.ndarray,  # shape B, D_ACT
+        reward: np.ndarray,  # shape B,
         terminated: bool,
     ) -> None:
         if isinstance(obs, th.Tensor):
@@ -354,28 +378,28 @@ class ReplayBuffer(BaseBuffer):
         batch_size, *_ = action.shape
         # First handle before runover
         if self.pos + batch_size > self.buffer_size:
-            self.observations[self.pos:] = obs[:self.buffer_size - self.pos]
-            self.next_observations[self.pos:] = obs[1:self.buffer_size - self.pos + 1]
-            self.actions[self.pos:] = action[:self.buffer_size - self.pos]
-            self.rewards[self.pos:] = reward[:self.buffer_size - self.pos]
-            self.terminateds[self.pos:] = False
+            self.observations[self.pos :] = obs[: self.buffer_size - self.pos]
+            self.next_observations[self.pos :] = obs[
+                1 : self.buffer_size - self.pos + 1
+            ]
+            self.actions[self.pos :] = action[: self.buffer_size - self.pos]
+            self.rewards[self.pos :] = reward[: self.buffer_size - self.pos]
+            self.terminateds[self.pos :] = False
 
-
-            obs = obs[self.buffer_size - self.pos:]
-            action = action[self.buffer_size - self.pos:]
-            reward = reward[self.buffer_size - self.pos:]
+            obs = obs[self.buffer_size - self.pos :]
+            action = action[self.buffer_size - self.pos :]
+            reward = reward[self.buffer_size - self.pos :]
 
             batch_size -= self.buffer_size - self.pos
             self.pos = 0
             self.full = True
 
-        self.observations[self.pos:self.pos+batch_size] = obs[:-1]
-        self.next_observations[self.pos:self.pos+batch_size] = obs[1:]
-        self.actions[self.pos:self.pos+batch_size] = action
-        self.rewards[self.pos:self.pos+batch_size] = reward
-        self.terminateds[self.pos:self.pos+batch_size-1] = False
-        self.terminateds[self.pos+batch_size-1] = terminated
-            
+        self.observations[self.pos : self.pos + batch_size] = obs[:-1]
+        self.next_observations[self.pos : self.pos + batch_size] = obs[1:]
+        self.actions[self.pos : self.pos + batch_size] = action
+        self.rewards[self.pos : self.pos + batch_size] = reward
+        self.terminateds[self.pos : self.pos + batch_size - 1] = False
+        self.terminateds[self.pos + batch_size - 1] = terminated
 
         self.pos += batch_size
         if self.pos == self.buffer_size:
@@ -384,11 +408,12 @@ class ReplayBuffer(BaseBuffer):
 
     def _get_samples(self, batch_inds: np.ndarray) -> ReplayBufferSamples:
         return ReplayBufferSamples(
-            self.obs_to_torch(self.observations[batch_inds, :]), 
+            self.obs_to_torch(self.observations[batch_inds, :]),
             self.to_torch(self.actions[batch_inds, :]),
-            self.obs_to_torch(self.next_observations[batch_inds, :]), 
+            self.obs_to_torch(self.next_observations[batch_inds, :]),
             self.to_torch(self.terminateds[batch_inds].reshape(-1, 1)),
-            self.to_torch(self.rewards[batch_inds].reshape(-1, 1)))
+            self.to_torch(self.rewards[batch_inds].reshape(-1, 1)),
+        )
 
     @staticmethod
     def _maybe_cast_dtype(dtype: np.typing.DTypeLike) -> np.typing.DTypeLike:
@@ -448,25 +473,35 @@ class RolloutBuffer(BaseBuffer):
         gamma: float = 0.99,
         n_envs: int = 1,
     ):
-        super().__init__(buffer_size, observation_space, action_space, device, n_envs=n_envs)
+        super().__init__(
+            buffer_size, observation_space, action_space, device, n_envs=n_envs
+        )
         self.gae_lambda = gae_lambda
         self.gamma = gamma
         self.generator_ready = False
         self.reset()
 
     def reset(self) -> None:
-        self.observations = np.zeros((self.buffer_size, self.n_envs, *self.obs_shape), dtype=np.float32)
-        self.actions = np.zeros((self.buffer_size, self.n_envs, self.action_dim), dtype=np.float32)
+        self.observations = np.zeros(
+            (self.buffer_size, self.n_envs, *self.obs_shape), dtype=np.float32
+        )
+        self.actions = np.zeros(
+            (self.buffer_size, self.n_envs, self.action_dim), dtype=np.float32
+        )
         self.rewards = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.returns = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
-        self.episode_starts = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
+        self.episode_starts = np.zeros(
+            (self.buffer_size, self.n_envs), dtype=np.float32
+        )
         self.values = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.log_probs = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.advantages = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.generator_ready = False
         super().reset()
 
-    def compute_returns_and_advantage(self, last_values: th.Tensor, dones: np.ndarray) -> None:
+    def compute_returns_and_advantage(
+        self, last_values: th.Tensor, dones: np.ndarray
+    ) -> None:
         """
         Post-processing step: compute the lambda-return (TD(lambda) estimate)
         and GAE(lambda) advantage.
@@ -496,8 +531,14 @@ class RolloutBuffer(BaseBuffer):
             else:
                 next_non_terminal = 1.0 - self.episode_starts[step + 1]
                 next_values = self.values[step + 1]
-            delta = self.rewards[step] + self.gamma * next_values * next_non_terminal - self.values[step]
-            last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
+            delta = (
+                self.rewards[step]
+                + self.gamma * next_values * next_non_terminal
+                - self.values[step]
+            )
+            last_gae_lam = (
+                delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
+            )
             self.advantages[step] = last_gae_lam
         # TD(lambda) estimator, see Github PR #375 or "Telescoping in TD(lambda)"
         # in David Silver Lecture 4: https://www.youtube.com/watch?v=PnHCvfgC_ZA
@@ -584,3 +625,223 @@ class RolloutBuffer(BaseBuffer):
             self.returns[batch_inds].flatten(),
         )
         return RolloutBufferSamples(*tuple(map(self.to_torch, data)))
+
+
+class ReplayBufferGpu:
+    """
+    Base class that represent a buffer (rollout or replay)
+
+    :param buffer_size: Max number of element in the buffer
+    :param observation_space: Observation space
+    :param action_space: Action space
+    :param device: PyTorch device
+        to which the values will be converted
+    """
+
+    observation_space: spaces.Space
+    obs_shape: tuple[int, ...]
+
+    """
+    Rollout buffer used in on-policy algorithms like A2C/PPO.
+    It corresponds to ``buffer_size`` transitions collected
+    using the current policy.
+    This experience will be discarded after the policy update.
+    In order to use PPO objective, we also store the current value of each state
+    and the log probability of each taken action.
+
+    The term rollout here refers to the model-free notion and should not
+    be used with the concept of rollout used in model-based RL or planning.
+    Hence, it is only involved in policy and value function training but not action selection.
+
+    :param buffer_size: Max number of element in the buffer
+    :param observation_space: Observation space
+    :param action_space: Action space
+    :param device: PyTorch device
+    :param gae_lambda: Factor for trade-off of bias vs variance for Generalized Advantage Estimator
+        Equivalent to classic advantage when set to 1.
+    :param gamma: Discount factor
+    :param n_envs: Number of parallel environments
+    """
+
+    observations: th.Tensor
+    actions: th.Tensor
+    rewards: th.Tensor
+    advantages: th.Tensor
+    returns: th.Tensor
+    episode_starts: th.Tensor
+    log_probs: th.Tensor
+    values: th.Tensor
+    terminateds: th.Tensor
+    timeouts: th.Tensor
+
+    def __init__(
+        self,
+        buffer_size: int,
+        observation_space: spaces.Space,
+        image_encoders: list[th.nn.Sequential],
+        action_space: spaces.Space,
+        n_step_return: int = 1,
+        gamma: float = 0.99,
+        device: th.device | str = "auto",
+    ):
+        self.buffer_size = max(buffer_size, 1)
+        self.observation_space = observation_space
+        self.image_encoders = image_encoders
+        self.action_space = action_space
+        self.obs_shape = get_obs_shape(observation_space)  # type: ignore[assignment]
+
+        self.action_dim = get_action_dim(action_space)
+        self.pos_obs = 0
+        self.pos_acts = 0
+        self.device = get_device(device)
+        self.valid_indices_act = th.zeros(
+            self.buffer_size, dtype=th.int32, device=self.device
+        )
+        self.valid_indices_obs = th.zeros(
+            self.buffer_size, dtype=th.int32, device=self.device
+        )
+        self.num_valid = 0
+
+        self.n_step_return = n_step_return
+        self.gamma = gamma
+
+        # Check that the replay buffer can fit into the memory
+        if psutil is not None:
+            mem_available = psutil.virtual_memory().available
+
+        self.observations = th.zeros(
+            (self.buffer_size, *self.obs_shape), dtype=th.float32, device=self.device
+        )
+
+        self.actions = th.zeros(
+            (self.buffer_size, self.action_dim),
+            dtype=th.float32,
+            device=self.device,
+        )
+
+        self.rewards = th.zeros(
+            (self.buffer_size), dtype=th.float32, device=self.device
+        )
+        self.terminateds = th.zeros(
+            (self.buffer_size), dtype=th.float32, device=self.device
+        )
+
+        if psutil is not None:
+            total_memory_usage: float = (
+                self.observations.nbytes
+                + self.actions.nbytes
+                + self.rewards.nbytes
+                + self.terminateds.nbytes
+            )
+
+            if total_memory_usage > mem_available:
+                # Convert to GB
+                total_memory_usage /= 1e9
+                mem_available /= 1e9
+                warnings.warn(
+                    "This system does not have apparently enough memory to store the complete "
+                    f"replay buffer {total_memory_usage:.2f}GB > {mem_available:.2f}GB"
+                )
+
+    def size(self) -> int:
+        """
+        :return: The current size of the buffer
+        """
+        return self.pos_obs
+
+    def reset(self) -> None:
+        """
+        Reset the buffer.
+        """
+        self.pos_obs = 0
+        self.num_valid = 0
+
+    def sample(self, batch_size: int) -> ReplayBufferSamples:
+        """
+        :param batch_size: Number of element to sample
+        :return:
+        """
+        batch_inds = th.randint(0, self.num_valid, (batch_size,))
+        return self._get_samples(batch_inds)
+
+    def encode_obs(self, tensor) -> th.Tensor:
+        """
+        Convert buffer data array to a PyTorch tensor.
+        Note: it copies the data by default
+
+        :param array:
+        :param copy: Whether to copy or not the data (may be useful to avoid changing things
+            by reference). This argument is inoperative if the device is not the CPU.
+        :return:
+        """
+
+        if len(self.image_encoders) > 0:
+            return crisp_batch_concat_obs_to_tensor(tensor, self.image_encoders)
+        else:
+            return tensor
+
+    def save_buffer(self, path: str) -> None:
+        """
+        Save the buffer to a file.
+
+        :param path: Path to the file
+        """
+        if not path.endswith(".joblib"):
+            path = f"{path}/replay_buffer.joblib"
+        dump(self, path)
+
+    def add_rollout(
+        self,
+        obs: list[th.Tensor],  # shape B+1, D_OBS
+        action: list[th.Tensor],  # shape B, D_ACT
+        reward: list[float],  # shape B,
+        terminated: bool,
+    ) -> None:
+        assert all(
+            isinstance(o, th.Tensor) for o in obs
+        ), "obs should be a list of torch Tensors"
+        assert all(
+            isinstance(a, th.Tensor) for a in action
+        ), "action should be a list of torch Tensors"
+        assert all(
+            isinstance(r, float) for r in reward
+        ), "reward should be a list of floats"
+
+        obs: th.Tensor = th.stack(obs).to(self.device)
+        action: th.Tensor = th.stack(action).to(self.device)
+        reward: th.Tensor = th.tensor(reward, dtype=th.float32, device=self.device)
+
+        batch_size_act, *_ = action.shape
+        batch_size_obs, *_ = obs.shape
+        # First handle before runover
+        assert (
+            self.pos_obs + batch_size_obs <= self.buffer_size
+        ), "Buffer overflow not handled yet"
+
+        self.observations[self.pos_obs : self.pos_obs + batch_size_obs] = obs
+        self.actions[self.pos_acts : self.pos_acts + batch_size_act] = action
+        self.rewards[self.pos_acts : self.pos_acts + batch_size_act] = reward
+        self.terminateds[self.pos_obs : self.pos_obs + batch_size_obs] = False
+        self.terminateds[self.pos_obs + batch_size_obs - 1] = terminated
+
+        for n in range(0, batch_size_act - self.n_step_return + 1):
+            self.valid_indices_act[self.num_valid] = self.pos_acts + n
+            self.valid_indices_obs[self.num_valid] = self.pos_obs + n
+            self.num_valid += 1
+
+        self.pos_obs += batch_size_obs
+        self.pos_acts += batch_size_act
+
+    def _get_samples(self, batch_inds: th.Tensor) -> ReplayBufferSamples:
+        batch_inds_act = self.valid_indices_act[batch_inds]
+        batch_inds_obs = self.valid_indices_obs[batch_inds]
+        rew_sum = th.clone(self.rewards[batch_inds_act])
+        for n in range(1, self.n_step_return):
+            rew_sum += self.rewards[batch_inds_act + n] * (self.gamma**n)
+        return ReplayBufferSamples(
+            self.encode_obs(self.observations[batch_inds_obs, :]),
+            self.actions[batch_inds_act, :],
+            self.encode_obs(self.observations[batch_inds_obs + self.n_step_return, :]),
+            self.terminateds[batch_inds_obs + self.n_step_return].reshape(-1, 1),
+            rew_sum.reshape(-1, 1),
+        )
