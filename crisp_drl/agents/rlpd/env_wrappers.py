@@ -16,12 +16,12 @@ import torch.multiprocessing as mp
 from pynput import keyboard
 from gymnasium import spaces
 import imageio
+from crisp_drl.agents.rlpd.config import RLPD_Config
+
 
 # Make cuDNN deterministic for consistent inference
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
-
-from crisp_drl.agents.rlpd.config import RLPD_Config
 
 
 class MaximizeHeightRewardWrapper(RewardWrapper):
@@ -306,9 +306,9 @@ class ImageEncoderWrapper(ObservationWrapper):
         image_keys = [
             k for k in observation.keys() if k.startswith("observation.images.")
         ]
-        assert (
-            len(image_keys) == self.n_cameras
-        ), f"Found {len(image_keys)} cameras, but specified was {self.n_cameras}"
+        assert len(image_keys) == self.n_cameras, (
+            f"Found {len(image_keys)} cameras, but specified was {self.n_cameras}"
+        )
 
         t0 = time.time()
         # torch.cuda.synchronize()
@@ -340,6 +340,302 @@ class ImageEncoderWrapper(ObservationWrapper):
         #       f"Inference {(t4-t2)*1000:.3f} ms, "
         #       f"GPU->CPU {(t5-t4)*1000:.3f} ms, "
         #     )
+        return observation
+
+    def step(
+        self, action, block=False
+    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        observation, reward, terminated, truncated, info = self.env.step(
+            action, block=block
+        )
+        return self.observation(observation), reward, terminated, truncated, info
+
+
+class DinoVAEImageEncoderWrapper(ObservationWrapper):
+    """Image encoder using DINOv2 backbone + trained VAE encoder.
+
+    This wrapper:
+    1. Resizes images to 224x224
+    2. Passes through DINOv2 (ViT-S/14 with registers) to get 384-dim features
+    3. Normalizes features using saved mean/std from VAE training
+    4. Passes through trained VAE encoder to get low-dimensional latent representation
+
+    Args:
+        env: The environment to wrap
+        n_cameras: Number of cameras in the observation
+        image_size: Expected input image size (must be 224x224 or 256x256)
+        vae_checkpoint_path: Path to trained VAE checkpoint (.pt file)
+        normalization_path: Path to normalization stats (.npz file with mean/std)
+        dino_model_name: DINOv2 model name (default: dinov2_vits14_reg)
+        device: Device to run inference on (default: cuda:0)
+    """
+
+    def __init__(
+        self,
+        env,
+        n_cameras: int,
+        image_size: tuple[int, int],
+        vae_checkpoint_path: str,
+        normalization_path: str,
+        dino_model_name: str = "dinov2_vits14_reg",
+        device: str = "cuda:0",
+    ):
+        self.device = device
+        self.n_cameras = n_cameras
+        self.image_size = image_size
+
+        super().__init__(env)
+
+        # ---------------------------------------------------------------------------
+        # Load DINOv2 backbone
+        # ---------------------------------------------------------------------------
+        print(f"Loading DINOv2 model: {dino_model_name}...")
+
+        class Normalize(nn.Module):
+            """ImageNet normalization for DINOv2."""
+
+            def __init__(self, mean, std):
+                super().__init__()
+                self.register_buffer("mean", torch.tensor(mean).view(1, 3, 1, 1))
+                self.register_buffer("std", torch.tensor(std).view(1, 3, 1, 1))
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                # Expect input as (N, H, W, C) in range [0, 1]
+                x = x.permute(0, 3, 1, 2)  # NHWC → NCHW
+                return (x - self.mean) / self.std
+
+        dino_backbone = torch.hub.load(
+            "facebookresearch/dinov2", dino_model_name, trust_repo=True
+        ).to(self.device)
+        dino_backbone.eval()
+
+        # ImageNet normalization
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+        self.dino_model = nn.Sequential(Normalize(mean, std), dino_backbone).to(
+            self.device
+        )
+
+        # Try to trace for faster inference
+        try:
+            dummy = torch.zeros(
+                n_cameras, 224, 224, 3, dtype=torch.float32, device=self.device
+            )
+            self.dino_model = torch.jit.trace(self.dino_model, dummy)
+            self.dino_model.eval()
+            print("  DINOv2 traced with TorchScript")
+        except Exception as e:
+            print(f"  TorchScript trace failed, using eager mode: {e}")
+
+        # ---------------------------------------------------------------------------
+        # Load VAE encoder
+        # ---------------------------------------------------------------------------
+        print(f"Loading VAE from: {vae_checkpoint_path}")
+        checkpoint = torch.load(vae_checkpoint_path, map_location=self.device)
+        vae_config = checkpoint["config"]
+
+        # Recreate VAE encoder architecture
+        class VAEEncoder(nn.Module):
+            def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int):
+                super().__init__()
+                self.fc1 = nn.Linear(input_dim, hidden_dim)
+                self.ln1 = nn.LayerNorm(hidden_dim)
+                self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+                self.ln2 = nn.LayerNorm(hidden_dim)
+                self.fc_mu = nn.Linear(hidden_dim, latent_dim)
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                h = nn.functional.gelu(self.ln1(self.fc1(x)))
+                h = nn.functional.gelu(self.ln2(self.fc2(h)))
+                return self.fc_mu(h)  # Return mean for inference
+
+        self.vae_encoder = VAEEncoder(
+            input_dim=vae_config["input_dim"],
+            hidden_dim=vae_config["hidden_dim"],
+            latent_dim=vae_config["latent_dim"],
+        ).to(self.device)
+
+        # Load encoder weights from full VAE state dict
+        encoder_state = {}
+        for key, value in checkpoint["model_state_dict"].items():
+            if key.startswith("encoder."):
+                # Map encoder weights, skip logvar head
+                new_key = key.replace("encoder.", "")
+                if "fc_logvar" not in new_key:
+                    encoder_state[new_key] = value
+        self.vae_encoder.load_state_dict(encoder_state)
+        self.vae_encoder.eval()
+
+        self.latent_dim = vae_config["latent_dim"]
+        print(
+            f"  VAE: {vae_config['input_dim']} -> {vae_config['hidden_dim']} -> {self.latent_dim}"
+        )
+
+        # ---------------------------------------------------------------------------
+        # Load normalization stats
+        # ---------------------------------------------------------------------------
+        print(f"Loading normalization from: {normalization_path}")
+        norm_data = np.load(normalization_path)
+        self.feat_mean = torch.from_numpy(norm_data["mean"]).float().to(self.device)
+        self.feat_std = torch.from_numpy(norm_data["std"]).float().to(self.device)
+
+        # ---------------------------------------------------------------------------
+        # Pre-allocate GPU tensors
+        # ---------------------------------------------------------------------------
+        self._gpu_input = torch.zeros(
+            (n_cameras, 224, 224, 3), dtype=torch.float32, device=self.device
+        )
+
+        print(f"DinoVAEImageEncoderWrapper initialized:")
+        print(f"  Cameras: {n_cameras}, Image size: {image_size}")
+        print(f"  Output dim per camera: {self.latent_dim}")
+
+    def observation(self, observation):
+        # Collect image keys
+        image_keys = [
+            k for k in observation.keys() if k.startswith("observation.images.")
+        ]
+        assert len(image_keys) == self.n_cameras, (
+            f"Found {len(image_keys)} cameras, but specified was {self.n_cameras}"
+        )
+
+        # Load images to GPU (crop to 224x224 if needed)
+        for i, key in enumerate(image_keys):
+            img = observation[key]
+            # Handle different input sizes
+            if img.shape[0] == 256 and img.shape[1] == 256:
+                # Center crop from 256x256 to 224x224
+                img = img[16:240, 16:240]
+            elif img.shape[0] != 224 or img.shape[1] != 224:
+                raise ValueError(
+                    f"Unexpected image size {img.shape[:2]}, expected 224x224 or 256x256"
+                )
+            # Normalize to [0, 1]
+            self._gpu_input[i] = torch.from_numpy(img).float() / 255.0
+
+        with torch.no_grad():
+            # DINOv2 forward pass -> (n_cameras, 384)
+            dino_features = self.dino_model(self._gpu_input)
+
+            # Normalize features
+            dino_features_norm = (dino_features - self.feat_mean) / self.feat_std
+
+            # VAE encoder forward pass -> (n_cameras, latent_dim)
+            latent = self.vae_encoder(dino_features_norm)
+
+        # Move to CPU and assign back to observation
+        latent_cpu = latent.cpu()
+        for i, key in enumerate(image_keys):
+            observation[key] = latent_cpu[i]
+
+        return observation
+
+    def step(
+        self, action, block=False
+    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        observation, reward, terminated, truncated, info = self.env.step(
+            action, block=block
+        )
+        return self.observation(observation), reward, terminated, truncated, info
+
+
+class DinoImageEncoderWrapper(ObservationWrapper):
+    """Image encoder using only DINOv2 backbone (no VAE).
+
+    This wrapper passes images through DINOv2 to get 384-dim feature vectors.
+    Useful as a baseline or when you don't have a trained VAE.
+
+    Args:
+        env: The environment to wrap
+        n_cameras: Number of cameras in the observation
+        image_size: Expected input image size (must be 224x224 or 256x256)
+        dino_model_name: DINOv2 model name (default: dinov2_vits14_reg)
+        device: Device to run inference on (default: cuda:0)
+    """
+
+    def __init__(
+        self,
+        env,
+        n_cameras: int,
+        image_size: tuple[int, int],
+        dino_model_name: str = "dinov2_vits14_reg",
+        device: str = "cuda:0",
+    ):
+        self.device = device
+        self.n_cameras = n_cameras
+        self.image_size = image_size
+
+        super().__init__(env)
+
+        print(f"Loading DINOv2 model: {dino_model_name}...")
+
+        class Normalize(nn.Module):
+            """ImageNet normalization for DINOv2."""
+
+            def __init__(self, mean, std):
+                super().__init__()
+                self.register_buffer("mean", torch.tensor(mean).view(1, 3, 1, 1))
+                self.register_buffer("std", torch.tensor(std).view(1, 3, 1, 1))
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                x = x.permute(0, 3, 1, 2)  # NHWC → NCHW
+                return (x - self.mean) / self.std
+
+        dino_backbone = torch.hub.load(
+            "facebookresearch/dinov2", dino_model_name, trust_repo=True
+        ).to(self.device)
+        dino_backbone.eval()
+
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+        self.model = nn.Sequential(Normalize(mean, std), dino_backbone).to(self.device)
+
+        # TorchScript trace for faster inference
+        try:
+            dummy = torch.zeros(
+                n_cameras, 224, 224, 3, dtype=torch.float32, device=self.device
+            )
+            self.model = torch.jit.trace(self.model, dummy)
+            self.model.eval()
+            print("  DINOv2 traced with TorchScript")
+        except Exception as e:
+            print(f"  TorchScript trace failed, using eager mode: {e}")
+
+        self._gpu_input = torch.zeros(
+            (n_cameras, 224, 224, 3), dtype=torch.float32, device=self.device
+        )
+
+        print("DinoImageEncoderWrapper initialized:")
+        print(f"  Cameras: {n_cameras}, Image size: {image_size}")
+        print("  Output dim per camera: 384")
+
+    def observation(self, observation):
+        image_keys = [
+            k for k in observation.keys() if k.startswith("observation.images.")
+        ]
+        assert len(image_keys) == self.n_cameras, (
+            f"Found {len(image_keys)} cameras, but specified was {self.n_cameras}"
+        )
+
+        for i, key in enumerate(image_keys):
+            img = observation[key]
+            if img.shape[0] == 256 and img.shape[1] == 256:
+                img = img[16:240, 16:240]
+            elif img.shape[0] != 224 or img.shape[1] != 224:
+                raise ValueError(
+                    f"Unexpected image size {img.shape[:2]}, expected 224x224 or 256x256"
+                )
+            self._gpu_input[i] = torch.from_numpy(img).float() / 255.0
+
+        with torch.no_grad():
+            features = self.model(self._gpu_input)
+
+        features_cpu = features.cpu()
+        for i, key in enumerate(image_keys):
+            observation[key] = features_cpu[i]
+
         return observation
 
     def step(
@@ -624,8 +920,8 @@ class PrintCartesianInfoWrapper(Wrapper):
         )
         cartessian_state = observation["observation.state.cartesian"][:3]
         with np.printoptions(precision=2, suppress=True):
-            print(f"Cartesian state: {cartessian_state*1000} mm")
-            print(f"Cartesian error: {cartesian_error*1000} mm")
+            print(f"Cartesian state: {cartessian_state * 1000} mm")
+            print(f"Cartesian error: {cartesian_error * 1000} mm")
         return observation, reward, terminated, truncated, info
 
 
@@ -814,6 +1110,60 @@ class NaiveToGoalPositionWrapper(ActionWrapper):
         return observation, reward, terminated, truncated, info
 
 
+class SafetyBoxWrapperXY(ActionWrapper):
+    def __init__(
+        self,
+        env,
+        step_size=0.00025,
+        box_radius=0.003,
+        base_goal_position=np.array([0.541, -0.034]),
+        ideal_grasp_position=np.array([0.58833, -0.13817]),
+        coarse=True,
+        randomize=True,
+    ):
+        super().__init__(env)
+        self.step_size_xy = step_size
+        self.box_radius = box_radius
+        self.base_goal_position = base_goal_position
+        self.ideal_grasp_pos = ideal_grasp_position
+        self.goal_position = None
+        self._obs = None
+        self.randomize = randomize
+        self.coarse = coarse
+
+    def reset(self, *, seed=None, options=None):
+        obs, info = self.env.reset(seed=seed, options=options)
+        actual_grasp_pos = info["reset.grasped.position"]
+        # compute actual goal position based on where the object was grasped
+        self.goal_position = self.base_goal_position.copy()
+        self.goal_position[0] += actual_grasp_pos[0] - self.ideal_grasp_pos[0]
+        if self.randomize:
+            self.goal_position += np.random.uniform(
+                -self.box_radius * 0.8, self.box_radius * 0.8, size=(2,)
+            )
+        self._obs = obs
+        return obs, info
+
+    def step(
+        self, base_action, block=False
+    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        # if xy close, go directly to goal, otherwise move only in xy direction
+        current_pos = self._obs["observation.state.cartesian"][:2]
+        action = np.zeros(7)
+        delta = self.goal_position - current_pos
+        norm_xy = np.linalg.norm(delta)
+
+        if not self.coarse or norm_xy > self.box_radius:
+            action[:2] = delta * min(self.step_size_xy / norm_xy, 1.0)
+
+        observation, reward, terminated, truncated, info = self.env.step(
+            base_action + action, block=block
+        )
+        # info['action.naive'] = np.copy(action)
+        self._obs = observation
+        return observation, reward, terminated, truncated, info
+
+
 class NaiveZForceWrapper(ActionWrapper):
     def __init__(
         self,
@@ -866,7 +1216,6 @@ def controller_container_watcher(out_queue):
     env.pop("SSL_CERT_FILE", None)
     env.pop("OPENSSL_CONF", None)
     while True:
-
         error_out = subprocess.run(
             [
                 "ssh",
@@ -1022,9 +1371,9 @@ class ContainerWatcherWrapper(Wrapper):
 
         # Terminater on Torque limit, truncate on container issue
         if len(temp_events) > 0:
-            assert (
-                len(temp_events) == 1
-            ), f"At most one concurrent container event allowed, found {temp_events}"
+            assert len(temp_events) == 1, (
+                f"At most one concurrent container event allowed, found {temp_events}"
+            )
             self.is_running = False
 
             append_or_insert(info, "custom_events", temp_events[0])

@@ -32,14 +32,9 @@ Q_HIDDEN_SIZE = 128
 
 
 class SoftQNetwork(nn.Module):
-    def __init__(self, observation_space, action_space):
+    def __init__(self, obs_size, action_space):
         super().__init__()
-        if isinstance(observation_space, Dict):
-            obs_size = get_input_size_from_dict_space(observation_space)
-        elif isinstance(observation_space, Box):
-            obs_size = observation_space.shape[0]
-        else:
-            raise NotImplementedError("Observation space type not supported")
+
         self.fc1 = nn.Linear(
             obs_size + np.prod(action_space.shape),
             Q_HIDDEN_SIZE,
@@ -62,17 +57,14 @@ LOG_STD_MIN = -5
 
 
 class Actor(nn.Module):
-    def __init__(self, observation_space, action_space, config):
+    def __init__(self, action_space, config):
         super().__init__()
-        if isinstance(observation_space, Dict):
-            input_size = get_input_size_from_dict_space(observation_space)
-        elif isinstance(observation_space, Box):
-            input_size = observation_space.shape[0]
-        else:
-            raise NotImplementedError("Observation space type not supported")
         self.config = config
         self.is_gymnasium_env = self.config.env_name in list(gym.envs.registry.keys())
-        self.fc1 = nn.Linear(input_size, ACTOR_HIDDEN_SIZE)
+        self.fc1 = nn.Linear(
+            self.config.actor_nonvision_input_dim + self.config.vision_head_output_dim,
+            ACTOR_HIDDEN_SIZE,
+        )
         self.fc2 = nn.Linear(ACTOR_HIDDEN_SIZE, ACTOR_HIDDEN_SIZE)
         self.fc_mean = nn.Linear(ACTOR_HIDDEN_SIZE, np.prod(action_space.shape))
         self.fc_logstd = nn.Linear(ACTOR_HIDDEN_SIZE, np.prod(action_space.shape))

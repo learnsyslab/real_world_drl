@@ -28,13 +28,10 @@ class SACLearner:
         self,
         args,
         action_space,
-        observation_space_networks,
-        observation_space_buffers,
         parameters_queue: mp.Queue,
         run_name: str,
         n_cameras: int,
     ):
-
         # Store the configuration parameters
         self.config = SAC_Config()
         assert int(self.config.update_policy_after * self.config.utd_ratio) > 0, (
@@ -53,7 +50,6 @@ class SACLearner:
         torch.backends.cudnn.deterministic = self.config.torch_deterministic
 
         self.action_space = action_space
-        self.observation_space_networks = observation_space_networks
         self.parameters_queue = parameters_queue
 
         # summary writer for tensorboard
@@ -80,19 +76,16 @@ class SACLearner:
         self.load_model = args.resume_training or args.load_policy
 
         # initializing networks
-        self.actor = Actor(
-            self.observation_space_networks, action_space, self.config
-        ).to(self.device)
+        self.actor = Actor(action_space, self.config).to(self.device)
+        obs_dim_networks = (
+            self.config.actor_nonvision_input_dim + self.config.vision_head_output_dim
+        )
         self.q_networks = [
-            SoftQNetwork(self.observation_space_networks, self.action_space).to(
-                self.device
-            )
+            SoftQNetwork(obs_dim_networks, self.action_space).to(self.device)
             for _ in range(self.config.num_critics)
         ]
         self.q_target_networks = [
-            SoftQNetwork(self.observation_space_networks, self.action_space).to(
-                self.device
-            )
+            SoftQNetwork(obs_dim_networks, self.action_space).to(self.device)
             for _ in range(self.config.num_critics)
         ]
 
@@ -104,12 +97,12 @@ class SACLearner:
             for idx in range(self.config.num_critics):
                 self.q_networks[idx].load_state_dict(
                     torch.load(
-                        f"checkpoints/{self.load_model}/qf{idx+1}_state_dict.pth"
+                        f"checkpoints/{self.load_model}/qf{idx + 1}_state_dict.pth"
                     )
                 )
                 self.q_target_networks[idx].load_state_dict(
                     torch.load(
-                        f"checkpoints/{self.load_model}/qf{idx+1}_target_state_dict.pth"
+                        f"checkpoints/{self.load_model}/qf{idx + 1}_target_state_dict.pth"
                     )
                 )
             logging.info(f"Loaded model from checkpoints/{self.load_model}")
@@ -121,7 +114,9 @@ class SACLearner:
         if self.use_camera_inputs:
             self.image_encoders = [
                 torch.nn.Sequential(
-                    torch.nn.Linear(512, 128), torch.nn.ReLU(), torch.nn.Linear(128, 16)
+                    torch.nn.Linear(self.config.vision_head_input_dim, 128),
+                    torch.nn.ReLU(),
+                    torch.nn.Linear(128, self.config.vision_head_output_dim),
                 ).to(self.device)
                 for _ in range(n_cameras)
             ]
@@ -184,7 +179,9 @@ class SACLearner:
         else:
             self.replay_buffer = ReplayBufferGpu(
                 buffer_size=self.config.buffer_size,
-                observation_space=observation_space_buffers,
+                observation_dim=self.config.actor_nonvision_input_dim
+                + self.config.vision_head_input_dim,
+                vision_head_input_dim=self.config.vision_head_input_dim,
                 image_encoders=self.image_encoders,
                 action_space=action_space,
                 device=self.device,
@@ -445,11 +442,13 @@ class SACLearner:
         for idx in range(self.config.num_critics):
             torch.save(
                 self.q_networks[idx].state_dict(),
-                os.path.join(self.checkpoint_path, f"qf{idx+1}_state_dict.pth"),
+                os.path.join(self.checkpoint_path, f"qf{idx + 1}_state_dict.pth"),
             )
             torch.save(
                 self.q_target_networks[idx].state_dict(),
-                os.path.join(self.checkpoint_path, f"qf{idx+1}_target_state_dict.pth"),
+                os.path.join(
+                    self.checkpoint_path, f"qf{idx + 1}_target_state_dict.pth"
+                ),
             )
         torch.save(self.log_alpha, os.path.join(self.checkpoint_path, "log_alpha.pth"))
         for i, encoder in enumerate(self.image_encoders):

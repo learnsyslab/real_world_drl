@@ -108,7 +108,6 @@ def launch_actor(
     run_name,
 ):
     logging.basicConfig(level=logging.INFO)
-    observation_space = spaces.Box(-np.inf, np.inf, (27,))
     try:
         env = make.create_simulated_env(
             {
@@ -118,10 +117,10 @@ def launch_actor(
                     np.array([-1.0, -1.0, -2.0]) * 1e-3,  # np.zeros(3),
                     np.array([1.0, 1.0, -1.0]) * 1e-3,  # np.zeros(3),
                 ),
-                "live_view": False,
+                "live_view": True,
             }
         )
-        actor = SACActor(args, parameters_queue, observation_space, run_name, env)
+        actor = SACActor(args, parameters_queue, run_name, env)
     except Exception as e:
         logging.error(f"Failed to initialize SAC Actor: {e}", exc_info=True)
         return
@@ -135,15 +134,11 @@ def launch_actor(
 def launch_learner(args, data_queue, parameters_queue, run_name):
     logging.basicConfig(level=logging.INFO)
     action_space = spaces.Box(-np.inf, np.inf, (2,))
-    observation_space_networks = spaces.Box(-np.inf, np.inf, (27,))
-    observation_space_buffers = spaces.Box(-np.inf, np.inf, (523,))
 
     try:
         learner = SACLearner(
             args,
             action_space,
-            observation_space_networks=observation_space_networks,
-            observation_space_buffers=observation_space_buffers,
             parameters_queue=parameters_queue,
             run_name=run_name,
             n_cameras=1,

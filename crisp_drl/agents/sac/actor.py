@@ -19,19 +19,25 @@ from copy import deepcopy
 
 from crisp_drl.agents.sac.config import SAC_Config
 from crisp_drl.agents.sac.networks_cleanrl import Actor
-from crisp_drl.agents.sac.env_wrappers import SparseHeightRewardWrapper, MaximizeHeightRewardWrapper, SafetyBoundingBoxWrapper, MoveToBlockWrapper
+from crisp_drl.agents.sac.env_wrappers import (
+    SparseHeightRewardWrapper,
+    MaximizeHeightRewardWrapper,
+    SafetyBoundingBoxWrapper,
+    MoveToBlockWrapper,
+)
 from crisp_drl.data.utils import crisp_obs_to_tensor
 from crisp_drl.training.training_cli import clear_terminal
 
 
 class SACActor:
-    def __init__(self, 
-                 args,
-                 env_info_queue: mp.Queue,
-                 parameters_queue: mp.Queue,
-                 run_name: str,
-                 reward_queue: mp.Queue):
-        
+    def __init__(
+        self,
+        args,
+        env_info_queue: mp.Queue,
+        parameters_queue: mp.Queue,
+        run_name: str,
+        reward_queue: mp.Queue,
+    ):
         self.config = SAC_Config()
         self.args = args
 
@@ -49,7 +55,9 @@ class SACActor:
         self.is_gymnasium_env = self.config.env_name in list(gym.envs.registry.keys())
 
         self.use_camera_inputs = self.config.use_cameras
-        self.device = torch.device("cuda" if torch.cuda.is_available() and self.config.cuda else "cpu")
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() and self.config.cuda else "cpu"
+        )
         self.update_policy_after = self.config.update_policy_after
         self.learning_starts = self.config.learning_starts
         self.env = self._create_env()
@@ -58,26 +66,39 @@ class SACActor:
         self.load_model = args.resume_training or args.load_policy
 
         # policy
-        self.actor = Actor(self.env.observation_space, self.env.action_space, self.config).to(self.device)
+        self.actor = Actor(
+            self.env.observation_space, self.env.action_space, self.config
+        ).to(self.device)
         if self.load_model is not None:
-            self.actor.load_state_dict(torch.load(f"checkpoints/{self.load_model}/actor_state_dict.pth"))
+            self.actor.load_state_dict(
+                torch.load(f"checkpoints/{self.load_model}/actor_state_dict.pth")
+            )
 
         # image encoders
         if self.use_camera_inputs:
             projection_head = torch.nn.Sequential(
-                    torch.nn.Linear(512, 128),
-                    torch.nn.ReLU(),
-                    torch.nn.Linear(128, 10)
-                )
+                torch.nn.Linear(self.config.vision_head_input_dim, 128),
+                torch.nn.ReLU(),
+                torch.nn.Linear(128, self.config.vision_head_output_dim),
+            )
             # resnet_18 = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True).requires_grad_(False)
-            resnet_18 = resnet18(weights=ResNet18_Weights.DEFAULT, progress=False).eval().requires_grad_(False)
+            resnet_18 = (
+                resnet18(weights=ResNet18_Weights.DEFAULT, progress=False)
+                .eval()
+                .requires_grad_(False)
+            )
             resnet_18.fc = projection_head
             self.image_encoders = [
-                deepcopy(resnet_18).to(self.device) for _ in range(len(self.env.cameras))
+                deepcopy(resnet_18).to(self.device)
+                for _ in range(len(self.env.cameras))
             ]
             if self.load_model is not None:
                 for i, encoder in enumerate(self.image_encoders):
-                    encoder.fc.load_state_dict(torch.load(f"checkpoints/{self.load_model}/image_encoder_{i}_state_dict.pth"))
+                    encoder.fc.load_state_dict(
+                        torch.load(
+                            f"checkpoints/{self.load_model}/image_encoder_{i}_state_dict.pth"
+                        )
+                    )
         else:
             self.image_encoders = None
 
@@ -86,14 +107,19 @@ class SACActor:
         runs_path.mkdir(parents=True, exist_ok=True)
         if not self.args.eval:
             self.writer = SummaryWriter(runs_path / run_name)
-  
-            self._sync_nodes() # Wait for the learner to put the initial policy parameters in the queue
 
-    def run(self, data_queue: mp.Queue, continue_training_event: mp.Event, truncation_event: mp.Event):
+            self._sync_nodes()  # Wait for the learner to put the initial policy parameters in the queue
+
+    def run(
+        self,
+        data_queue: mp.Queue,
+        continue_training_event: mp.Event,
+        truncation_event: mp.Event,
+    ):
         """Main process loop for the SAC actor.
         This method will execture actions in the environment
         and send the s,a,r,s' tuples to the data queue."""
-    
+
         try:
             # reset the episode variables
             if not self.is_gymnasium_env:
@@ -109,31 +135,39 @@ class SACActor:
             for global_step in range(self.config.total_timesteps):
                 if self.args.cli_training:
                     continue_training_event.wait()  # Wait until the CLI signals to start a new episode
-                if global_step < self.learning_starts \
-                    and not self.args.eval \
-                    and self.load_model is None:
+                if (
+                    global_step < self.learning_starts
+                    and not self.args.eval
+                    and self.load_model is None
+                ):
                     # Take random actions for the first few steps
                     action = self.env.action_space.sample()
                     if not self.is_gymnasium_env:
                         action = action * self.config.max_action
-                else:              
+                else:
                     # transform observation to torch Tensor
                     if not self.is_gymnasium_env:
-                        obs_input = crisp_obs_to_tensor(obs, self.image_encoders, self.device)
+                        obs_input = crisp_obs_to_tensor(
+                            obs, self.image_encoders, self.device
+                        )
                     else:
                         obs_input = torch.Tensor(obs).to(self.device).view(1, -1)
 
                     action, _, _ = self.actor.get_action(obs_input)
                     action = action.view(-1).detach().cpu().numpy()
-                    
+
                     # sync policy every "self.policy_update_after" steps
-                    if (global_step - self.learning_starts) % self.update_policy_after == 0 and not self.args.eval:
+                    if (
+                        global_step - self.learning_starts
+                    ) % self.update_policy_after == 0 and not self.args.eval:
                         self._sync_nodes()
 
                 next_obs, reward, termination, truncation, info = self.env.step(action)
                 if self.args.cli_training and not continue_training_event.is_set():
                     termination = True
-                    reward = self.reward_queue.get()  # Get the sparse reward from the CLI
+                    reward = (
+                        self.reward_queue.get()
+                    )  # Get the sparse reward from the CLI
 
                 if truncation and self.args.cli_training:
                     truncation_event.set()
@@ -147,20 +181,43 @@ class SACActor:
                 real_next_obs = next_obs.copy()
                 # send experience data to the learner
                 if not self.args.eval:
-                    data_queue.put((obs, action, reward, real_next_obs, termination, truncation, info))
+                    data_queue.put(
+                        (
+                            obs,
+                            action,
+                            reward,
+                            real_next_obs,
+                            termination,
+                            truncation,
+                            info,
+                        )
+                    )
 
                 obs = next_obs
                 done = termination or truncation
                 if done:
                     if not self.args.eval:
-                        self.writer.add_scalar(f"charts/episodic_return", episode_return, global_step)
-                        self.writer.add_scalar(f"charts/episodic_length", episode_length, global_step)
+                        self.writer.add_scalar(
+                            f"charts/episodic_return", episode_return, global_step
+                        )
+                        self.writer.add_scalar(
+                            f"charts/episodic_length", episode_length, global_step
+                        )
                         sum_of_returns += episode_return
-                        sum_of_squared_returns += episode_return ** 2
+                        sum_of_squared_returns += episode_return**2
                         episode_num += 1
-                        eps_return_std = (sum_of_squared_returns / episode_num - (sum_of_returns / episode_num) ** 2) ** 0.5    
-                        self.writer.add_scalar(f"charts/avg_return", sum_of_returns / episode_num, global_step)
-                        self.writer.add_scalar(f"charts/eps_return_std", eps_return_std, global_step)
+                        eps_return_std = (
+                            sum_of_squared_returns / episode_num
+                            - (sum_of_returns / episode_num) ** 2
+                        ) ** 0.5
+                        self.writer.add_scalar(
+                            f"charts/avg_return",
+                            sum_of_returns / episode_num,
+                            global_step,
+                        )
+                        self.writer.add_scalar(
+                            f"charts/eps_return_std", eps_return_std, global_step
+                        )
 
                     # reset the episode variables
                     episode_return = 0
@@ -201,7 +258,9 @@ class SACActor:
                 env = SafetyBoundingBoxWrapper(env, self.config)
                 env = SparseHeightRewardWrapper(env)
             else:
-                env = make_env("no_cam_franka", control_type="cartesian", namespace="right")
+                env = make_env(
+                    "no_cam_franka", control_type="cartesian", namespace="right"
+                )
                 env.robot.config.home_config = home_close_to_table
                 env.config.control_frequency = self.config.control_frequency
                 env.config.max_episode_steps = self.config.episode_length
@@ -221,4 +280,6 @@ class SACActor:
             for i, params in enumerate(proj_head_parameters):
                 self.image_encoders[i].fc.load_state_dict(params)
 
-        logging.info("Actor received updated parameters for the policy and vision encoder.")
+        logging.info(
+            "Actor received updated parameters for the policy and vision encoder."
+        )

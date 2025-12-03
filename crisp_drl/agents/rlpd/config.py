@@ -38,7 +38,7 @@ class RLPD_Config:
     """if toggled, cuda will be enabled by default"""
 
     # Algorithm specific arguments
-    env_name: str = "my_env" #" FrankaCartesianEnv"
+    env_name: str = "my_env"  # " FrankaCartesianEnv"
     # env_name: str = "Pendulum-v1"
     """the environment id of the task"""
     use_cameras: bool = True
@@ -73,7 +73,11 @@ class RLPD_Config:
     """Entropy regularization coefficient."""
     autotune: bool = True
     """automatic tuning of the entropy coefficient"""
-    max_action: np.ndarray = field(default_factory=lambda: np.array([0.001, 0.001])) if env_name not in list(gym.envs.registry.keys()) else None
+    max_action: np.ndarray = (
+        field(default_factory=lambda: np.array([0.001, 0.001]))
+        if env_name not in list(gym.envs.registry.keys())
+        else None
+    )
     """the maximum norm of an action value the policy can output"""
     control_frequency: int = 15
     """the frequency at which the control commands are sent to the robot"""
@@ -84,3 +88,9 @@ class RLPD_Config:
     failure_reward: float = -10.0
     """the reward given for task failure"""
 
+    vision_head_input_dim: int = 384  # dinov2
+    """the input dimension of the vision head"""
+    vision_head_output_dim: int = 32
+    """the output dimension of the vision head"""
+    actor_nonvision_input_dim: int = 11
+    """the input dimension of the non-vision part of the actor network"""

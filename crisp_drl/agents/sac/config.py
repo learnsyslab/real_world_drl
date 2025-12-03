@@ -88,3 +88,10 @@ class SAC_Config:
     """the reward given for task success"""
     failure_reward: float = -10.0
     """the reward given for task failure"""
+
+    vision_head_input_dim: int = 384  # dinov2
+    """the input dimension of the vision head"""
+    vision_head_output_dim: int = 32
+    """the output dimension of the vision head"""
+    actor_nonvision_input_dim: int = 11
+    """the input dimension of the non-vision part of the actor network"""

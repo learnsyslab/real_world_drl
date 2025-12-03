@@ -14,3 +14,4 @@ tensorboard_logs
 expert_buffers
 *.mp4
 imagenet
+datasets

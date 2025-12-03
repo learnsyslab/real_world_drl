@@ -29,6 +29,7 @@ libstdcxx-ng = ">=15.1.0,<16"
 datasets = ">=3.6.0,<4"
 joblib = ">=1.2,<2"
 pytorch-cuda = "==12.4"          # CUDA 12.x compatible
+tifffile = ">=2025.6.11,<2026"
 
 [target.linux.dependencies]
 libgl-devel = "*"
@@ -36,7 +37,6 @@ libgl-devel = "*"
 [environments]
 dev = { features = ["dev"] }
 humble = { features = ["humble"] }
-humble-tensorrt = { features = ["humble", "tensorrt"] }
 humble-lerobot = { features = ["humble", "lerobot"] }
 lerobot = { features = ["lerobot"] }
 
@@ -50,15 +50,10 @@ lerobot = { git = "https://github.com/huggingface/lerobot", rev = "dacd1d7f5c719
     "smolvla",
 ] }
 rich = ">=14.0.0, <15"
-triton = "==3.5.1"
-
-[feature.tensorrt.dependencies]
-pytorch = "==2.5.0"
-
-[feature.tensorrt.pypi-dependencies]
-torch-tensorrt = "==2.5.0"
-torchvision = "*"
-nvidia-modelopt = "*"
+# triton = "==3.5.1"
+"torch" = { version = "==2.7.0", index = "https://download.pytorch.org/whl/cu128" }
+"torchvision" = { version = "*", index = "https://download.pytorch.org/whl/cu128" }
+"torchaudio" = { version = "*", index = "https://download.pytorch.org/whl/cu128" }
 
 
 [feature.lerobot.dependencies]

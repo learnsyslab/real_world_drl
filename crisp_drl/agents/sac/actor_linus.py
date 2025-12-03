@@ -55,10 +55,7 @@ from crisp_drl.training.training_cli import clear_terminal
 
 
 class SACActor:
-    def __init__(
-        self, args, parameters_queue: mp.Queue, observation_space, run_name: str, env
-    ):
-
+    def __init__(self, args, parameters_queue: mp.Queue, run_name: str, env):
         self.config = SAC_Config()
         self.args = args
 
@@ -85,9 +82,7 @@ class SACActor:
         self.load_model = args.resume_training or args.load_policy
 
         # policy
-        self.actor = Actor(observation_space, self.env.action_space, self.config).to(
-            self.device
-        )
+        self.actor = Actor(self.env.action_space, self.config).to(self.device)
         if self.load_model is not None:
             self.actor.load_state_dict(
                 torch.load(f"checkpoints/{self.load_model}/actor_state_dict.pth")
@@ -97,7 +92,9 @@ class SACActor:
         if self.use_camera_inputs:
             self.image_encoders = [
                 torch.nn.Sequential(
-                    torch.nn.Linear(512, 128), torch.nn.ReLU(), torch.nn.Linear(128, 16)
+                    torch.nn.Linear(self.config.vision_head_input_dim, 128),
+                    torch.nn.ReLU(),
+                    torch.nn.Linear(128, self.config.vision_head_output_dim),
                 ).to(self.device)
                 for _ in range(len(self.env.cameras))
             ]
@@ -154,7 +151,9 @@ class SACActor:
                 if t3 is not None:
                     dts["out"].append(t0 - t3)
                 obs_input = crisp_batch_concat_obs_to_tensor(
-                    obs.view(1, -1), self.image_encoders
+                    obs.view(1, -1),
+                    self.image_encoders,
+                    self.config.vision_head_input_dim,
                 )
                 t1 = time.perf_counter()
                 action, _, _ = self.actor.get_action(obs_input)
@@ -181,7 +180,6 @@ class SACActor:
                 episode_length += 1
 
                 if done:
-
                     if "custom_events" in info and "E_ROLLOUT_UNUSABLE" in map(
                         lambda entry: entry[1], info["custom_events"]
                     ):

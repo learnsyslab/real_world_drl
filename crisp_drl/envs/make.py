@@ -38,6 +38,7 @@ from crisp_drl.agents.rlpd.env_wrappers import (
     ContainerWatcherWrapper,
     FarAwayTerminationWrapper,
     ImageEncoderWrapper,
+    DinoImageEncoderWrapper,
     InsertionResetWrapper,
     LastObservationWrapper,
     NaiveToGoalPositionWrapper,
@@ -47,6 +48,7 @@ from crisp_drl.agents.rlpd.env_wrappers import (
     NoRotationNoGripperNoZActionWrapper,
     NoRotationNoGripperNoZActionWrapperSim,
     ObservationFormatterWrapper,
+    SafetyBoxWrapperXY,
     StepLimitEnforcerWrapper,
     TimeMeasurementWrapper,
     observation_has_z_pressure,
@@ -103,9 +105,9 @@ def create_real_env() -> gym.Env:
     # ('observation.error.gripper', (0, 1), 20.0), ('observation.state.gripper', (0, 1), 1.0),
     # ('observation.target.gripper', (0, 1), 1.0), ('observation.images.wrist_camera', (0, 512), 1.0),
     # ('observation.images.side_camera', (0, 512), 1.0)])
-    assert (
-        torch.cuda.is_available()
-    ), "CUDA must be available to use ObservationFormatterWrapper"
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
     env = ObservationFormatterWrapper(
         env,
         "cuda",
@@ -128,20 +130,26 @@ def create_simulated_env(config: dict) -> gym.Env:
     env = mujid_env.MujidEnv(
         config=config,
     )
-    env = StepLimitEnforcerWrapper(env, max_steps=60)
+    env = StepLimitEnforcerWrapper(env, max_steps=100)
     env = ActionTimeStampWrapper(env)
     env = LastObservationWrapper(env)
     env = NaiveZForceWrapper(
         env,
         step_size=0.00025,
-        max_z_error=0.0025,
+        max_z_error=0.001,
+    )
+    env = SafetyBoxWrapperXY(
+        env,
+        base_goal_position=np.array([0.6, 0.0]),
+        ideal_grasp_position=np.array([0.0, 0.0]),
     )
     env = CustomTerminationWrapper(env, termination_fn=custom_sim_termination)
-    env = ImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))
+    env = DinoImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))
+    # env = ImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))
     env = DictObservationToInfoMover(env)
-    assert (
-        torch.cuda.is_available()
-    ), "CUDA must be available to use ObservationFormatterWrapper"
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
     env = ObservationFormatterWrapper(
         env,
         "cuda",
@@ -167,7 +175,7 @@ def custom_sim_termination(obs):
     moving_box_pos = obs["observation.state.moving_brick"]
     delta = np.abs(moving_box_pos - fixed_box_pos)
     err = np.abs(obs["observation.error.cartesian"])
-    if delta[2] < 14e-3 and err[2] > 2e-3:
+    if delta[2] < 14e-3 and err[2] > 0.8e-3:
         if delta[0] < 1e-3 and delta[1] < 1e-3:
             print("E_SUCCESS")
             return "E_SUCCESS"

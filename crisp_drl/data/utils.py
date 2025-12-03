@@ -16,14 +16,21 @@ RESNET18_TRANSFORM = ResNet18_Weights.DEFAULT.transforms(antialias=True)
 def crisp_batch_concat_obs_to_tensor(
     observation: torch.Tensor,
     image_encoders: Sequence[torch.nn.Module],
+    vision_head_input_dim: int,
 ) -> torch.Tensor:
-    # assume B, D_OBS input, last N_CAM * 512 are pre-encoded images
+    # assume B, D_OBS input, last N_CAM * vision_head_input_dim are pre-encoded images
     _B, D_OBS = observation.shape
     N_CAM = len(image_encoders)
     return torch.cat(
-        [observation[:, : D_OBS - 512 * N_CAM]]
+        [observation[:, : D_OBS - vision_head_input_dim * N_CAM]]
         + [
-            image_encoders[i](observation[:, D_OBS - 512 * (i + 1) : D_OBS - 512 * i])
+            image_encoders[i](
+                observation[
+                    :,
+                    D_OBS - vision_head_input_dim * (i + 1) : D_OBS
+                    - vision_head_input_dim * i,
+                ]
+            )
             for i in range(N_CAM)
         ],
         dim=1,
