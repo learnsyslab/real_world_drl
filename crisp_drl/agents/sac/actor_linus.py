@@ -26,6 +26,7 @@ from crisp_drl.agents.rlpd.rewards import (
     dense_place_reward,
     sparse_place_reward,
     prune_after_async_termination,
+    xy_action_magnitude_dense_reward,
     xy_dense_place_reward,
     xy_dense_simple_place_reward,
 )
@@ -228,6 +229,12 @@ class SACActor:
                                 "E_SUCCESS": 0.1 / (1 - self.config.gamma) / 2 * 3,
                                 "E_FAIL": -0.1 / (1 - self.config.gamma) / 2 * 3,
                             },
+                        )
+                        all_rewards = xy_action_magnitude_dense_reward(
+                            all_rewards,
+                            all_actions,
+                            threshold=0.000251,
+                            reward=-0.05,
                         )
 
                         data_queue.put(

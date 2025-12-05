@@ -156,6 +156,19 @@ def xy_dense_place_reward(
     )
 
 
+def xy_action_magnitude_dense_reward(
+    rewards,
+    action_sequence,
+    threshold=0.000251,
+    reward=-0.05,
+):
+    for i, action in zip(range(1000000), action_sequence):
+        action_magnitude = np.linalg.norm(action[:2])
+        if action_magnitude > threshold:
+            rewards[i] += reward
+    return rewards
+
+
 def xy_dense_simple_place_reward(
     action_sequence,
     observation_sequence,
