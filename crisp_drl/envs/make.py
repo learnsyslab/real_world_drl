@@ -105,9 +105,9 @@ def create_real_env() -> gym.Env:
     # ('observation.error.gripper', (0, 1), 20.0), ('observation.state.gripper', (0, 1), 1.0),
     # ('observation.target.gripper', (0, 1), 1.0), ('observation.images.wrist_camera', (0, 512), 1.0),
     # ('observation.images.side_camera', (0, 512), 1.0)])
-    assert torch.cuda.is_available(), (
-        "CUDA must be available to use ObservationFormatterWrapper"
-    )
+    assert (
+        torch.cuda.is_available()
+    ), "CUDA must be available to use ObservationFormatterWrapper"
     env = ObservationFormatterWrapper(
         env,
         "cuda",
@@ -140,6 +140,8 @@ def create_simulated_env(config: dict) -> gym.Env:
     )
     env = SafetyBoxWrapperXY(
         env,
+        step_size=0.0005,
+        box_radius=0.003,
         base_goal_position=np.array([0.6, 0.0]),
         ideal_grasp_position=np.array([0.0, 0.0]),
     )
@@ -147,9 +149,9 @@ def create_simulated_env(config: dict) -> gym.Env:
     env = DinoImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))
     # env = ImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))
     env = DictObservationToInfoMover(env)
-    assert torch.cuda.is_available(), (
-        "CUDA must be available to use ObservationFormatterWrapper"
-    )
+    assert (
+        torch.cuda.is_available()
+    ), "CUDA must be available to use ObservationFormatterWrapper"
     env = ObservationFormatterWrapper(
         env,
         "cuda",

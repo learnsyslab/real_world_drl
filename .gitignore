@@ -1,6 +1,7 @@
 __pycache__
 .ros_env.sh
 .vscode
+rollout_data/
 runs_actor/
 runs_learner/
 crisp_drl.egg-info
