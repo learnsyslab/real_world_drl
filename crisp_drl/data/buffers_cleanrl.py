@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Generator
@@ -69,6 +70,15 @@ class ReplayBufferSamples(NamedTuple):
     rewards: th.Tensor
 
 
+class ReplayBufferSamplesWithPerfectActions(NamedTuple):
+    observations: th.Tensor
+    actions: th.Tensor
+    perfect_actions: th.Tensor
+    next_observations: th.Tensor
+    dones: th.Tensor
+    rewards: th.Tensor
+
+
 def get_action_dim(action_space: spaces.Space) -> int:
     """
     Get the dimension of the action space.
@@ -86,9 +96,9 @@ def get_action_dim(action_space: spaces.Space) -> int:
         return int(len(action_space.nvec))
     elif isinstance(action_space, spaces.MultiBinary):
         # Number of binary actions
-        assert isinstance(action_space.n, int), (
-            f"Multi-dimensional MultiBinary({action_space.n}) action space is not supported. You can flatten it instead."
-        )
+        assert isinstance(
+            action_space.n, int
+        ), f"Multi-dimensional MultiBinary({action_space.n}) action space is not supported. You can flatten it instead."
         return int(action_space.n)
     else:
         raise NotImplementedError(f"{action_space} action space is not supported")
@@ -801,15 +811,15 @@ class ReplayBufferGpu:
         reward: list[float],  # shape B,
         terminated: bool,
     ) -> None:
-        assert all(isinstance(o, th.Tensor) for o in obs), (
-            "obs should be a list of torch Tensors"
-        )
-        assert all(isinstance(a, th.Tensor) for a in action), (
-            "action should be a list of torch Tensors"
-        )
-        assert all(isinstance(r, float) for r in reward), (
-            "reward should be a list of floats"
-        )
+        assert all(
+            isinstance(o, th.Tensor) for o in obs
+        ), "obs should be a list of torch Tensors"
+        assert all(
+            isinstance(a, th.Tensor) for a in action
+        ), "action should be a list of torch Tensors"
+        assert all(
+            isinstance(r, float) for r in reward
+        ), "reward should be a list of floats"
 
         obs: th.Tensor = th.stack(obs).to(self.device)
         action: th.Tensor = th.stack(action).to(self.device)
@@ -818,9 +828,9 @@ class ReplayBufferGpu:
         batch_size_act, *_ = action.shape
         batch_size_obs, *_ = obs.shape
         # First handle before runover
-        assert self.pos_obs + batch_size_obs <= self.buffer_size, (
-            "Buffer overflow not handled yet"
-        )
+        assert (
+            self.pos_obs + batch_size_obs <= self.buffer_size
+        ), "Buffer overflow not handled yet"
 
         self.observations[self.pos_obs : self.pos_obs + batch_size_obs] = obs
         self.actions[self.pos_acts : self.pos_acts + batch_size_act] = action
@@ -846,6 +856,251 @@ class ReplayBufferGpu:
             self.encode_obs(self.observations[batch_inds_obs, :]),
             self.actions[batch_inds_act, :],
             self.encode_obs(self.observations[batch_inds_obs + self.n_step_return, :]),
+            self.terminateds[batch_inds_obs + self.n_step_return].reshape(-1, 1),
+            rew_sum.reshape(-1, 1),
+        )
+
+
+class ReplayBufferGpuWithPerfectActions:
+    """
+    Base class that represent a buffer (rollout or replay)
+
+    :param buffer_size: Max number of element in the buffer
+    :param observation_space: Observation space
+    :param action_space: Action space
+    :param device: PyTorch device
+        to which the values will be converted
+    """
+
+    observation_dim: int
+    obs_shape: tuple[int, ...]
+
+    """
+    Rollout buffer used in on-policy algorithms like A2C/PPO.
+    It corresponds to ``buffer_size`` transitions collected
+    using the current policy.
+    This experience will be discarded after the policy update.
+    In order to use PPO objective, we also store the current value of each state
+    and the log probability of each taken action.
+
+    The term rollout here refers to the model-free notion and should not
+    be used with the concept of rollout used in model-based RL or planning.
+    Hence, it is only involved in policy and value function training but not action selection.
+
+    :param buffer_size: Max number of element in the buffer
+    :param observation_space: Observation space
+    :param action_space: Action space
+    :param device: PyTorch device
+    :param gae_lambda: Factor for trade-off of bias vs variance for Generalized Advantage Estimator
+        Equivalent to classic advantage when set to 1.
+    :param gamma: Discount factor
+    :param n_envs: Number of parallel environments
+    """
+
+    observations: th.Tensor
+    actions: th.Tensor
+    perfect_actions: th.Tensor
+    rewards: th.Tensor
+    advantages: th.Tensor
+    returns: th.Tensor
+    episode_starts: th.Tensor
+    log_probs: th.Tensor
+    values: th.Tensor
+    terminateds: th.Tensor
+    timeouts: th.Tensor
+
+    def __init__(
+        self,
+        buffer_size: int,
+        observation_dim: int,
+        action_space: spaces.Space,
+        n_step_return: int = 1,
+        gamma: float = 0.99,
+        device: th.device | str = "auto",
+    ):
+        self.buffer_size = max(buffer_size, 1)
+        self.observation_dim = observation_dim
+        self.action_space = action_space
+        self.obs_shape = (observation_dim,)
+        self.action_dim = get_action_dim(action_space)
+        self.pos_obs = 0
+        self.pos_acts = 0
+        self.device = get_device(device)
+        self.valid_indices_act = th.zeros(
+            self.buffer_size, dtype=th.int32, device=self.device
+        )
+        self.valid_indices_obs = th.zeros(
+            self.buffer_size, dtype=th.int32, device=self.device
+        )
+        self.num_valid = 0
+
+        self.n_step_return = n_step_return
+        self.gamma = gamma
+
+        self.observations = th.zeros(
+            (self.buffer_size, self.observation_dim),
+            dtype=th.float32,
+            device=self.device,
+        )
+
+        self.actions = th.zeros(
+            (self.buffer_size, self.action_dim),
+            dtype=th.float32,
+            device=self.device,
+        )
+
+        self.perfect_actions = th.zeros(
+            (self.buffer_size, self.action_dim),
+            dtype=th.float32,
+            device=self.device,
+        )
+
+        self.rewards = th.zeros(
+            (self.buffer_size), dtype=th.float32, device=self.device
+        )
+        self.terminateds = th.zeros(
+            (self.buffer_size), dtype=th.float32, device=self.device
+        )
+
+        if psutil is not None:
+            total_memory_usage: float = (
+                self.observations.nbytes
+                + self.actions.nbytes
+                + self.perfect_actions.nbytes
+                + self.rewards.nbytes
+                + self.terminateds.nbytes
+            )
+            mem_available = psutil.virtual_memory().available
+
+            if total_memory_usage > mem_available:
+                # Convert to GB
+                total_memory_usage /= 1e9
+                mem_available /= 1e9
+                warnings.warn(
+                    "This system does not have apparently enough memory to store the complete "
+                    f"replay buffer {total_memory_usage:.2f}GB > {mem_available:.2f}GB"
+                )
+
+    def size(self) -> int:
+        """
+        :return: The current size of the buffer
+        """
+        return self.pos_obs
+
+    def reset(self) -> None:
+        """
+        Reset the buffer.
+        """
+        self.pos_obs = 0
+        self.num_valid = 0
+
+    def sample(self, batch_size: int) -> ReplayBufferSamplesWithPerfectActions:
+        """
+        :param batch_size: Number of element to sample
+        :return:
+        """
+        batch_inds = th.randint(0, self.num_valid, (batch_size,))
+        return self._get_samples(batch_inds)
+
+    def save_buffer(self, path: str | Path) -> None:
+        """
+        Save the buffer to a file.
+
+        :param path: Path to the file
+        """
+        if not str(path).endswith(".joblib"):
+            path = Path(path) / "replay_buffer.joblib"
+        dump(self, path)
+
+    def add_rollout(
+        self,
+        obs: list[th.Tensor],  # shape B+1, D_OBS
+        action: list[th.Tensor],  # shape B, D_ACT
+        perfect_action: list[th.Tensor],  # shape B, D_ACT
+        reward: list[float],  # shape B,
+        terminated: bool,
+    ) -> None:
+        assert all(
+            isinstance(o, th.Tensor) for o in obs
+        ), "obs should be a list of torch Tensors"
+        assert all(
+            isinstance(a, th.Tensor) for a in action
+        ), "action should be a list of torch Tensors"
+        assert all(
+            isinstance(p, th.Tensor) for p in perfect_action
+        ), "perfect_action should be a list of torch Tensors"
+        assert all(
+            isinstance(r, float) for r in reward
+        ), "reward should be a list of floats"
+
+        obs: th.Tensor = th.stack(obs).to(self.device)
+        action: th.Tensor = th.stack(action).to(self.device)
+        perfect_action: th.Tensor = th.stack(perfect_action).to(self.device)
+        reward: th.Tensor = th.tensor(reward, dtype=th.float32, device=self.device)
+
+        batch_size_act, *_ = action.shape
+        batch_size_obs, *_ = obs.shape
+        # First handle before runover
+        assert (
+            self.pos_obs + batch_size_obs <= self.buffer_size
+        ), "Buffer overflow not handled yet"
+
+        self.observations[self.pos_obs : self.pos_obs + batch_size_obs] = obs
+        self.actions[self.pos_acts : self.pos_acts + batch_size_act] = action
+        self.perfect_actions[self.pos_acts : self.pos_acts + batch_size_act] = (
+            perfect_action
+        )
+        self.rewards[self.pos_acts : self.pos_acts + batch_size_act] = reward
+        self.terminateds[self.pos_obs : self.pos_obs + batch_size_obs] = False
+        self.terminateds[self.pos_obs + batch_size_obs - 1] = terminated
+
+        for n in range(0, batch_size_act - self.n_step_return + 1):
+            self.valid_indices_act[self.num_valid] = self.pos_acts + n
+            self.valid_indices_obs[self.num_valid] = self.pos_obs + n
+            self.num_valid += 1
+
+        self.pos_obs += batch_size_obs
+        self.pos_acts += batch_size_act
+
+    def change_n_steps(self, new_n_steps: int) -> None:
+        """
+        Change the number of steps to use for n-step returns.
+
+        :param new_n_steps: New number of steps
+        """
+        assert new_n_steps > self.n_step_return, "Only increasing n_steps is supported"
+        # Adjust valid indices by removing the last ones that are no longer valid
+        valid_indices_act = self.valid_indices_act[: self.num_valid].tolist()
+        valid_indices_obs = self.valid_indices_obs[: self.num_valid].tolist()
+        i_old = 0
+        i_new = 0
+        while i_old < len(valid_indices_act) - (new_n_steps - self.n_step_return):
+            if (
+                valid_indices_act[i_old] + new_n_steps - self.n_step_return
+                <= valid_indices_act[i_old + new_n_steps - self.n_step_return]
+            ):
+                self.valid_indices_act[i_new] = valid_indices_act[i_old]
+                self.valid_indices_obs[i_new] = valid_indices_obs[i_old]
+                i_new += 1
+            i_old += 1
+
+        self.num_valid = i_new
+
+        self.n_step_return = new_n_steps
+
+    def _get_samples(
+        self, batch_inds: th.Tensor
+    ) -> ReplayBufferSamplesWithPerfectActions:
+        batch_inds_act = self.valid_indices_act[batch_inds]
+        batch_inds_obs = self.valid_indices_obs[batch_inds]
+        rew_sum = th.clone(self.rewards[batch_inds_act])
+        for n in range(1, self.n_step_return):
+            rew_sum += self.rewards[batch_inds_act + n] * (self.gamma**n)
+        return ReplayBufferSamplesWithPerfectActions(
+            self.observations[batch_inds_obs],
+            self.actions[batch_inds_act],
+            self.perfect_actions[batch_inds_act],
+            self.observations[batch_inds_obs + self.n_step_return],
             self.terminateds[batch_inds_obs + self.n_step_return].reshape(-1, 1),
             rew_sum.reshape(-1, 1),
         )
