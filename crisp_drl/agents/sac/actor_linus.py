@@ -233,7 +233,7 @@ class SACActor:
                         all_rewards = xy_action_magnitude_dense_reward(
                             all_rewards,
                             all_actions,
-                            threshold=0.000251,
+                            threshold=0.00026,
                             reward=-0.05,
                         )
 
