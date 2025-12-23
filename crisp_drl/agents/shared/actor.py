@@ -1,64 +1,39 @@
-import functools
 import logging
 import os
 import gymnasium as gym
 import torch
 import torch.multiprocessing as mp
-import multiprocessing
+
 import rclpy
 import time
 import random
 import numpy as np
 
-from crisp_gym.manipulator_env_config import NoCamFrankaEnvConfig, FrankaEnvConfig
-from crisp_py.camera.camera_config import CameraConfig
-from crisp_py.gripper.gripper import GripperConfig
-from crisp_gym.manipulator_env import ManipulatorCartesianEnv, make_env
-from crisp_gym.util.rl_utils import load_actions_safe
-from crisp_gym.config.home import home_close_to_table
+from crisp_drl.data import utils
+
 from torch.utils.tensorboard import SummaryWriter
-from torchvision.models import resnet18, ResNet18_Weights
 from pathlib import Path
-from copy import deepcopy
 
 
-from crisp_drl.agents.rlpd.rewards import (
+from crisp_drl.agents.shared.rewards import (
     dense_place_reward,
-    sparse_place_reward,
+    sparse_event_reward,
     prune_after_async_termination,
     xy_action_magnitude_dense_reward,
-    xy_dense_place_reward,
     xy_dense_simple_place_reward,
 )
-from crisp_drl.agents.sac.config import SAC_Config
-from crisp_drl.agents.sac.networks_cleanrl import Actor
-from crisp_drl.agents.rlpd.env_wrappers import (
-    ActionTimeStampWrapper,
-    BelowZTerminationWrapper,
-    CLIWrapper,
-    DictObservationToInfoMover,
-    ContainerWatcherWrapper,
-    FarAwayTerminationWrapper,
-    ImageEncoderWrapper,
-    InsertionResetWrapper,
-    LastObservationWrapper,
-    NaiveToGoalPositionWrapper,
-    NoRotationActionWrapper,
-    NoRotationNoGripperActionWrapper,
-    NoRotationNoGripperNoZActionWrapper,
-    ObservationFormatterWrapper,
-    TimeMeasurementWrapper,
-    observation_has_z_pressure,
-    observation_has_z_pressure_or_below,
-)
-from crisp_drl.data.utils import crisp_batch_concat_obs_to_tensor, crisp_obs_to_tensor
-from crisp_drl.training.training_cli import clear_terminal
+from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.networks_cleanrl import Actor, SharedEncoder
+from crisp_drl.envs import make_rew
 
 
 class SACActor:
     def __init__(self, args, parameters_queue: mp.Queue, run_name: str, env):
-        self.config = SAC_Config()
+        self.config = Config()
         self.args = args
+        self.run_name = run_name
+        self.checkpoint_path = os.path.join("checkpoints", self.run_name)
+        os.makedirs(self.checkpoint_path, exist_ok=True)
 
         # setting the seed for reproducibility
         random.seed(self.config.seed)
@@ -69,7 +44,7 @@ class SACActor:
         self.parameters_queue = parameters_queue
 
         # check gym environment
-        self.is_gymnasium_env = self.config.env_name in list(gym.envs.registry.keys())
+        self.is_gymnasium_env = self.config.env_name in list(gym.envs.registry.keys())  # type: ignore # gym envs registry has no typing
 
         self.use_camera_inputs = self.config.use_cameras
         self.device = torch.device(
@@ -78,6 +53,16 @@ class SACActor:
         self.update_policy_after = self.config.update_policy_after
         self.learning_starts = self.config.learning_starts
         self.env = env
+        self.reward_fn = make_rew.create_sim_reward_fn(
+            self.config,
+            ideal_goal_pos_xy=np.array([0.6, 0.0]),
+            ideal_grasp_pos_xy=np.array([0.0, 0.0]),
+            event_reward_map={
+                "E_SUCCESS": 0.1 / (1 - self.config.gamma) * 3,
+                "E_FAIL": -0.1 / (1 - self.config.gamma) / 2 * 3,
+                "E_SAFETY_BOX_VIOLATION": 0.0,  # -0.05,
+            },
+        )
 
         # checkpoint names of model to be loaded
         self.load_model = args.resume_training or args.load_policy
@@ -90,24 +75,24 @@ class SACActor:
             )
 
         # image encoders
-        if self.use_camera_inputs:
-            self.image_encoders = [
-                torch.nn.Sequential(
-                    torch.nn.Linear(self.config.vision_head_input_dim, 128),
-                    torch.nn.ReLU(),
-                    torch.nn.Linear(128, self.config.vision_head_output_dim),
-                ).to(self.device)
-                for _ in range(len(self.env.cameras))
-            ]
-            if self.load_model is not None:
-                for i, image_encoder in enumerate(self.image_encoders):
-                    image_encoder.load_state_dict(
-                        torch.load(
-                            f"checkpoints/{self.load_model}/image_encoder_{i}_state_dict.pth"
-                        )
-                    )
-        else:
-            self.image_encoders = []
+        self.shared_encoder = SharedEncoder(self.config).to(self.device)
+        assert self.load_model is None or args.load_encoder is None, (
+            "Either load entire model or only encoder, not both."
+        )
+        if self.load_model is not None:
+            self.shared_encoder.load_state_dict(
+                torch.load(
+                    f"checkpoints/{self.load_model}/shared_encoder_state_dict.pth"
+                )
+            )
+        elif args.load_encoder is not None:
+            assert self.config.n_cameras == 1, (
+                "Loading single encoder only works with one camera."
+            )
+            self.shared_encoder.image_encoders[0].load_state_dict(
+                utils.ae_state_dict_from_file(args.load_encoder)
+            )
+        self.shared_encoder.eval()
 
         # summary writer for tensorboard
         runs_path = Path(__file__).resolve().parent.parent.parent.parent / "runs_actor"
@@ -134,6 +119,7 @@ class SACActor:
             actual_grasp_pos = reset_info["reset.grasped.position"]
 
             all_actions = []
+            all_rewards = []
             all_observations = [obs]
             all_infos = [reset_info]
             t3 = None
@@ -151,22 +137,23 @@ class SACActor:
                 t0 = time.perf_counter()
                 if t3 is not None:
                     dts["out"].append(t0 - t3)
-                obs_input = crisp_batch_concat_obs_to_tensor(
+                obs_input = utils.shared_encode(
+                    self.shared_encoder,
                     obs.view(1, -1),
-                    self.image_encoders,
-                    self.config.vision_head_input_dim,
+                    self.config.shared_encoder_gradient,
                 )
                 t1 = time.perf_counter()
-                action, _, _ = self.actor.get_action(obs_input)
+                action, _ = self.actor(obs_input)
                 action = action.view(-1).detach()
 
                 t2 = time.perf_counter()
                 all_actions.append(action)
-                obs, _reward, termination, truncation, info = self.env.step(
+                obs, reward, termination, truncation, info = self.env.step(
                     action.cpu().numpy(), block=True
                 )
                 all_observations.append(obs)
                 all_infos.append(info)
+                all_rewards.append(reward)
                 done = termination or truncation
 
                 t3_ = time.perf_counter()
@@ -187,6 +174,7 @@ class SACActor:
                         self.global_step -= episode_length
                         obs, reset_info = self.env.reset()
                         all_actions = []
+                        all_rewards = []
                         all_observations = [obs]
                         all_infos = [reset_info]
                         actual_grasp_pos = reset_info["reset.grasped.position"]
@@ -200,45 +188,18 @@ class SACActor:
                         }
                         continue
                     if not self.args.eval:
-                        all_actions, all_observations, all_infos = (
-                            prune_after_async_termination(
+                        all_actions, all_observations, all_rewards, all_infos = (
+                            self.reward_fn(
                                 all_actions,
                                 all_observations,
+                                all_rewards,
                                 all_infos,
-                                {"E_CONTROLLER_ISSUE", "E_TORQUE"},
+                                actual_grasp_pos_xy=actual_grasp_pos[:2],
                             )
-                        )
-                        # all_rewards = dense_place_reward(all_actions, all_observations, all_infos, {"E_TORQUE": -10.0, "E_FAR_AWAY": -3.0, "E_BELOW_Z": -3.0, "E_SUCCESS": 10.0, "E_FAIL": -1.0, "E_BAD_BEHAVIOR": -5.0, "E_CONTROLLER_ISSUE": 0.0},
-                        #              max_rew=0.01, ideal_goal_pos=[0.53975, -0.033,  0.05], ideal_grasp_pos=np.array([0.58833, -0.13817,  0.04229]), actual_grasp_pos=actual_grasp_pos, k_xy=0.005, k_z=0.002)
-                        # all_rewards = sparse_place_reward(
-                        #     all_actions, all_observations, all_infos
-                        # )
-                        # all_rewards = xy_dense_place_reward(all_actions, all_observations, all_infos, max_rew=0.01, max_action_magnitude=0.0008,
-                        #                                      ideal_goal_pos_xy=np.array([0.53975, -0.033]), ideal_grasp_pos_xy=np.array([0.58833, -0.13817]),
-                        #                                      actual_grasp_pos_xy=actual_grasp_pos[:2])
-                        all_rewards = xy_dense_simple_place_reward(
-                            all_actions,
-                            all_observations,
-                            all_infos,
-                            max_rew=0.1,
-                            gamma=self.config.gamma,
-                            ideal_goal_pos_xy=np.array([0.6, 0.0]),
-                            ideal_grasp_pos_xy=np.array([0.0, 0.0]),
-                            actual_grasp_pos_xy=actual_grasp_pos[:2],
-                            event_reward_map={
-                                "E_SUCCESS": 0.1 / (1 - self.config.gamma) / 2 * 3,
-                                "E_FAIL": -0.1 / (1 - self.config.gamma) / 2 * 3,
-                            },
-                        )
-                        all_rewards = xy_action_magnitude_dense_reward(
-                            all_rewards,
-                            all_actions,
-                            threshold=0.00026,
-                            reward=-0.05,
                         )
 
                         data_queue.put(
-                            (all_observations, all_actions, all_rewards, termination)
+                            (all_actions, all_observations, all_rewards, termination)
                         )
 
                         self.episode_num += 1
@@ -271,6 +232,7 @@ class SACActor:
                         eps_return_std = (
                             sum_of_squared_returns / reward_window_size
                             - (sum_of_returns / reward_window_size) ** 2
+                            + 1e-10
                         ) ** 0.5
                         self.writer.add_scalar(
                             "charts/avg_return",
@@ -332,6 +294,7 @@ class SACActor:
                     actual_grasp_pos = reset_info["reset.grasped.position"]
 
                     all_actions = []
+                    all_rewards = []
                     all_observations = [obs]
                     all_infos = [reset_info]
                     t3 = None
@@ -341,6 +304,7 @@ class SACActor:
                         logging.info(
                             "Waiting for the learner to finish gradient updates..."
                         )
+                        self.save_tb_additional_info()
                         self._sync_nodes()
                         logging.info("Learner fininshed gradient updates.")
 
@@ -353,14 +317,15 @@ class SACActor:
         finally:
             self.close()
 
+    def save_tb_additional_info(self):
+        with open(os.path.join(self.checkpoint_path, "global_step"), "w") as f:
+            f.write(f"{self.global_step} {self.episode_num}")
+
     def close(self):
         logging.info("Executing SAC Actor closing behavior...")
         if not self.args.eval:
+            self.save_tb_additional_info()
             self.writer.close()
-            self.run_name = os.path.basename(self.writer.log_dir)
-            self.checkpoint_path = os.path.join("checkpoints", self.run_name)
-            with open(os.path.join(self.checkpoint_path, "global_step"), "w") as f:
-                f.write(f"{self.global_step} {self.episode_num}")
         # Clean up the environment
         self.env.close()
         if rclpy.ok():
@@ -368,11 +333,12 @@ class SACActor:
 
     def _sync_nodes(self):
         """Sync all shared model parameters between actor and learner."""
-        policy_parameters, proj_head_parameters = self.parameters_queue.get()
+        policy_parameters, shared_encoder_parameters, shared_encoder_bn = (
+            self.parameters_queue.get()
+        )
         self.actor.load_state_dict(policy_parameters)
-        if self.use_camera_inputs:
-            for i, params in enumerate(proj_head_parameters):
-                self.image_encoders[i].load_state_dict(params)
+        self.shared_encoder.load_state_dict(shared_encoder_parameters)
+        self.shared_encoder.load_batchnorm_stats(shared_encoder_bn)
 
         logging.info(
             "Actor received updated parameters for the policy and vision encoder."

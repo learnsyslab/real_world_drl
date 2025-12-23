@@ -21,7 +21,7 @@
 
 export ROS_DOMAIN_ID=101
 export GIT_LFS_SKIP_SMUDGE=1
-export CRISP_CONFIG_PATH=/home/linusschwarz/crisp_configs
+export CRISP_CONFIG_PATH=/home/linusschwarz/repos/crisp_configs
 export NETWORK_INTERFACE=enp4s0
 export ROS_LOCALHOST_ONLY=0
 

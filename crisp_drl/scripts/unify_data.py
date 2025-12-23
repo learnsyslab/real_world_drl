@@ -1,4 +1,5 @@
-base_folder = "/home/linus/uni/master/code/real_world_drl/rollout_data/collect_data"
+base_folder = "rollout_data/collect_data"
+global_buffer_file_name = "replay_buffer_500_0.joblib"
 
 import os
 import numpy as np
@@ -16,6 +17,56 @@ exp_folders_to_skip = {
     "20251204-100213_0.999_26",
     "20251204-101910_0.9_46",
     "20251204-102434_0.8_92",
+    "20251205-083116_0.33_100",
+    "20251205-084554_0.8_92",
+    "20251205-085351_0.9_56",
+    "20251205-090548_0.95_39",
+    "20251205-091208_0.999_24",
+    "20251212-092812_0.999_18",
+    "20251212-093216_0.33_100",
+    "20251212-095949_0.33_100",
+    "20251212-100257_0.999_22",
+    "20251212-115108_0.999_23",
+    "20251212-115351_0.33_100",
+    "20251212-130027_0.33_100",  # sparse + delta place + action magnitude
+    "20251212-130201_0.999_24",  # sparse + delta place + action magnitude
+    "20251215-105714_0.999_30",  # sparse only
+    "20251215-110132_0.33_100",  # sparse only
+    "20251215-112134_0.33_100",  # sparse + delta place
+    "20251215-112238_0.999_17",  # sparse + delta place
+    "20251215-120456_0.999_15",  # sparse + delta place + action magnitude
+    "20251215-120723_0.33_100",  # sparse + delta place + action magnitude
+    "20251215-134429_0.33_99",  # sparse + delta simple + action magnitude
+    "20251215-134537_0.999_24",  # sparse + delta simple + action magnitude
+    "20251215-144507_0.33_100",  # sparse only
+    "20251215-144631_0.999_28",  # sparse only
+    "20251215-151319_0.5_100",  # sparse only
+    "20251215-152854_0.999_23",  # sparse only
+    "20251215-161436_0.999_18",
+    "20251215-161550_0.9_48",
+    "20251215-161657_0.8_94",
+    "20251215-161813_0.33_100",
+    # start of 25-batch runs
+    "20251222-121602_0.33_100",
+    "20251222-121615_0.8_92",
+    "20251222-121639_0.9_60",
+    "20251222-121709_0.999_12",
+    "20251222-133328_0.33_100",
+    "20251222-133341_0.8_88",
+    "20251222-133401_0.9_68",
+    "20251222-133425_0.999_16",
+    "20251222-145841_0.33_100",
+    "20251222-145854_0.33_100",
+    "20251222-145907_0.999_24",
+    "20251222-145938_0.999_16",
+    # batch 100 runs
+    "20251223-120851_0.33_100",
+    "20251223-120945_0.8_79",
+    "20251223-121121_0.9_47",
+    "20251223-121317_0.95_45",
+    "20251223-121502_0.999_24",
+    # batch 500 runs
+    # "20251223-132427_0.0_100",
 }
 
 # 0) Load all data from subfolders
@@ -24,11 +75,16 @@ for exp_folder in os.listdir(base_folder):
     exp_path = Path(base_folder) / exp_folder
     if not exp_path.is_dir() or exp_folder in exp_folders_to_skip:
         continue
+    print(f"Processing folder: {exp_folder}")
 
     all_run_data[exp_folder] = []
-    for run_folder in os.listdir(exp_path):
-        run_file = exp_path / run_folder
-        if not run_file.is_file() or run_folder.endswith("_info.pkl"):
+    for run_path in os.listdir(exp_path):
+        run_file = exp_path / run_path
+        if (
+            not run_file.is_file()
+            or run_path.endswith("_info.pkl")
+            or run_path.endswith(".joblib")
+        ):
             continue
 
         run_data = np.load(run_file, allow_pickle=True)
@@ -47,7 +103,7 @@ for exp_folder in os.listdir(base_folder):
 buffer_sizes = {}
 for exp_folder, run_datas in all_run_data.items():
     total_size = 0
-    for run_data in run_datas:
+    for run_data in run_datas:  # [: len(run_datas) // 2]:
         total_size += len(run_data["observations"])
     buffer_sizes[exp_folder] = total_size
 global_buffer_size = sum(buffer_sizes.values())
@@ -74,7 +130,7 @@ global_buffer = ReplayBufferGpuWithPerfectActions(
 
 # 3) fill buffers
 for exp_folder, run_datas in all_run_data.items():
-    for run_data in run_datas:
+    for run_data in run_datas:  # [: len(run_datas) // 2]:
         all_observations = run_data["observations"]
         all_actions = run_data["actions"]
         all_rewards = run_data["rewards"]
@@ -100,8 +156,8 @@ for exp_folder, run_datas in all_run_data.items():
             terminated=terminated,
         )
 # 4) save buffers
-for exp_folder, buffer in buffers.items():
-    save_path = Path(base_folder) / exp_folder
-    buffer.save_buffer(save_path)
-global_save_path = Path(base_folder)
+# for exp_folder, buffer in buffers.items():
+#     save_path = Path(base_folder) / exp_folder
+#     buffer.save_buffer(save_path)
+global_save_path = Path(base_folder) / global_buffer_file_name
 global_buffer.save_buffer(global_save_path)

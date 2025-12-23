@@ -8,14 +8,14 @@ import os
 from argparse import ArgumentParser
 from gymnasium import spaces
 
-from crisp_drl.agents.sac.actor_linus import SACActor
-from crisp_drl.agents.sac.learner_linus import SACLearner
-from crisp_drl.agents.sac.config import SAC_Config
+from crisp_drl.agents.shared.actor import SACActor
+from crisp_drl.agents.sac_rlpd.learner import SACLearner
+from crisp_drl.agents.shared.config import Config
 
 import signal
 from contextlib import contextmanager
 
-from crisp_drl.envs import make
+from crisp_drl.envs import make_env
 
 
 @contextmanager
@@ -36,7 +36,7 @@ def launch_processes(args):
     # for policy parameters
     parameters_queue = ctx.Queue()
 
-    config = SAC_Config()
+    config = Config()
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     algo_name = str(os.path.dirname(__file__).split("/")[-1])
     if args.run_name is not None:
@@ -109,15 +109,15 @@ def launch_actor(
 ):
     logging.basicConfig(level=logging.INFO)
     try:
-        env = make.create_simulated_env(
+        env = make_env.create_simulated_env(
             {
                 "initial_keyframe": 2,
                 "lego_shift_range": (-0.002, 0.002),
                 "initial_position_range": (
                     np.array([-1.0, -1.0, -2.0]) * 1e-3,  # np.zeros(3),
-                    np.array([1.0, 1.0, -1.0]) * 1e-3,  # np.zeros(3),
+                    np.array([1.0, 1.0, -1.9]) * 1e-3,  # np.zeros(3),
                 ),
-                "live_view": True,
+                "live_view": False,
             }
         )
         actor = SACActor(args, parameters_queue, run_name, env)
@@ -141,7 +141,6 @@ def launch_learner(args, data_queue, parameters_queue, run_name):
             action_space,
             parameters_queue=parameters_queue,
             run_name=run_name,
-            n_cameras=1,
         )
     except Exception as e:
         logging.info(f"Failed to initialize SAC Learner: {e}", exc_info=True)
@@ -169,6 +168,12 @@ def main():
         help="Set the path to a pre-train buffer.",
     )
     argparse.add_argument(
+        "--expert_buffer_path",
+        type=str,
+        default=None,
+        help="Path to the prerecorded expert buffer.",
+    )
+    argparse.add_argument(
         "--load_policy", type=str, help="Checkpoint name of policy to be loaded."
     )
     argparse.add_argument(
@@ -183,6 +188,9 @@ def main():
     )
     argparse.add_argument(
         "--eval", action="store_true", help="Run model in evaluation mode."
+    )
+    argparse.add_argument(
+        "--load_encoder", type=str, help="Checkpoint name of encoder to be loaded."
     )
     args = argparse.parse_args()
     launch_processes(args)

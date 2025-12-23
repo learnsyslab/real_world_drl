@@ -1,3 +1,4 @@
+import joblib
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -6,21 +7,18 @@ import os
 import random
 import numpy as np
 import time
-import gymnasium as gym
 
 from torch import multiprocessing as mp
-from torchvision.models import resnet18, ResNet18_Weights
 from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
-from copy import deepcopy
 
+from crisp_drl.data import utils
+from crisp_drl.data import buffers_cleanrl
 from crisp_drl.data.buffers_cleanrl import (
-    ReplayBuffer,
     ReplayBufferGpu,
-    load_buffer_from_file,
 )
-from crisp_drl.agents.sac.config import SAC_Config
-from crisp_drl.agents.sac.networks_cleanrl import SoftQNetwork, Actor
+from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.networks_cleanrl import SharedEncoder, SoftQNetwork, Actor
 
 
 class SACLearner:
@@ -30,10 +28,9 @@ class SACLearner:
         action_space,
         parameters_queue: mp.Queue,
         run_name: str,
-        n_cameras: int,
     ):
         # Store the configuration parameters
-        self.config = SAC_Config()
+        self.config = Config()
         assert int(self.config.update_policy_after * self.config.utd_ratio) > 0, (
             "Invalid combination of update_policy_after and utd_ratio. "
             "Ensure that int(update_policy_after * utd_ratio) > 0."
@@ -78,7 +75,8 @@ class SACLearner:
         # initializing networks
         self.actor = Actor(action_space, self.config).to(self.device)
         obs_dim_networks = (
-            self.config.actor_nonvision_input_dim + self.config.vision_head_output_dim
+            self.config.actor_nonvision_input_dim
+            + self.config.vision_head_output_dim * self.config.n_cameras
         )
         self.q_networks = [
             SoftQNetwork(obs_dim_networks, self.action_space).to(self.device)
@@ -110,38 +108,35 @@ class SACLearner:
             for idx, target_net in enumerate(self.q_target_networks):
                 target_net.load_state_dict(self.q_networks[idx].state_dict())
 
-        # image encoders
-        if self.use_camera_inputs:
-            self.image_encoders = [
-                torch.nn.Sequential(
-                    torch.nn.Linear(self.config.vision_head_input_dim, 128),
-                    torch.nn.ReLU(),
-                    torch.nn.Linear(128, self.config.vision_head_output_dim),
-                ).to(self.device)
-                for _ in range(n_cameras)
-            ]
-            if self.load_model is not None:
-                for i, image_encoder in enumerate(self.image_encoders):
-                    image_encoder.load_state_dict(
-                        torch.load(
-                            f"checkpoints/{self.load_model}/image_encoder_{i}_state_dict.pth"
-                        )
-                    )
-            # image encoder optimizer
-            params = []
-            for image_encoder in self.image_encoders:
-                params += list(image_encoder.parameters())
-            self.img_encoder_optimizer = optim.Adam(params, lr=self.config.policy_lr)
-            if args.resume_training:
-                self.img_encoder_optimizer.load_state_dict(
-                    torch.load(
-                        f"checkpoints/{self.load_model}/img_encoder_optimizer_state_dict.pth"
-                    )
+        self.shared_encoder = SharedEncoder(self.config).to(self.device)
+        assert self.load_model is None or args.load_encoder is None, (
+            "Either load entire model or only encoder, not both."
+        )
+        if self.load_model is not None:
+            self.shared_encoder.load_state_dict(
+                torch.load(
+                    f"checkpoints/{self.load_model}/shared_encoder_state_dict.pth"
                 )
-        else:
-            self.image_encoders = []
+            )
+        elif args.load_encoder is not None:
+            assert self.config.n_cameras == 1, (
+                "Loading single encoder only works with one camera."
+            )
+            self.shared_encoder.image_encoders[0].load_state_dict(
+                utils.ae_state_dict_from_file(args.load_encoder)
+            )
 
         # optimizers
+        if self.config.shared_encoder_gradient:
+            self.shared_encoder_optimizer = optim.Adam(
+                self.shared_encoder.parameters(), lr=self.config.policy_lr
+            )
+            if args.resume_training:
+                self.shared_encoder_optimizer.load_state_dict(
+                    torch.load(
+                        f"checkpoints/{self.load_model}/shared_encoder_optimizer_state_dict.pth"
+                    )
+                )
         q_params = []
         for q_net in self.q_networks:
             q_params += list(q_net.parameters())
@@ -164,25 +159,20 @@ class SACLearner:
 
         # initializing the replay buffer
         if self.args.resume_training is not None:
-            self.replay_buffer = load_buffer_from_file(
-                f"checkpoints/{self.args.resume_training}/replay_buffer.joblib",
-                self.image_encoders,
+            self.replay_buffer = joblib.load(
+                f"checkpoints/{self.args.resume_training}/replay_buffer.joblib"
             )
             logging.info(
                 f"Loaded replay buffer from checkpoints/{self.args.resume_training}/replay_buffer.joblib"
             )
         elif self.args.pre_train is not None:
-            self.replay_buffer = load_buffer_from_file(
-                self.args.pre_train, self.image_encoders
-            )
+            self.replay_buffer = joblib.load(self.args.pre_train)
             logging.info(f"Loaded pre-train buffer from {self.args.pre_train}")
         else:
             self.replay_buffer = ReplayBufferGpu(
                 buffer_size=self.config.buffer_size,
                 observation_dim=self.config.actor_nonvision_input_dim
-                + self.config.vision_head_input_dim,
-                vision_head_input_dim=self.config.vision_head_input_dim,
-                image_encoders=self.image_encoders,
+                + self.config.vision_head_input_dim * self.config.n_cameras,
                 action_space=action_space,
                 device=self.device,
                 n_step_return=self.config.n_step_return,
@@ -215,9 +205,20 @@ class SACLearner:
             self.alpha = self.config.alpha
 
         self.current_training_step = 0
+        self.episode_num = 0
+        self.global_step = 0
+
         if args.resume_training is True:
             with open(f"checkpoints/{self.load_model}/current_training_step", "r") as f:
                 self.current_training_step = int(f.read())
+            with open(f"checkpoints/{self.load_model}/global_step", "r") as f:
+                self.global_step, self.episode_num = map(int, f.read().split(" "))
+
+        if self.args.expert_buffer_path is not None:
+            self.expert_buffer = joblib.load(self.args.expert_buffer_path)
+            logging.info(f"Loaded expert buffer from {self.args.expert_buffer_path}")
+        else:
+            self.expert_buffer = None
 
         # training checkpoint path
         self.run_name = os.path.basename(self.writer.log_dir)
@@ -253,15 +254,24 @@ class SACLearner:
                 while data_queue.empty():
                     time.sleep(0.1)
                 print("Learner starts training...")
+                episode_len = 0
                 while not data_queue.empty():
-                    obervations, actions, rewards, terminated = data_queue.get()
+                    actions, observations, rewards, termination = data_queue.get()
                     episode_len = len(actions)
                     self.replay_buffer.add_rollout(
-                        obs=obervations,
+                        obs=observations,
                         action=actions,
                         reward=rewards,
-                        terminated=terminated,
+                        terminated=termination,
                     )
+                    self.episode_num += 1
+                    self.global_step += episode_len
+                if self.replay_buffer.size() < self.config.learning_starts:
+                    print(
+                        f"Not enough data in replay buffer yet, skipping training: {self.replay_buffer.size()} < {self.config.learning_starts}"
+                    )
+                    self._sync_nodes()
+                    continue
 
                 for _ in range(int(episode_len * self.config.utd_ratio)):
                     _current_training_step += 1.0 / self.config.utd_ratio
@@ -285,20 +295,33 @@ class SACLearner:
     def _train_step(self, writer):
         """Perform a single training step using data from the replay buffer.
         This updates both the critics and the policy networks."""
-        data = self.replay_buffer.sample(self.config.batch_size)
+        if self.expert_buffer is not None:  # Do RLPD training
+            online_data = self.replay_buffer.sample(self.config.batch_size // 2)
+            expert_data = self.expert_buffer.sample(self.config.batch_size // 2)
 
-        with torch.no_grad():
-            next_state_actions, next_state_log_pis, _ = self.actor.get_action(
-                data.next_observations
+            observations = torch.cat(
+                (online_data.observations, expert_data.observations), dim=0
             )
+            actions = torch.cat((online_data.actions, expert_data.actions), dim=0)
+            rewards = torch.cat((online_data.rewards, expert_data.rewards), dim=0)
+            next_observations = torch.cat(
+                (online_data.next_observations, expert_data.next_observations), dim=0
+            )
+            dones = torch.cat((online_data.dones, expert_data.dones), dim=0)
+            data = buffers_cleanrl.ReplayBufferSamples(
+                observations, actions, next_observations, dones, rewards
+            )
+        else:  # Standard SAC training
+            data = self.replay_buffer.sample(self.config.batch_size)
+        with torch.no_grad():
+            next_obs = self.shared_encoder(data.next_observations)
+            next_state_actions, next_state_log_pis = self.actor(next_obs)
             # pick two random Q-networks from the ensemble
             ensemble_samples = random.sample(
                 range(self.config.num_critics), self.config.critic_subset_size
             )
             qf_next_targets = [
-                self.q_target_networks[i](
-                    data.next_observations, next_state_actions
-                ).view(-1)
+                self.q_target_networks[i](next_obs, next_state_actions).view(-1)
                 for i in ensemble_samples
             ]
             min_qf_next_targets = torch.min(torch.stack(qf_next_targets), dim=0)[
@@ -308,8 +331,12 @@ class SACLearner:
                 1 - data.dones.flatten()
             ) * self.config.gamma * (min_qf_next_targets).view(-1)
 
+        obs = utils.shared_encode(
+            self.shared_encoder, data.observations, self.config.shared_encoder_gradient
+        )
+
         qf_a_values = [
-            self.q_networks[i](data.observations, data.actions).view(-1)
+            self.q_networks[i](obs, data.actions).view(-1)
             for i in range(self.config.num_critics)
         ]
         qf_losses = [
@@ -318,24 +345,24 @@ class SACLearner:
         ]
         qf_loss = sum(qf_losses)
 
-        # optimize the q functions, image encoder and policy
-        if self.use_camera_inputs:
-            self.img_encoder_optimizer.zero_grad()
+        # optimize the q functions, shared encoder and policy
+        if self.config.shared_encoder_gradient:
+            self.shared_encoder_optimizer.zero_grad()
         self.q_optimizer.zero_grad()
         self.actor_optimizer.zero_grad()
 
-        if self.use_camera_inputs:
-            # retain graph for image encoder update
-            qf_loss.backward(retain_graph=True)
+        if self.config.shared_encoder_gradient:
+            # retain graph for shared encoder update
+            qf_loss.backward(retain_graph=True)  # type: ignore # PyTorch bug workaround
         else:
-            qf_loss.backward()
+            qf_loss.backward()  # type: ignore # PyTorch bug workaround
         self.q_optimizer.step()
 
-        if self.use_camera_inputs:
-            self.img_encoder_optimizer.step()
+        if self.config.shared_encoder_gradient:
+            self.shared_encoder_optimizer.step()
 
-        obs = data.observations.clone().detach()
-        pi, log_pi, _ = self.actor.get_action(obs)
+        obs = obs.clone().detach()
+        pi, log_pi = self.actor(obs)
         qf_pi = [self.q_networks[i](obs, pi) for i in range(self.config.num_critics)]
         min_qf_pi = qf_pi[0]
         for qf in qf_pi[1:]:
@@ -347,9 +374,9 @@ class SACLearner:
 
         # update temperature if needed
         if self.config.autotune:
-            with torch.no_grad():
-                _, log_pi, _ = self.actor.get_action(data.observations)
-            alpha_loss = (-self.log_alpha.exp() * (log_pi + self.target_entropy)).mean()
+            alpha_loss = (
+                -self.log_alpha.exp() * (log_pi.detach() + self.target_entropy)
+            ).mean()
 
             self.a_optimizer.zero_grad()
             alpha_loss.backward()
@@ -378,7 +405,7 @@ class SACLearner:
             )
             writer.add_scalar(
                 "losses/qf_loss_average",
-                qf_loss.item() / self.config.num_critics,
+                qf_loss.item() / self.config.num_critics,  # type: ignore # PyTorch bug workaround
                 self.current_training_step,
             )
             writer.add_scalar(
@@ -387,12 +414,17 @@ class SACLearner:
             writer.add_scalar("losses/alpha", self.alpha, self.current_training_step)
             if self.config.autotune:
                 writer.add_scalar(
-                    "losses/alpha_loss", alpha_loss.item(), self.current_training_step
+                    "losses/alpha_loss",
+                    alpha_loss.item(),  # type: ignore # PyTorch bug workaround
+                    self.current_training_step,
                 )
             if self.use_camera_inputs:
                 writer.add_scalar(
                     "weights_img_encoder",
-                    self.image_encoders[0][0].weight.data.norm().cpu().item(),
+                    self.shared_encoder.image_encoders[0]
+                    .fc1.weight.data.norm()  # type: ignore # insufficient type info
+                    .cpu()
+                    .item(),
                     self.current_training_step,
                 )
             writer.add_scalar(
@@ -421,18 +453,19 @@ class SACLearner:
     def _sync_nodes(self):
         """Sync all shared model parameters between actor and learner."""
         actor_parameters = self.actor.state_dict()
-
-        proj_heads_parameters = None
-        if self.use_camera_inputs:
-            proj_heads_parameters = [
-                encoder.state_dict() for encoder in self.image_encoders
-            ]
-        self.parameters_queue.put((actor_parameters, proj_heads_parameters))
+        shared_encoder_parameters = self.shared_encoder.state_dict()
+        shared_encoder_batchnorm_stats = self.shared_encoder.get_batchnorm_stats()
+        self.parameters_queue.put(
+            (
+                actor_parameters,
+                shared_encoder_parameters,
+                shared_encoder_batchnorm_stats,
+            )
+        )
 
     def close(self):
         """Close the learner and clean up resources."""
         logging.info("Executing SAC Learner closing behavior...")
-        self.writer.close()
 
         # Save the model parameters
         torch.save(
@@ -450,24 +483,30 @@ class SACLearner:
                     self.checkpoint_path, f"qf{idx + 1}_target_state_dict.pth"
                 ),
             )
-        torch.save(self.log_alpha, os.path.join(self.checkpoint_path, "log_alpha.pth"))
-        for i, encoder in enumerate(self.image_encoders):
+        if self.config.autotune:
             torch.save(
-                encoder.state_dict(),
-                os.path.join(self.checkpoint_path, f"image_encoder_{i}_state_dict.pth"),
+                self.log_alpha, os.path.join(self.checkpoint_path, "log_alpha.pth")
+            )
+            torch.save(
+                self.a_optimizer.state_dict(),
+                os.path.join(self.checkpoint_path, "a_optimizer_state_dict.pth"),
             )
         torch.save(
-            self.a_optimizer.state_dict(),
-            os.path.join(self.checkpoint_path, "a_optimizer_state_dict.pth"),
+            self.shared_encoder.state_dict(),
+            os.path.join(self.checkpoint_path, "shared_encoder_state_dict.pth"),
         )
+
         torch.save(
             self.q_optimizer.state_dict(),
             os.path.join(self.checkpoint_path, "q_optimizer_state_dict.pth"),
         )
-        torch.save(
-            self.img_encoder_optimizer.state_dict(),
-            os.path.join(self.checkpoint_path, "img_encoder_optimizer_state_dict.pth"),
-        )
+        if self.config.shared_encoder_gradient:
+            torch.save(
+                self.shared_encoder_optimizer.state_dict(),
+                os.path.join(
+                    self.checkpoint_path, "shared_encoder_optimizer_state_dict.pth"
+                ),
+            )
         torch.save(
             self.actor_optimizer.state_dict(),
             os.path.join(self.checkpoint_path, "actor_optimizer_state_dict.pth"),
@@ -476,6 +515,12 @@ class SACLearner:
             os.path.join(self.checkpoint_path, "current_training_step"), "w"
         ) as f:
             f.write(str(self.current_training_step))
+
+        if not self.args.eval:
+            with open(os.path.join(self.checkpoint_path, "global_step"), "w") as f:
+                f.write(f"{self.global_step} {self.episode_num}")
+            self.writer.close()
+
         self.replay_buffer.save_buffer(self.checkpoint_path)
         torch.cuda.empty_cache()
         logging.info("Model parameters saved successfully.")

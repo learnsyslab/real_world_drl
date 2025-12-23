@@ -7,10 +7,22 @@ from torch.utils.data import DataLoader
 from torchvision.models import ResNet18_Weights
 from collections import defaultdict
 
-from crisp_drl.agents.rlpd.config import RLPD_Config
+from crisp_drl.agents.shared.config import Config
 
 
 RESNET18_TRANSFORM = ResNet18_Weights.DEFAULT.transforms(antialias=True)
+
+
+def shared_encode(
+    shared_encoder: torch.nn.Module,
+    observation: torch.Tensor,
+    requires_grad: bool,
+) -> torch.Tensor:
+    if requires_grad:
+        return shared_encoder(observation)
+    else:
+        with torch.no_grad():
+            return shared_encoder(observation)
 
 
 def crisp_batch_concat_obs_to_tensor(
@@ -125,7 +137,7 @@ def load_buffer_from_lerobot_dataset(dataset, buffer, num_episodes: int):
     :param num_episodes: The number of episodes to load (default: None = load all)
     """
     BATCH_SIZE = 1024
-    config = RLPD_Config()
+    config = Config()
     total_recorded_steps = len(dataset)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, num_workers=8)
 
@@ -178,3 +190,15 @@ def load_buffer_from_lerobot_dataset(dataset, buffer, num_episodes: int):
         reward = np.array([config.success_reward])
         done = np.ones(1, dtype=bool)
     buffer.add(prev_obs, prev_obs, prev_action, reward, done, {})
+
+
+def ae_state_dict_from_file(file_path: str):
+    """Load a state dict from a file."""
+    d = torch.load(file_path)["model_state_dict"]
+    # replace keys enoder.* with *
+    new_d = {}
+    for k, v in d.items():
+        if k.startswith("encoder."):
+            new_k = k[len("encoder.") :]
+            new_d[new_k] = v
+    return new_d

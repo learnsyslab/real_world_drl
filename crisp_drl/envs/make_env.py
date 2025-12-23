@@ -21,15 +21,9 @@ from pathlib import Path
 from copy import deepcopy
 
 
-from crisp_drl.agents.rlpd.rewards import (
-    dense_place_reward,
-    sparse_place_reward,
-    prune_after_async_termination,
-    xy_dense_place_reward,
-)
-from crisp_drl.agents.sac.config import SAC_Config
-from crisp_drl.agents.sac.networks_cleanrl import Actor
-from crisp_drl.agents.rlpd.env_wrappers import (
+from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.networks_cleanrl import Actor
+from crisp_drl.agents.shared.env_wrappers import (
     ActionTimeStampWrapper,
     BelowZTerminationWrapper,
     CLIWrapper,
@@ -45,8 +39,8 @@ from crisp_drl.agents.rlpd.env_wrappers import (
     NaiveZForceWrapper,
     NoRotationActionWrapper,
     NoRotationNoGripperActionWrapper,
+    NoRotationNoGripperNoZActionClippedWrapperSim,
     NoRotationNoGripperNoZActionWrapper,
-    NoRotationNoGripperNoZActionWrapperSim,
     ObservationFormatterWrapper,
     SafetyBoxWrapperXY,
     StepLimitEnforcerWrapper,
@@ -105,9 +99,9 @@ def create_real_env() -> gym.Env:
     # ('observation.error.gripper', (0, 1), 20.0), ('observation.state.gripper', (0, 1), 1.0),
     # ('observation.target.gripper', (0, 1), 1.0), ('observation.images.wrist_camera', (0, 512), 1.0),
     # ('observation.images.side_camera', (0, 512), 1.0)])
-    assert (
-        torch.cuda.is_available()
-    ), "CUDA must be available to use ObservationFormatterWrapper"
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
     env = ObservationFormatterWrapper(
         env,
         "cuda",
@@ -127,6 +121,8 @@ def create_real_env() -> gym.Env:
 
 def create_simulated_env(config: dict) -> gym.Env:
     """Create a new environment instance."""
+    sac_config = Config()
+    config["n_cameras"] = sac_config.n_cameras
     env = mujid_env.MujidEnv(
         config=config,
     )
@@ -146,24 +142,27 @@ def create_simulated_env(config: dict) -> gym.Env:
         ideal_grasp_position=np.array([0.0, 0.0]),
     )
     env = CustomTerminationWrapper(env, termination_fn=custom_sim_termination)
-    env = DinoImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))
+    env = DinoImageEncoderWrapper(
+        env, n_cameras=sac_config.n_cameras, image_size=(256, 256)
+    )
     # env = ImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))
     env = DictObservationToInfoMover(env)
-    assert (
-        torch.cuda.is_available()
-    ), "CUDA must be available to use ObservationFormatterWrapper"
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
     env = ObservationFormatterWrapper(
         env,
         "cuda",
         keys_ranges_scales=[
-            ("observation.previous.action", (0, 2), 10.0),
-            ("observation.previous.error.cartesian", (0, 3), 10.0),
-            ("observation.velocity.cartesian", (0, 3), 100.0),
-            ("observation.error.cartesian", (0, 3), 10.0),
-            ("observation.images.wrist_camera", (0, 512), 1.0),
+            ("observation.previous.action", (0, 2), 1000.0),
+            ("observation.previous.error.cartesian", (0, 3), 1000.0),
+            ("observation.velocity.cartesian", (0, 3), 1000.0),
+            ("observation.error.cartesian", (0, 3), 1000.0),
+            ("observation.images.wrist_camera_1", (0, 512), 1.0),
+            # ("observation.images.wrist_camera_2", (0, 512), 1.0),
         ],
     )
-    env = NoRotationNoGripperNoZActionWrapperSim(env)
+    env = NoRotationNoGripperNoZActionClippedWrapperSim(env, clip=0.0003)
 
     return env
 

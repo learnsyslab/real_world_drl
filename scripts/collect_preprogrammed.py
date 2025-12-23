@@ -9,11 +9,29 @@ import os
 
 from argparse import ArgumentParser
 
-from crisp_drl.agents.rlpd.actor import RLPDActor
-from crisp_drl.agents.rlpd.env_wrappers import ActionTimeStampWrapper, BelowZTerminationWrapper, CLIWrapper, DictObservationToInfoMover, ContainerWatcherWrapper, FarAwayTerminationWrapper, ImageEncoderWrapper, InsertionResetWrapper, LastObservationWrapper, ObservationFormatterWrapper, PrintCartesianInfoWrapper, TimeMeasurementWrapper, VideoWrapper, observation_has_z_pressure
+from crisp_drl.agents.shared.actor import Actor
+from crisp_drl.agents.shared.env_wrappers import (
+    ActionTimeStampWrapper,
+    BelowZTerminationWrapper,
+    CLIWrapper,
+    DictObservationToInfoMover,
+    ContainerWatcherWrapper,
+    FarAwayTerminationWrapper,
+    ImageEncoderWrapper,
+    InsertionResetWrapper,
+    LastObservationWrapper,
+    ObservationFormatterWrapper,
+    PrintCartesianInfoWrapper,
+    TimeMeasurementWrapper,
+    VideoWrapper,
+    observation_has_z_pressure,
+)
 from crisp_drl.agents.rlpd.learner import RLPDLearner
-from crisp_drl.agents.rlpd.config import RLPD_Config
-from crisp_drl.agents.rlpd.rewards import sparse_place_reward, prune_after_async_termination
+from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.rewards import (
+    sparse_place_reward,
+    prune_after_async_termination,
+)
 from crisp_gym.manipulator_env import make_env
 from crisp_gym.util.rl_utils import load_actions_safe
 
@@ -39,8 +57,7 @@ def launch_processes(args):
     rclpy.init()
     ctx = mp.get_context("spawn")
 
-
-    config = RLPD_Config()
+    config = Config()
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     algo_name = str(os.path.dirname(__file__).split("/")[-1])
     if args.run_name is not None:
@@ -50,12 +67,9 @@ def launch_processes(args):
 
     try:
         # start actor
-        actor_process = ctx.Process(target=launch_actor, args=(args,
-            
-                                                               run_name))
+        actor_process = ctx.Process(target=launch_actor, args=(args, run_name))
         actor_process.start()
         logging.info(f"RLPD actor process started with PID: {actor_process.pid}")
-
 
     except KeyboardInterrupt:
         logging.info("Ending Processes")
@@ -65,7 +79,6 @@ def launch_processes(args):
     finally:
         if "actor_process" in locals():
             actor_process.join(timeout=2)
-
 
             if rclpy.ok():
                 rclpy.shutdown()
@@ -90,21 +103,27 @@ class PlaybackActionSource:
     def next(self, _obs):
         if self.i < len(self.actions):
             self.i += 1
-            return self.actions[self.i-1]
-        
+            return self.actions[self.i - 1]
+
 
 class NaiveToGoalPositionPolicy:
-    def __init__(self, goal_position, step_size_xy=0.001, step_size_z=0.00033, epsilon_magnitude=0.5, epsilon_direction=0.5):
+    def __init__(
+        self,
+        goal_position,
+        step_size_xy=0.001,
+        step_size_z=0.00033,
+        epsilon_magnitude=0.5,
+        epsilon_direction=0.5,
+    ):
         self.step_size_xy = step_size_xy
         self.step_size_z = step_size_z
         self.goal_position = goal_position
         self.epsilon_magnitude = epsilon_magnitude
         self.epsilon_direction = epsilon_direction
 
-
     def next(self, obs):
         # if xy close, go directly to goal, otherwise go in xy direction
-        current_pos = obs['observation.state.cartesian'][:3]
+        current_pos = obs["observation.state.cartesian"][:3]
         delta = self.goal_position - current_pos
         action = np.zeros(7)
         norm_xy = np.linalg.norm(delta[:2])
@@ -116,29 +135,49 @@ class NaiveToGoalPositionPolicy:
             action[:2] = np.array([np.cos(angle), np.sin(angle)]) * random_magnitude
         else:
             do_random_magnitude = np.random.rand() > self.epsilon_magnitude
-            if do_random_magnitude: 
+            if do_random_magnitude:
                 random_magnitude = np.random.rand() * self.step_size_xy
                 action[:2] = delta[:2] / norm_xy * random_magnitude
             else:
                 action[:2] = delta[:2] * min(self.step_size_xy / norm_xy, 1.0)
-                
-        
-        
+
         action[2] = -self.step_size_z
         return action
 
-def launch_actor(args, run_name,):
+
+def launch_actor(
+    args,
+    run_name,
+):
     logging.basicConfig(level=logging.INFO)
     pass
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
     argparse = ArgumentParser()
-    argparse.add_argument("--run_name", type=str, default=None, help="Set the checkpoint name for the experiment. Per default the timestamp is used.")
-    argparse.add_argument("--load_policy", type=str, help="Checkpoint name of policy to be loaded.")
-    argparse.add_argument("--resume_training", type=str, help="Checkpoint name to be resumed from. This will load the policy, image encoder and replay buffer.")
-    argparse.add_argument("--cli_training", action="store_true", help="Run training loop with interactive command line interface.")
-    argparse.add_argument("--eval", action="store_true", help="Run model in evaluation mode.")
+    argparse.add_argument(
+        "--run_name",
+        type=str,
+        default=None,
+        help="Set the checkpoint name for the experiment. Per default the timestamp is used.",
+    )
+    argparse.add_argument(
+        "--load_policy", type=str, help="Checkpoint name of policy to be loaded."
+    )
+    argparse.add_argument(
+        "--resume_training",
+        type=str,
+        help="Checkpoint name to be resumed from. This will load the policy, image encoder and replay buffer.",
+    )
+    argparse.add_argument(
+        "--cli_training",
+        action="store_true",
+        help="Run training loop with interactive command line interface.",
+    )
+    argparse.add_argument(
+        "--eval", action="store_true", help="Run model in evaluation mode."
+    )
     args = argparse.parse_args()
     alg_name = "PreProgrammedPolicy"
 
@@ -156,7 +195,7 @@ def main():
     env.wait_until_ready()
     print("Env ready.")
 
-    # env = InsertionResetWrapper(env, initial_pos=np.array([0.200, -0.020, -0.200]), grasp_randomization_bounds=(np.array([-0.003, -0.003, -0.001]), np.array([0.003, 0.003, 0.0015])), 
+    # env = InsertionResetWrapper(env, initial_pos=np.array([0.200, -0.020, -0.200]), grasp_randomization_bounds=(np.array([-0.003, -0.003, -0.001]), np.array([0.003, 0.003, 0.0015])),
     #                             insert_randomization_bounds=(np.array([-0.01, -0.01, 0.0]), np.array([0.01, 0.01, 0.005])), action_sequence_to_grasp=load_actions_safe("v3_go_to_pick.json"), action_sequence_after_grasp=load_actions_safe("v3_after_pick.json"))
     # env = ActionTimeStampWrapper(env)
     # # env = PrintCartesianInfoWrapper(env)
@@ -172,31 +211,66 @@ def main():
     # env = DictObservationToInfoMover(env)
     # # env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,3), 10.0), ('observation.previous.action', (6,7), 20.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0), ('observation.velocity.gripper', (0, 1), 20.0),
     # #                                         ('observation.error.gripper', (0, 1), 20.0), ('observation.state.gripper', (0, 1), 1.0), ('observation.target.gripper', (0, 1), 1.0), ('observation.images.wrist_camera', (0, 512), 1.0), ('observation.images.side_camera', (0, 512), 1.0)])
-    # env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,3), 10.0), ('observation.previous.error.cartesian', (0,3), 10.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0), 
+    # env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,3), 10.0), ('observation.previous.error.cartesian', (0,3), 10.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0),
     #                                                            ('observation.images.wrist_camera', (0, 512), 1.0), ('observation.images.side_camera', (0, 512), 1.0)]) # 268 or 1036
 
-    env = InsertionResetWrapper(env, initial_pos=np.array([0.200, -0.020, -0.200]), grasp_randomization_bounds=(np.array([-0.002, -0.002, -0.001]), np.array([0.002, 0.002, 0.001])), 
-                                insert_randomization_bounds=(np.array([-0.015, -0.015, 0.01]), np.array([0.015, 0.015, 0.02])), action_sequence_to_grasp=load_actions_safe("v3_go_to_pick.json"), action_sequence_after_grasp=load_actions_safe("v3_after_pick.json"))
+    env = InsertionResetWrapper(
+        env,
+        initial_pos=np.array([0.200, -0.020, -0.200]),
+        grasp_randomization_bounds=(
+            np.array([-0.002, -0.002, -0.001]),
+            np.array([0.002, 0.002, 0.001]),
+        ),
+        insert_randomization_bounds=(
+            np.array([-0.015, -0.015, 0.01]),
+            np.array([0.015, 0.015, 0.02]),
+        ),
+        action_sequence_to_grasp=load_actions_safe("v3_go_to_pick.json"),
+        action_sequence_after_grasp=load_actions_safe("v3_after_pick.json"),
+    )
     env = ActionTimeStampWrapper(env)
     env = LastObservationWrapper(env)
     env = ContainerWatcherWrapper(env, ctx=mp.get_context("spawn"))
 
-    env = CLIWrapper(env, termination_fn = lambda _obs: False) # obs["observation.state.cartesian"][2] < 0.049) # functools.partial(observation_has_z_pressure_or_below, error_threshold=0.005, previous_error_threshold=0.003, min_z_height=0.055, terminate_z_height = 0.0475))
-    env = VideoWrapper(env, video_dir=f"recordings/{run_name}", camera_keys = ["observation.images.wrist_camera"], fps=15)
+    env = CLIWrapper(
+        env, termination_fn=lambda _obs: False
+    )  # obs["observation.state.cartesian"][2] < 0.049) # functools.partial(observation_has_z_pressure_or_below, error_threshold=0.005, previous_error_threshold=0.003, min_z_height=0.055, terminate_z_height = 0.0475))
+    env = VideoWrapper(
+        env,
+        video_dir=f"recordings/{run_name}",
+        camera_keys=["observation.images.wrist_camera"],
+        fps=15,
+    )
     env = ImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))
     env = DictObservationToInfoMover(env)
-    env = ObservationFormatterWrapper(env, keys_ranges_scales=[('observation.previous.action', (0,2), 10.0), ('observation.previous.error.cartesian', (0,3), 10.0), ('observation.velocity.cartesian', (0, 3), 100.0), ('observation.error.cartesian', (0, 3), 10.0), 
-                                                            ('observation.images.wrist_camera', (0, 512), 1.0), 
-                                                            # ('observation.images.side_camera', (0, 512), 1.0)
-                                                            ]) # 268 or 1036
+    env = ObservationFormatterWrapper(
+        env,
+        keys_ranges_scales=[
+            ("observation.previous.action", (0, 2), 10.0),
+            ("observation.previous.error.cartesian", (0, 3), 10.0),
+            ("observation.velocity.cartesian", (0, 3), 100.0),
+            ("observation.error.cartesian", (0, 3), 10.0),
+            ("observation.images.wrist_camera", (0, 512), 1.0),
+            # ('observation.images.side_camera', (0, 512), 1.0)
+        ],
+    )  # 268 or 1036
 
     argparse = ArgumentParser()
-    argparse.add_argument("--run_name", type=str, default=None, help="Set the checkpoint name for the experiment. Per default the timestamp is used.")
-    argparse.add_argument("--load_policy", type=str, help="Checkpoint name of policy to be loaded.")
-    argparse.add_argument("--resume_training", type=str, help="Checkpoint name to be resumed from. This will load the policy, image encoder and replay buffer.")
+    argparse.add_argument(
+        "--run_name",
+        type=str,
+        default=None,
+        help="Set the checkpoint name for the experiment. Per default the timestamp is used.",
+    )
+    argparse.add_argument(
+        "--load_policy", type=str, help="Checkpoint name of policy to be loaded."
+    )
+    argparse.add_argument(
+        "--resume_training",
+        type=str,
+        help="Checkpoint name to be resumed from. This will load the policy, image encoder and replay buffer.",
+    )
     args = argparse.parse_args()
-
-
 
     # insert_trajectory = load_actions_safe("v4_put_down_closed.json")
 
@@ -206,7 +280,6 @@ def main():
     #   actor class everything in eval mode; actor has one ffnn per camera; one shared for all features
     # Learner loop: wait for rollout, add to buffer, do up to utd-x samples (every n check for new rollout, every N send new weights)
 
-
     while True:
         obs, reset_info = env.reset()
 
@@ -215,13 +288,18 @@ def main():
         # action_source = PlaybackActionSource(np.concatenate(([reset_action / 10] * 10, insert_trajectory), axis=0))
 
         # compute actual goal position based on where the object was grasped
-        goal_position = np.array([0.541, -0.034,  0.0435])
-        ideal_grasp_pos = np.array([0.58833, -0.13817,  0.04229])
-        goal_position[0] += actual_grasp_pos[0] - ideal_grasp_pos[0] 
+        goal_position = np.array([0.541, -0.034, 0.0435])
+        ideal_grasp_pos = np.array([0.58833, -0.13817, 0.04229])
+        goal_position[0] += actual_grasp_pos[0] - ideal_grasp_pos[0]
         goal_position[2] += actual_grasp_pos[2] - ideal_grasp_pos[2]
-        print(f"actual grasped pos: {(actual_grasp_pos-ideal_grasp_pos) * 1000} mm")
-        policy = NaiveToGoalPositionPolicy(goal_position=goal_position, step_size_xy=0.0008, step_size_z=0.00025, epsilon_direction=0.25, epsilon_magnitude=0.25)
-
+        print(f"actual grasped pos: {(actual_grasp_pos - ideal_grasp_pos) * 1000} mm")
+        policy = NaiveToGoalPositionPolicy(
+            goal_position=goal_position,
+            step_size_xy=0.0008,
+            step_size_z=0.00025,
+            epsilon_direction=0.25,
+            epsilon_magnitude=0.25,
+        )
 
         all_actions = []
         action_timestamps = []
@@ -245,26 +323,45 @@ def main():
 
             all_observations.append(obs)
             all_infos.append(info)
-            
-            if truncated or terminated: 
+
+            if truncated or terminated:
                 break
 
         if truncated:
             print("Truncated, continuing.")
             continue
-        all_actions, all_observations, all_infos = prune_after_async_termination(all_actions, all_observations, all_infos, {"E_CONTROLLER_ISSUE", "E_TORQUE"})
-        all_rewards = sparse_place_reward(all_actions, all_observations, all_infos, {"E_TORQUE": -10.0, "E_FAR_AWAY": -3.0, "E_BELOW_Z": -3.0, "E_SUCCESS": 10.0, "E_FAIL": -1.0, "E_BAD_BEHAVIOR": -5.0, "E_CONTROLLER_ISSUE": 0.0})
+        all_actions, all_observations, all_infos = prune_after_async_termination(
+            all_actions, all_observations, all_infos, {"E_CONTROLLER_ISSUE", "E_TORQUE"}
+        )
+        all_rewards = sparse_place_reward(
+            all_actions,
+            all_observations,
+            all_infos,
+            {
+                "E_TORQUE": -10.0,
+                "E_FAR_AWAY": -3.0,
+                "E_BELOW_Z": -3.0,
+                "E_SUCCESS": 10.0,
+                "E_FAIL": -1.0,
+                "E_BAD_BEHAVIOR": -5.0,
+                "E_CONTROLLER_ISSUE": 0.0,
+            },
+        )
 
         print(f"Got reward {all_rewards[-1]}, saving run")
         # Save data for complete rollout
         with open(f"rollouts/{run_name}/{run_number}.pkl", "wb") as f:
-            pickle.dump({"actions": all_actions, "rewards": all_rewards, "observations": all_observations, 
-                            "infos": all_infos, "reset_info": reset_info}, f)
+            pickle.dump(
+                {
+                    "actions": all_actions,
+                    "rewards": all_rewards,
+                    "observations": all_observations,
+                    "infos": all_infos,
+                    "reset_info": reset_info,
+                },
+                f,
+            )
             run_number += 1
-
-
-
-
 
 
 if __name__ == "__main__":

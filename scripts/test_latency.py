@@ -5,7 +5,7 @@ import time
 import numpy as np
 import multiprocessing as mp
 
-from crisp_drl.agents.rlpd.env_wrappers import (
+from crisp_drl.agents.shared.env_wrappers import (
     ActionTimeStampWrapper,
     BelowZTerminationWrapper,
     CLIWrapper,

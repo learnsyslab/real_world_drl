@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 
 EVENT_REWARD_MAP = {
     "E_TORQUE": -10.0,
@@ -11,8 +12,8 @@ EVENT_REWARD_MAP = {
 }
 
 
-def _add_sparse_reward(
-    action_sequence, observation_sequence, infos, event_reward_map, rewards
+def sparse_event_reward(
+    action_sequence, observation_sequence, reward_sequence, infos, event_reward_map
 ):
     action_timestamps = list(map(lambda info: info["action_t"], infos[1:]))
     for info in infos[1:]:
@@ -31,13 +32,14 @@ def _add_sparse_reward(
             if action_t > timestamp:
                 i_event = i - 1
 
-        rewards[i_event] += event_reward_map[event]
-    return rewards
+        reward_sequence[i_event] += event_reward_map[event]
+    return reward_sequence
 
 
 def prune_after_async_termination(
     action_sequence: list,
     observation_sequence: list,
+    reward_sequence: list,
     infos: list,
     async_terminating_events: set[str],
 ) -> tuple:
@@ -55,25 +57,20 @@ def prune_after_async_termination(
                     event = event_
 
     if timestamp is None or infos[-1]["action_t"] < timestamp:
-        return action_sequence, observation_sequence, infos
+        return action_sequence, observation_sequence, reward_sequence, infos
 
     for i, info in enumerate(infos):
         if info["action_t"] > timestamp:
             if event not in list(map(lambda xy: xy[1], infos[i - 1]["custom_events"])):
                 infos[i - 1]["custom_events"].insert(0, (timestamp, event))
-            return action_sequence[:i], observation_sequence[:i], infos[:i]
+            return (
+                action_sequence[:i],
+                observation_sequence[:i],
+                reward_sequence[:i],
+                infos[:i],
+            )
 
     assert False, "unreachable"
-
-
-def sparse_place_reward(
-    action_sequence, observation_sequence, infos, event_reward_map=EVENT_REWARD_MAP
-):
-    # w_motion = 1.0
-    rewards = [0.0 for _ in range(len(action_sequence))]
-    return _add_sparse_reward(
-        action_sequence, observation_sequence, infos, event_reward_map, rewards
-    )
 
 
 def dense_place_reward(
@@ -114,9 +111,10 @@ def dense_place_reward(
     )
 
 
-def xy_dense_place_reward(
+def xy_dense_delta_place_reward(
     action_sequence,
     observation_sequence,
+    rewards,
     infos,
     event_reward_map=EVENT_REWARD_MAP,
     max_rew=0.01,
@@ -125,7 +123,6 @@ def xy_dense_place_reward(
     ideal_grasp_pos_xy=np.array([0.58833, -0.13817]),
     actual_grasp_pos_xy: np.ndarray = None,
 ):
-    rewards = []
     estimated_goal_pos_xy = ideal_goal_pos_xy
     estimated_goal_pos_xy[0] += actual_grasp_pos_xy[0] - ideal_grasp_pos_xy[0]
     for i, action, observation in zip(
@@ -150,10 +147,8 @@ def xy_dense_place_reward(
         )
 
         rew += rew_angle * rew_magnitude * max_rew
-        rewards.append(rew)
-    return _add_sparse_reward(
-        action_sequence, observation_sequence, infos, event_reward_map, rewards
-    )
+        rewards[i] += rew
+    return rewards
 
 
 def xy_action_magnitude_dense_reward(
@@ -163,7 +158,12 @@ def xy_action_magnitude_dense_reward(
     reward=-0.05,
 ):
     for i, action in zip(range(1000000), action_sequence):
-        action_magnitude = np.linalg.norm(action[:2])
+        if type(action) is torch.Tensor:
+            action_magnitude = torch.norm(action[:2])
+        elif type(action) is np.ndarray:
+            action_magnitude = np.linalg.norm(action[:2])
+        else:
+            raise ValueError(f"Unsupported action type: {type(action)}")
         if action_magnitude > threshold:
             rewards[i] += reward
     return rewards
@@ -172,6 +172,7 @@ def xy_action_magnitude_dense_reward(
 def xy_dense_simple_place_reward(
     action_sequence,
     observation_sequence,
+    reward_sequence,
     infos,
     event_reward_map=EVENT_REWARD_MAP,
     max_rew=0.01,
@@ -181,7 +182,6 @@ def xy_dense_simple_place_reward(
     ideal_grasp_pos_xy=np.array([0.58833, -0.13817]),
     actual_grasp_pos_xy: np.ndarray = None,
 ):
-    rewards = []
     # if event_reward_map["E_SUCCESS"] != max_rew / (1 - gamma) / 2:
     #     print(
     #         f"[REWARD] WARNING: E_SUCCESS reward {event_reward_map['E_SUCCESS']} does not match dense reward max_rew "
@@ -210,7 +210,5 @@ def xy_dense_simple_place_reward(
             # np.exp(-np.linalg.norm(delta_xy_mm) / sigma) * max_rew
             - max_rew / 2
         )
-        rewards.append(rew)
-    return _add_sparse_reward(
-        action_sequence, observation_sequence, infos, event_reward_map, rewards
-    )
+        reward_sequence[i] += rew
+    return reward_sequence

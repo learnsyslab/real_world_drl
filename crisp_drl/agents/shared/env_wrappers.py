@@ -16,7 +16,7 @@ import torch.multiprocessing as mp
 from pynput import keyboard
 from gymnasium import spaces
 import imageio
-from crisp_drl.agents.rlpd.config import RLPD_Config
+from crisp_drl.agents.shared.config import Config
 
 
 # Make cuDNN deterministic for consistent inference
@@ -298,7 +298,7 @@ class ImageEncoderWrapper(ObservationWrapper):
         self.model.eval()
 
         self._gpu_input = torch.zeros(
-            (2, 224, 224, 3), dtype=torch.float32, device=self.device
+            (self.n_cameras, 224, 224, 3), dtype=torch.float32, device=self.device
         )
 
     def observation(self, observation):
@@ -796,13 +796,14 @@ class NoRotationNoGripperNoZActionWrapper(Wrapper):
         return self.env.step(self.action(action), block=block)
 
 
-class NoRotationNoGripperNoZActionWrapperSim(Wrapper):
-    def __init__(self, env):
+class NoRotationNoGripperNoZActionClippedWrapperSim(Wrapper):
+    def __init__(self, env, clip=0.00025):
         super().__init__(env)
         self.action_space = spaces.Box(-np.inf, np.inf, (2,))
+        self.clip = clip
 
     def action(self, action):
-        action = np.concatenate((action, np.zeros(5)))
+        action = np.concatenate((np.clip(action, -self.clip, self.clip), np.zeros(5)))
         action[3] = 1.0  # No rotation quaternion w=1
         return action
 
@@ -1127,6 +1128,7 @@ class SafetyBoxWrapperXY(ActionWrapper):
         self.base_goal_position = base_goal_position
         self.ideal_grasp_pos = ideal_grasp_position
         self.goal_position = None
+        self.ideal_goal_position = None
         self._obs = None
         self.randomize = randomize
         self.coarse = coarse
@@ -1137,6 +1139,7 @@ class SafetyBoxWrapperXY(ActionWrapper):
         # compute actual goal position based on where the object was grasped
         self.goal_position = self.base_goal_position.copy()
         self.goal_position[0] += actual_grasp_pos[0] - self.ideal_grasp_pos[0]
+        self.ideal_goal_position = self.goal_position.copy()
         if self.randomize:
             self.goal_position += np.random.uniform(
                 -self.box_radius * 0.8, self.box_radius * 0.8, size=(2,)
@@ -1151,6 +1154,7 @@ class SafetyBoxWrapperXY(ActionWrapper):
         current_pos = self._obs["observation.state.cartesian"][:2]
         action = np.zeros(7)
         delta = self.goal_position - current_pos
+        norm_ideal = np.linalg.norm(self.ideal_goal_position - current_pos)
         norm_xy = np.linalg.norm(delta)
 
         if not self.coarse or norm_xy > self.box_radius:
@@ -1159,6 +1163,12 @@ class SafetyBoxWrapperXY(ActionWrapper):
         observation, reward, terminated, truncated, info = self.env.step(
             base_action + action, block=block
         )
+        if not self.coarse or (
+            norm_xy > self.box_radius and norm_ideal > self.box_radius * 0.75
+        ):
+            append_or_insert(
+                info, "custom_events", (time.time(), "E_SAFETY_BOX_VIOLATION")
+            )
         # info['action.naive'] = np.copy(action)
         self._obs = observation
         return observation, reward, terminated, truncated, info
@@ -1560,3 +1570,13 @@ class StepLimitEnforcerWrapper(Wrapper):
             truncated = True
 
         return observation, reward, terminated, truncated, info
+
+
+class ObservationNormalizerWrapper(ObservationWrapper):
+    def __init__(self, env, means: torch.Tensor, stds: torch.Tensor, device):
+        super().__init__(env)
+        self.means = means.to(device)
+        self.stds = stds.to(device)
+
+    def observation(self, observation):
+        return (observation - self.means) / self.stds

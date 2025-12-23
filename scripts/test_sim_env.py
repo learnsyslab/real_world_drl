@@ -1,9 +1,9 @@
 import mujoco
 import numpy as np
-from crisp_drl.envs import make
+from crisp_drl.envs import make_env
 
 
-env = make.create_simulated_env(
+env = make_env.create_simulated_env(
     {
         "initial_keyframe": 2,
         "lego_shift_range": (-0.002, 0.002),

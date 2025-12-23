@@ -96,9 +96,9 @@ def get_action_dim(action_space: spaces.Space) -> int:
         return int(len(action_space.nvec))
     elif isinstance(action_space, spaces.MultiBinary):
         # Number of binary actions
-        assert isinstance(
-            action_space.n, int
-        ), f"Multi-dimensional MultiBinary({action_space.n}) action space is not supported. You can flatten it instead."
+        assert isinstance(action_space.n, int), (
+            f"Multi-dimensional MultiBinary({action_space.n}) action space is not supported. You can flatten it instead."
+        )
         return int(action_space.n)
     else:
         raise NotImplementedError(f"{action_space} action space is not supported")
@@ -160,16 +160,8 @@ def get_device(device: th.device | str = "auto") -> th.device:
     return device
 
 
-def load_buffer_from_file(path: str, image_encoders) -> BaseBuffer:
-    """
-    Load the replay buffer from a file.
-
-    :param path: Path to the file from which to load the buffer
-    """
-    buffer = load(path)
-
-    buffer.image_encoders = image_encoders
-    return buffer
+# Deprecated function, use joblib.load instead
+# def load_buffer_from_file(path: str, image_encoders) -> BaseBuffer:
 
 
 class BaseBuffer(ABC):
@@ -688,8 +680,6 @@ class ReplayBufferGpu:
         self,
         buffer_size: int,
         observation_dim: int,
-        vision_head_input_dim: int,
-        image_encoders: list[th.nn.Sequential],
         action_space: spaces.Space,
         n_step_return: int = 1,
         gamma: float = 0.99,
@@ -697,10 +687,8 @@ class ReplayBufferGpu:
     ):
         self.buffer_size = max(buffer_size, 1)
         self.observation_dim = observation_dim
-        self.image_encoders = image_encoders
         self.action_space = action_space
         self.obs_shape = (observation_dim,)
-        self.vision_head_input_dim = vision_head_input_dim
         self.action_dim = get_action_dim(action_space)
         self.pos_obs = 0
         self.pos_acts = 0
@@ -774,26 +762,6 @@ class ReplayBufferGpu:
         batch_inds = th.randint(0, self.num_valid, (batch_size,))
         return self._get_samples(batch_inds)
 
-    def encode_obs(self, tensor) -> th.Tensor:
-        """
-        Convert buffer data array to a PyTorch tensor.
-        Note: it copies the data by default
-
-        :param array:
-        :param copy: Whether to copy or not the data (may be useful to avoid changing things
-            by reference). This argument is inoperative if the device is not the CPU.
-        :return:
-        """
-
-        if len(self.image_encoders) > 0:
-            return crisp_batch_concat_obs_to_tensor(
-                tensor,
-                self.image_encoders,
-                self.vision_head_input_dim,
-            )
-        else:
-            return tensor
-
     def save_buffer(self, path: str) -> None:
         """
         Save the buffer to a file.
@@ -811,15 +779,15 @@ class ReplayBufferGpu:
         reward: list[float],  # shape B,
         terminated: bool,
     ) -> None:
-        assert all(
-            isinstance(o, th.Tensor) for o in obs
-        ), "obs should be a list of torch Tensors"
-        assert all(
-            isinstance(a, th.Tensor) for a in action
-        ), "action should be a list of torch Tensors"
-        assert all(
-            isinstance(r, float) for r in reward
-        ), "reward should be a list of floats"
+        assert all(isinstance(o, th.Tensor) for o in obs), (
+            "obs should be a list of torch Tensors"
+        )
+        assert all(isinstance(a, th.Tensor) for a in action), (
+            "action should be a list of torch Tensors"
+        )
+        assert all(isinstance(r, float) for r in reward), (
+            "reward should be a list of floats"
+        )
 
         obs: th.Tensor = th.stack(obs).to(self.device)
         action: th.Tensor = th.stack(action).to(self.device)
@@ -828,9 +796,9 @@ class ReplayBufferGpu:
         batch_size_act, *_ = action.shape
         batch_size_obs, *_ = obs.shape
         # First handle before runover
-        assert (
-            self.pos_obs + batch_size_obs <= self.buffer_size
-        ), "Buffer overflow not handled yet"
+        assert self.pos_obs + batch_size_obs <= self.buffer_size, (
+            "Buffer overflow not handled yet"
+        )
 
         self.observations[self.pos_obs : self.pos_obs + batch_size_obs] = obs
         self.actions[self.pos_acts : self.pos_acts + batch_size_act] = action
@@ -853,9 +821,9 @@ class ReplayBufferGpu:
         for n in range(1, self.n_step_return):
             rew_sum += self.rewards[batch_inds_act + n] * (self.gamma**n)
         return ReplayBufferSamples(
-            self.encode_obs(self.observations[batch_inds_obs, :]),
+            self.observations[batch_inds_obs, :],
             self.actions[batch_inds_act, :],
-            self.encode_obs(self.observations[batch_inds_obs + self.n_step_return, :]),
+            self.observations[batch_inds_obs + self.n_step_return, :],
             self.terminateds[batch_inds_obs + self.n_step_return].reshape(-1, 1),
             rew_sum.reshape(-1, 1),
         )
@@ -1020,18 +988,18 @@ class ReplayBufferGpuWithPerfectActions:
         reward: list[float],  # shape B,
         terminated: bool,
     ) -> None:
-        assert all(
-            isinstance(o, th.Tensor) for o in obs
-        ), "obs should be a list of torch Tensors"
-        assert all(
-            isinstance(a, th.Tensor) for a in action
-        ), "action should be a list of torch Tensors"
-        assert all(
-            isinstance(p, th.Tensor) for p in perfect_action
-        ), "perfect_action should be a list of torch Tensors"
-        assert all(
-            isinstance(r, float) for r in reward
-        ), "reward should be a list of floats"
+        assert all(isinstance(o, th.Tensor) for o in obs), (
+            "obs should be a list of torch Tensors"
+        )
+        assert all(isinstance(a, th.Tensor) for a in action), (
+            "action should be a list of torch Tensors"
+        )
+        assert all(isinstance(p, th.Tensor) for p in perfect_action), (
+            "perfect_action should be a list of torch Tensors"
+        )
+        assert all(isinstance(r, float) for r in reward), (
+            "reward should be a list of floats"
+        )
 
         obs: th.Tensor = th.stack(obs).to(self.device)
         action: th.Tensor = th.stack(action).to(self.device)
@@ -1041,9 +1009,9 @@ class ReplayBufferGpuWithPerfectActions:
         batch_size_act, *_ = action.shape
         batch_size_obs, *_ = obs.shape
         # First handle before runover
-        assert (
-            self.pos_obs + batch_size_obs <= self.buffer_size
-        ), "Buffer overflow not handled yet"
+        assert self.pos_obs + batch_size_obs <= self.buffer_size, (
+            "Buffer overflow not handled yet"
+        )
 
         self.observations[self.pos_obs : self.pos_obs + batch_size_obs] = obs
         self.actions[self.pos_acts : self.pos_acts + batch_size_act] = action
