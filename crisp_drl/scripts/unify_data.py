@@ -1,10 +1,6 @@
-base_folder = "rollout_data/collect_data"
-global_buffer_file_name = "replay_buffer_500_0.joblib"
-
 import os
 import numpy as np
 from pathlib import Path
-import pickle
 from gymnasium import spaces
 import torch
 from crisp_drl.data.buffers_cleanrl import ReplayBufferGpuWithPerfectActions
@@ -66,8 +62,16 @@ exp_folders_to_skip = {
     "20251223-121317_0.95_45",
     "20251223-121502_0.999_24",
     # batch 500 runs
-    # "20251223-132427_0.0_100",
+    "20251223-132427_0.0_100",
+    "20251223-135234_0.33_99",
+    # "20251223-135857_0.8_84",  # l=42.37
+    "20251223-140641_0.9_55",  # l=49.34
+    "20251223-141653_0.95_37",  # l=49.59
+    "20251223-142728_0.999_21",  # l=45.76
 }
+base_folder = "rollout_data/collect_data"
+global_buffer_file_name = "replay_buffer_100_8.joblib"
+SUBSET_SIZE = 100
 
 # 0) Load all data from subfolders
 all_run_data = {}
@@ -89,6 +93,8 @@ for exp_folder in os.listdir(base_folder):
 
         run_data = np.load(run_file, allow_pickle=True)
         all_run_data[exp_folder].append(run_data)
+        if len(all_run_data[exp_folder]) >= SUBSET_SIZE:
+            break
 
     # separate image encoders from buffer and move into actor?
     #  => decide in actor whether to train image encoder or not

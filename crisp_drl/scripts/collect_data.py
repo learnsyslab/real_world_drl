@@ -13,7 +13,7 @@ from crisp_drl.envs import make_env, make_rew
 import sys
 
 # Alternate between going to the goal position and moving randomly with probaility p
-ps = [0.0]
+ps = [0.8, 0.9, 0.95, 0.999]
 N_ROLLOUTS = 500
 max_random_action_magnitude = 0.3e-3
 perfect_action_magnitude = 0.00025
@@ -61,6 +61,7 @@ for p in ps:
     data_dir = Path(f"rollout_data/collect_data/{current_date}_{exp_name}")
     data_dir.mkdir(parents=True, exist_ok=True)
     n_success = 0
+    total_successful_length = 0
     for i in range(N_ROLLOUTS):
         # new reset wrapper: automatically place brick back and pick it up again
         obs, reset_info = env.reset()
@@ -104,6 +105,7 @@ for p in ps:
             if terminated or truncated:
                 if terminated:
                     n_success += 1
+                    total_successful_length += len(all_actions)
                 print(
                     f"Episode finished: Length = {len(all_actions)}, Success: {terminated}, success rate = {n_success / (i + 1) * 100:.2f}%"
                 )
@@ -135,6 +137,9 @@ for p in ps:
     success_rate = n_success / N_ROLLOUTS * 100
     new_data_dir = data_dir.parent / f"{data_dir.name}_{int(success_rate):02d}"
     data_dir.rename(new_data_dir)
+    print(
+        f"average successful length: {total_successful_length / n_success if n_success > 0 else 0:.2f}"
+    )
     print(f"Data directory renamed to include success rate: {new_data_dir}")
 
 env.close()

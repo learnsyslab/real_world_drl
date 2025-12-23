@@ -1580,3 +1580,55 @@ class ObservationNormalizerWrapper(ObservationWrapper):
 
     def observation(self, observation):
         return (observation - self.means) / self.stds
+
+
+# crisp gym: no image cropping there, new controller parameters
+
+# global safety box: make wrapper instead of modifying env directly
+
+#
+
+# Foundationpose interface wrapper
+# on reset:
+#   reset with custom homing position, gripper open
+#   take observation,
+#   PE:
+#   pass to SAM3 for segmentation,
+#   look at average pixel color to determine which block is which => error: set rollout unusable flag -> add to step info
+#   2x:
+#       set param in fp and fpt to correct mesh
+#       get pose from fp,
+#       set orientation to prior,
+#       pass 4x to fpt
+#   compute relative transform from observed pose to demo pose for grasped block in global frame
+#   go to demo pose with PI-style controller
+#   grasp block and move up
+#   PE of grasped block
+#   compute relative transform from grasped block to placed block in global frame
+#   make delta xy 0
+#   move down until contact (e.g. force threshold)
+# while stepping:
+#   use estimated pose for safety box; step size as parameter
+#   apply z-force
+
+
+# env = LastObservationWrapper(env)
+# env = ContainerWatcherWrapper(env, ctx=multiprocessing.get_context("spawn"))
+# env = CLIWrapper(env, termination_fn=lambda _obs: False)
+
+# env = ImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))  -> add custom cropping
+# env = DictObservationToInfoMover(env)
+# env = ObservationFormatterWrapper(
+#     env,
+#     "cuda",
+#     keys_ranges_scales=[
+#         ("observation.previous.action", (0, 2), 10.0),
+#         ("observation.previous.error.cartesian", (0, 3), 10.0),
+#         ("observation.velocity.cartesian", (0, 3), 100.0),
+#         ("observation.error.cartesian", (0, 3), 10.0),
+#         ("observation.images.wrist_camera", (0, 512), 1.0),
+#         # ('observation.images.side_camera', (0, 512), 1.0)
+#     ],
+# )
+# env = NoRotationNoGripperNoZActionWrapper(env)
+# automatic termination?

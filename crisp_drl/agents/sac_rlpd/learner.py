@@ -228,11 +228,17 @@ class SACLearner:
     def pre_train(self):
         """Main process loop for the SAC learner."""
         try:
-            logging.info("Learner starts training...")
+            logging.info(
+                f"Learner starts training... (total steps: {int(self.replay_buffer.size() * self.config.utd_ratio)})"
+            )
             for self.current_training_step in range(
                 int(self.replay_buffer.size() * self.config.utd_ratio)
             ):
                 self._train_step(self.writer)
+                if (self.current_training_step + 1) % self.replay_buffer.size() == 0:
+                    logging.info(
+                        f"{time.strftime('%Y-%m-%d %H:%M:%S')} Pass {(self.current_training_step + 1) // self.replay_buffer.size()} through the pre-train buffer completed."
+                    )
             print("Learner finished training.")
 
         except SystemExit:

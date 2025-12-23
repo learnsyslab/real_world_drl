@@ -67,7 +67,7 @@ class Config:
     """number of Q networks to use for calculating the target value"""
     update_policy_after: int = 1
     """number of time steps after which the policy is updated"""
-    utd_ratio: float = 8.0
+    utd_ratio: float = 32.0
     """the ratio of policy updates to environment steps taken"""
     alpha: float = 0.001
     """Entropy regularization coefficient."""

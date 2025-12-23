@@ -29,10 +29,11 @@ env = make_env.create_simulated_env(
 
 # Alternate between going to the goal position and moving randomly with probaility p
 N_ROLLOUTS = 100
-model_name = "1cam_128_16_full_pre_ds500v2_utd8"
+model_name = "1cam_128_16_full_pre_ds100_9_utd32"
 ideal_goal_pos = np.array([0.6, 0.0])
 ideal_grasp_pos = np.array([0.0, 0.0])
 n_success = 0
+total_successful_length = 0
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 actor = Actor(action_space=env.action_space, config=Config())
 actor.load_state_dict(torch.load(f"checkpoints/{model_name}/actor_state_dict.pth"))
@@ -64,14 +65,15 @@ for i in range(N_ROLLOUTS):
         if terminated or truncated:
             if terminated:
                 n_success += 1
-            if i % 10 == 0:
+                total_successful_length += episode_length
+            if i % 10 == 9:
                 print(
                     f"Total episodes = {i + 1}, success rate = {n_success / (i + 1) * 100:.2f}%; Episode finished: Length = {episode_length}, Success: {terminated}"
                 )
 
             break
 print(
-    f"Total episodes = {i + 1}, success rate = {n_success / (i + 1) * 100:.2f}%; Episode finished: Length = {episode_length}, Success: {terminated}"  # type: ignore
+    f"Total episodes = {i + 1}, success rate = {n_success / (i + 1) * 100:.2f}%; Episode finished: Length = {episode_length}, Success: {terminated}, Average Successful Length: {total_successful_length / n_success if n_success > 0 else 0:.2f}"  # type: ignore
 )
 env.close()
 
@@ -95,5 +97,15 @@ env.close()
 # second run with full buffer: utd8 -> 45%
 # 100 samples mixed utd8 -> 11%
 
-# ds500v2 -> 97% utd8; 0.33, 0.8, 0.9, 0.95, 0.999 100 each
-# ds500_0 -> % utd8; 0.0 500
+# ds500v2 -> 96-97% l=18.69 utd8; 0.33, 0.8, 0.9, 0.95, 0.999 100 each
+# ds500_0 -> 8% l=26 utd8; 0.0 500
+# ds500_33 -> 61% l=41.85 utd8; 0.33 500
+# ds500_8 -> 99-100% l=15.51-16.47 utd8; 0.8 500
+# ds500_9 -> 99-100% l=18.09-20.30; utd8; 0.9 500
+# ds500_999 -> 18% l=50.56; utd8; 0.999 500
+
+# ds200_8 -> 66-68-73-77% l=29.58-31.94-35.44-35.80 utd20; 0.8 200
+# ds200_9 -> 61-67-69-73% l=29-75-34.60-35.04-36.85 utd20; 0.9 200
+
+# ds100_8 -> 35-37-40-43% l=30.23-31.88-33.24-36.86 utd32; 0.8 100
+# ds100_9 -> 29-31-33-34% l=34.32-39.42-41.86-45.09 utd32; 0.9 100
