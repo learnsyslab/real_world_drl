@@ -64,10 +64,8 @@ def main():
         config = Config()
         run_name = f"{config.env_name}__{algo_name}__{timestamp}"
 
-    action_space = spaces.Box(-np.inf, np.inf, (2,))
     learner = SACLearner(
         args,
-        action_space,
         parameters_queue=None,
         run_name=run_name,
     )

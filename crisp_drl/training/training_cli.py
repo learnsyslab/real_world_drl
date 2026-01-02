@@ -1,9 +1,14 @@
-from pynput import keyboard
+try:
+    from pynput import keyboard
+except ImportError:
+    print("pynput not installed, keyboard interrupt will not be available.")
 import os
+
 
 def clear_terminal():
     # Clear visible screen
-    os.system('cls' if os.name == 'nt' else 'clear')
+    os.system("cls" if os.name == "nt" else "clear")
+
 
 class TrainingCLI:
     def __init__(self, continue_training_event, reward_queue, config):
@@ -14,7 +19,7 @@ class TrainingCLI:
         self.listener.start()
 
         self.current_epsisode = 0
-    
+
     def menu(self):
         self.continue_training_event.clear()
         print("====================================================")
@@ -25,7 +30,7 @@ class TrainingCLI:
         print("====================================================")
         while True:
             feedback = input().strip().lower()
-            if feedback == 's' or feedback == 'f' or feedback == 't' or feedback == '':
+            if feedback == "s" or feedback == "f" or feedback == "t" or feedback == "":
                 clear_terminal()
                 print(f"[FEEDBACK] ENTER pressed.")
                 print("----------------------------------------------------")
@@ -42,21 +47,21 @@ class TrainingCLI:
 
     def _on_press(self, key):
         try:
-            if key.char == 's':   # success
+            if key.char == "s":  # success
                 self.continue_training_event.clear()
                 clear_terminal()
                 print("[FEEDBACK] Marked SUCCESS")
                 print("\n")
                 self.reward_queue.put(self.config.success_reward)
                 self.menu()
-            elif key.char == 'f': # failure
+            elif key.char == "f":  # failure
                 self.continue_training_event.clear()
                 clear_terminal()
                 print("[FEEDBACK] Marked FAILURE")
                 print("\n")
                 self.reward_queue.put(self.config.failure_reward)
                 self.menu()
-            elif key.char == 't': # terminate episode
+            elif key.char == "t":  # terminate episode
                 clear_terminal()
                 print("[FEEDBACK] Episode termination requested.")
                 print("\n")

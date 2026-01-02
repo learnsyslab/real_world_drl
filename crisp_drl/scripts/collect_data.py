@@ -13,8 +13,8 @@ from crisp_drl.envs import make_env, make_rew
 import sys
 
 # Alternate between going to the goal position and moving randomly with probaility p
-ps = [0.8, 0.9, 0.95, 0.999]
-N_ROLLOUTS = 500
+ps = [1.0]
+N_ROLLOUTS = 400
 max_random_action_magnitude = 0.3e-3
 perfect_action_magnitude = 0.00025
 ideal_goal_pos = np.array([0.6, 0.0])

@@ -12,7 +12,7 @@ This script trains a 2-layer AE with modern training optimizations:
 
 Usage:
     python crisp_drl/scripts/train_ae.py --data-path datasets/dinov2_dataset/feat_dinov2_vits14_reg.npz --hidden-dim 128 --latent-dim 32 --epochs 500 --batch-size 256
-    python crisp_drl/scripts/train_ae.py --data-path rollout_data/collect_data/replay_buffer.npz --hidden-dim 128 --latent-dim 32 --epochs 500 --batch-size 256
+    python crisp_drl/scripts/train_ae.py --data-path rollout_data/collect_data/replay_buffer_150_85_el2.joblib --hidden-dim 128 --latent-dim 16 --epochs 500 --batch-size 256
 
 Dependencies:
     - torch
@@ -31,6 +31,7 @@ from pathlib import Path
 import time
 from typing import Optional
 
+import joblib
 import numpy as np
 import torch
 import torch.nn as nn
@@ -38,6 +39,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 from torch.utils.tensorboard import SummaryWriter
+
+from crisp_drl import agents
+from crisp_drl.agents.shared.networks_cleanrl import SharedEncoder
 
 try:
     from tqdm import tqdm
@@ -88,7 +92,7 @@ class AE(nn.Module):
 
     def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int):
         super().__init__()
-        self.encoder = AEEncoder(input_dim, hidden_dim, latent_dim)
+        self.encoder = SharedEncoder(agents.shared.config.Config(), vision_only=True)
         self.decoder = AEDecoder(latent_dim, hidden_dim, input_dim)
         self.latent_dim = latent_dim
 
@@ -177,6 +181,7 @@ class TrainConfig:
     val_split: float = 0.1
 
     # Model
+    input_dim: int = 384
     hidden_dim: int = 32
     latent_dim: int = 16
 
@@ -292,7 +297,9 @@ def train(config: TrainConfig):
     """Main training function."""
     print(f"Training AE with config:")
     print(f"  Data: {config.data_path}")
-    print(f"  Hidden dim: {config.hidden_dim}, Latent dim: {config.latent_dim}")
+    print(
+        f"  Hidden dim: {config.hidden_dim}, Latent dim: {config.latent_dim}, input dim: {config.input_dim}"
+    )
     print(f"  Device: {config.device}")
     print(f"  Epochs: {config.epochs}, Batch size: {config.batch_size}")
     print()
@@ -301,8 +308,9 @@ def train(config: TrainConfig):
     current_time = time.strftime("%Y%m%d_%H%M%S")
 
     # Load data
-    data = np.load(config.data_path)
-    features = data["features"].astype(np.float32)
+    data = joblib.load(config.data_path)
+    _, D_OBS = data.observations.shape
+    features = data.observations.cpu()[:, D_OBS - config.input_dim :]
     print(f"Loaded features: {features.shape}")
 
     # Normalize features (important for AE training stability)
@@ -311,7 +319,7 @@ def train(config: TrainConfig):
     features_norm = features  #  (features - feat_mean) / feat_std
 
     # Create dataset and split
-    dataset = TensorDataset(torch.from_numpy(features_norm))
+    dataset = TensorDataset(features_norm)
     n_val = int(len(dataset) * config.val_split)
     n_train = len(dataset) - n_val
     train_dataset, val_dataset = random_split(
@@ -337,8 +345,7 @@ def train(config: TrainConfig):
     print(f"Train samples: {n_train}, Val samples: {n_val}")
 
     # Create model
-    input_dim = features.shape[1]
-    model = AE(input_dim, config.hidden_dim, config.latent_dim).to(config.device)
+    model = AE(config.input_dim, config.hidden_dim, config.latent_dim).to(config.device)
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {n_params:,}")
@@ -435,7 +442,7 @@ def train(config: TrainConfig):
                 "optimizer_state_dict": optimizer.state_dict(),
                 "val_loss": val_metrics["loss"],
                 "config": {
-                    "input_dim": input_dim,
+                    "input_dim": config.input_dim,
                     "hidden_dim": config.hidden_dim,
                     "latent_dim": config.latent_dim,
                 },
@@ -469,12 +476,13 @@ def train(config: TrainConfig):
         "optimizer_state_dict": optimizer.state_dict(),
         "val_loss": val_metrics["loss"],
         "config": {
-            "input_dim": input_dim,
+            "input_dim": config.input_dim,
             "hidden_dim": config.hidden_dim,
             "latent_dim": config.latent_dim,
         },
     }
     torch.save(checkpoint, save_dir / "final_model.pt")
+    torch.save(model.encoder.state_dict(), save_dir / "final_model_weights.pt")
 
     # Log final metrics to TensorBoard
     writer.add_hparams(
@@ -515,6 +523,7 @@ def parse_args() -> argparse.Namespace:
     # Model
     parser.add_argument("--hidden-dim", type=int, default=32)
     parser.add_argument("--latent-dim", type=int, default=16)
+    parser.add_argument("--input-dim", type=int, default=384)
 
     # Training
     parser.add_argument("--epochs", type=int, default=500)
@@ -552,6 +561,7 @@ def main():
         val_split=args.val_split,
         hidden_dim=args.hidden_dim,
         latent_dim=args.latent_dim,
+        input_dim=args.input_dim,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,

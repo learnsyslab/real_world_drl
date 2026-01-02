@@ -64,14 +64,26 @@ exp_folders_to_skip = {
     # batch 500 runs
     "20251223-132427_0.0_100",
     "20251223-135234_0.33_99",
-    # "20251223-135857_0.8_84",  # l=42.37
+    "20251223-135857_0.8_84",  # l=42.37
     "20251223-140641_0.9_55",  # l=49.34
     "20251223-141653_0.95_37",  # l=49.59
     "20251223-142728_0.999_21",  # l=45.76
+    # batch 300 runs
+    "20251226-001530_0.75_94",  # l=38.76
+    "20251226-001826_0.85_73",  # l=48.12
+    # batch 500, extened safety box
+    "20251226-181302_0.85_73",  # l=48.65
+    # batch 400, length 150
+    # "20251230-182128_0.85_87",  # l=63.82
+    # batch 400, length 200
+    "20251231-103020_0.9_77",  # l=77.66
+    "20251231-135935_0.88_82",  # l= 71.63
 }
 base_folder = "rollout_data/collect_data"
-global_buffer_file_name = "replay_buffer_100_8.joblib"
-SUBSET_SIZE = 100
+global_buffer_file_name = "replay_buffer_120_85_el2.joblib"
+SUBSET_SIZE = 120
+N_SKIP = 120
+# N_COMPLETION_TARGET = 180
 
 # 0) Load all data from subfolders
 all_run_data = {}
@@ -82,7 +94,9 @@ for exp_folder in os.listdir(base_folder):
     print(f"Processing folder: {exp_folder}")
 
     all_run_data[exp_folder] = []
-    for run_path in os.listdir(exp_path):
+    i = 0
+    # n_completed = 0
+    for run_path in sorted(os.listdir(exp_path)):
         run_file = exp_path / run_path
         if (
             not run_file.is_file()
@@ -92,6 +106,21 @@ for exp_folder in os.listdir(base_folder):
             continue
 
         run_data = np.load(run_file, allow_pickle=True)
+        # if n_completed >= N_COMPLETION_TARGET and run_data["terminated"]:
+        #     continue
+        # if (
+        #     len(all_run_data[exp_folder]) - n_completed
+        #     >= (SUBSET_SIZE - N_COMPLETION_TARGET)
+        #     and not run_data["terminated"]
+        # ):
+        #     continue
+        # if run_data["terminated"]:
+        #     n_completed += 1
+
+        i += 1
+        if i <= N_SKIP:
+            continue
+
         all_run_data[exp_folder].append(run_data)
         if len(all_run_data[exp_folder]) >= SUBSET_SIZE:
             break

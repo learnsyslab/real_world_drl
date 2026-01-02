@@ -43,7 +43,7 @@ class Config:
     """if true, use camera image observations"""
     total_timesteps: int = 199_000
     """total timesteps of the experiments"""
-    episode_length: int = 100
+    episode_length: int = 150
     """the maximum length of an episode"""
     buffer_size: int = 200_000
     """the replay memory buffer size"""
@@ -61,15 +61,17 @@ class Config:
     """the learning rate of the policy network optimizer"""
     q_lr: float = 5e-4
     """the learning rate of the Q network network optimizer"""
+    weight_decay: float = 0.0
+    """weight decay for Q network and policy optimizers"""
     num_critics: int = 10
     """number of Q networks to sample for calculating the target value"""
     critic_subset_size: int = 2
     """number of Q networks to use for calculating the target value"""
     update_policy_after: int = 1
     """number of time steps after which the policy is updated"""
-    utd_ratio: float = 32.0
+    utd_ratio: float = 20.0
     """the ratio of policy updates to environment steps taken"""
-    alpha: float = 0.001
+    alpha: float = 0.001  # 0.001
     """Entropy regularization coefficient."""
     autotune: bool = False
     """automatic tuning of the entropy coefficient"""
@@ -95,9 +97,15 @@ class Config:
     """the output dimension of the vision head"""
     actor_nonvision_input_dim: int = 11
     """the input dimension of the non-vision part of the actor network"""
+    actor_output_dim: int = 2
+    """the output dimension of the actor network"""
+    actor_q_hidden_dim: int = 128
+    """the hidden dimension of the actor and Q-function networks"""
 
     actor_std: float = 0.03
     """the fixed standard deviation for the actor's action distribution"""
 
-    shared_encoder_gradient: bool = True
+    shared_encoder_gradient: bool = False
     """if true, the gradients from the actor and critic will be backpropagated through the shared encoder"""
+    pre_train_perfect: bool = False
+    """if true, pre-train the Q-fn with perfect actions before training the RL agent"""

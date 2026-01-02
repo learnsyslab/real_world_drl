@@ -126,7 +126,7 @@ def create_simulated_env(config: dict) -> gym.Env:
     env = mujid_env.MujidEnv(
         config=config,
     )
-    env = StepLimitEnforcerWrapper(env, max_steps=100)
+    env = StepLimitEnforcerWrapper(env, max_steps=sac_config.episode_length)
     env = ActionTimeStampWrapper(env)
     env = LastObservationWrapper(env)
     env = NaiveZForceWrapper(
@@ -137,7 +137,8 @@ def create_simulated_env(config: dict) -> gym.Env:
     env = SafetyBoxWrapperXY(
         env,
         step_size=0.0005,
-        box_radius=0.003,
+        box_radius=0.004,
+        randomization_box_radius=0.0024,
         base_goal_position=np.array([0.6, 0.0]),
         ideal_grasp_position=np.array([0.0, 0.0]),
     )
@@ -178,7 +179,7 @@ def custom_sim_termination(obs):
     err = np.abs(obs["observation.error.cartesian"])
     if delta[2] < 14e-3 and err[2] > 0.8e-3:
         if delta[0] < 1e-3 and delta[1] < 1e-3:
-            print("E_SUCCESS")
+            # print("E_SUCCESS")
             return "E_SUCCESS"
         else:
             print("E_FAIL (Stuck)")

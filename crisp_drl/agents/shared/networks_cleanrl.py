@@ -26,22 +26,23 @@ import torch.distributions as D
 
 from crisp_drl.agents.shared.config import Config
 
-ACTOR_HIDDEN_SIZE = 128
-Q_HIDDEN_SIZE = 128
-
 
 class SoftQNetwork(nn.Module):
-    def __init__(self, obs_size, action_space):
+    def __init__(self, config: Config):
         super().__init__()
+        obs_size = (
+            config.actor_nonvision_input_dim
+            + config.vision_head_output_dim * config.n_cameras
+        )
 
         self.fc1 = nn.Linear(
-            obs_size + np.prod(action_space.shape),
-            Q_HIDDEN_SIZE,
+            obs_size + config.actor_output_dim,
+            config.actor_q_hidden_dim,
         )
-        self.fc2 = nn.Linear(Q_HIDDEN_SIZE, Q_HIDDEN_SIZE)
-        self.fc3 = nn.Linear(Q_HIDDEN_SIZE, 1)
-        self.ln1 = nn.LayerNorm(Q_HIDDEN_SIZE)
-        self.ln2 = nn.LayerNorm(Q_HIDDEN_SIZE)
+        self.fc2 = nn.Linear(config.actor_q_hidden_dim, config.actor_q_hidden_dim)
+        self.fc3 = nn.Linear(config.actor_q_hidden_dim, 1)
+        self.ln1 = nn.LayerNorm(config.actor_q_hidden_dim)
+        self.ln2 = nn.LayerNorm(config.actor_q_hidden_dim)
 
     def forward(self, x, a):
         x = torch.cat([x, a], 1)
@@ -97,7 +98,7 @@ class ImageEncoder(nn.Module):
 
 
 class SharedEncoder(nn.Module):
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, vision_only=False):
         super().__init__()
         self.config = config
 
@@ -115,6 +116,7 @@ class SharedEncoder(nn.Module):
                 for _ in range(config.n_cameras)
             ]
         )
+        self.vision_only = vision_only
         # for i in range(self.config.n_cameras):
         #     seq: ImageEncoder = self.image_encoders[i]  # type: ignore # insufficient type info
         #     nn.init.xavier_uniform_(seq.fc1.weight)
@@ -177,7 +179,8 @@ class SharedEncoder(nn.Module):
         vision_dim = self.config.vision_head_input_dim * self.config.n_cameras
 
         # non-image portion
-        parts.append(x[:, : D_OBS - vision_dim])
+        if not self.vision_only:
+            parts.append(x[:, : D_OBS - vision_dim])
 
         start = D_OBS - vision_dim
 
@@ -192,25 +195,25 @@ class SharedEncoder(nn.Module):
 
 
 class ActorFixedSigma(nn.Module):
-    def __init__(self, action_space, config: Config, return_dist=False, scale=None):
+    def __init__(self, config: Config, return_dist=False, scale=None):
         super().__init__()
         self.config = config
         self.return_dist = return_dist
-        output_dim = np.prod(action_space.shape)
+        output_dim = config.actor_output_dim
         self.output_dim = output_dim
 
         self.net = nn.Sequential(
             nn.Linear(
                 self.config.actor_nonvision_input_dim
                 + self.config.vision_head_output_dim * self.config.n_cameras,
-                ACTOR_HIDDEN_SIZE,
+                config.actor_q_hidden_dim,
             ),
             nn.Dropout(p=0.2),
             nn.ReLU(),
-            nn.Linear(ACTOR_HIDDEN_SIZE, ACTOR_HIDDEN_SIZE),
+            nn.Linear(config.actor_q_hidden_dim, config.actor_q_hidden_dim),
             nn.Dropout(p=0.2),
             nn.ReLU(),
-            nn.Linear(ACTOR_HIDDEN_SIZE, output_dim),
+            nn.Linear(config.actor_q_hidden_dim, output_dim),
             nn.Tanh(),
         )
         if scale is not None:
@@ -220,8 +223,7 @@ class ActorFixedSigma(nn.Module):
             scale = self.config.max_action
             bias = 0.0
         else:
-            scale = (action_space.high - action_space.low) / 2.0
-            bias = (action_space.high + action_space.low) / 2.0
+            raise ValueError("Either scale or config.max_action must be provided")
 
         self.register_buffer(
             "action_scale",
@@ -271,28 +273,27 @@ class ActorFixedSigma(nn.Module):
 
 
 class Actor(nn.Module):
-    def __init__(self, action_space, config: Config, return_dist=False, scale=None):
+    def __init__(self, config: Config, return_dist=False, scale=None):
         super().__init__()
         self.config = config
         self.return_dist = return_dist
-        output_dim = np.prod(action_space.shape)
-        self.output_dim = output_dim
+        self.output_dim = config.actor_output_dim
 
         self.net = nn.Sequential(
             nn.Linear(
                 self.config.actor_nonvision_input_dim
                 + self.config.vision_head_output_dim * self.config.n_cameras,
-                ACTOR_HIDDEN_SIZE,
+                config.actor_q_hidden_dim,
             ),
             nn.ReLU(),
-            nn.Linear(ACTOR_HIDDEN_SIZE, ACTOR_HIDDEN_SIZE),
+            nn.Linear(config.actor_q_hidden_dim, config.actor_q_hidden_dim),
             nn.ReLU(),
         )
-        self.fc_mean = nn.Linear(ACTOR_HIDDEN_SIZE, output_dim)
+        self.fc_mean = nn.Linear(config.actor_q_hidden_dim, self.output_dim)
         # self.fc_chol_params = nn.Linear(
-        #     ACTOR_HIDDEN_SIZE, output_dim * (output_dim + 1) // 2
+        #     config.actor_q_hidden_dim, self.output_dim * (self.output_dim + 1) // 2
         # )
-        self.fc_logstd = nn.Linear(ACTOR_HIDDEN_SIZE, np.prod(action_space.shape))
+        self.fc_logstd = nn.Linear(config.actor_q_hidden_dim, self.output_dim)
         # action rescaling
         if scale is not None:
             bias = 0.0
@@ -301,8 +302,7 @@ class Actor(nn.Module):
             scale = self.config.max_action
             bias = 0.0
         else:
-            scale = (action_space.high - action_space.low) / 2.0
-            bias = (action_space.high + action_space.low) / 2.0
+            raise ValueError("Either scale or config.max_action must be provided")
 
         self.register_buffer(
             "action_scale",

@@ -25,7 +25,6 @@ class SACLearner:
     def __init__(
         self,
         args,
-        action_space,
         parameters_queue: mp.Queue,
         run_name: str,
     ):
@@ -46,7 +45,6 @@ class SACLearner:
         torch.manual_seed(self.config.seed)
         torch.backends.cudnn.deterministic = self.config.torch_deterministic
 
-        self.action_space = action_space
         self.parameters_queue = parameters_queue
 
         # summary writer for tensorboard
@@ -73,17 +71,13 @@ class SACLearner:
         self.load_model = args.resume_training or args.load_policy
 
         # initializing networks
-        self.actor = Actor(action_space, self.config).to(self.device)
-        obs_dim_networks = (
-            self.config.actor_nonvision_input_dim
-            + self.config.vision_head_output_dim * self.config.n_cameras
-        )
+        self.actor = Actor(self.config).to(self.device)
         self.q_networks = [
-            SoftQNetwork(obs_dim_networks, self.action_space).to(self.device)
+            SoftQNetwork(self.config).to(self.device)
             for _ in range(self.config.num_critics)
         ]
         self.q_target_networks = [
-            SoftQNetwork(obs_dim_networks, self.action_space).to(self.device)
+            SoftQNetwork(self.config).to(self.device)
             for _ in range(self.config.num_critics)
         ]
 
@@ -129,7 +123,9 @@ class SACLearner:
         # optimizers
         if self.config.shared_encoder_gradient:
             self.shared_encoder_optimizer = optim.Adam(
-                self.shared_encoder.parameters(), lr=self.config.policy_lr
+                self.shared_encoder.parameters(),
+                lr=self.config.policy_lr,
+                weight_decay=self.config.weight_decay,
             )
             if args.resume_training:
                 self.shared_encoder_optimizer.load_state_dict(
@@ -140,9 +136,13 @@ class SACLearner:
         q_params = []
         for q_net in self.q_networks:
             q_params += list(q_net.parameters())
-        self.q_optimizer = optim.Adam(q_params, lr=self.config.q_lr)
+        self.q_optimizer = optim.Adam(
+            q_params, lr=self.config.q_lr, weight_decay=self.config.weight_decay
+        )
         self.actor_optimizer = optim.Adam(
-            list(self.actor.parameters()), lr=self.config.policy_lr
+            list(self.actor.parameters()),
+            lr=self.config.policy_lr,
+            weight_decay=self.config.weight_decay,
         )
         if args.resume_training:
             self.q_optimizer.load_state_dict(
@@ -167,6 +167,8 @@ class SACLearner:
             )
         elif self.args.pre_train is not None:
             self.replay_buffer = joblib.load(self.args.pre_train)
+            if self.replay_buffer.n_step_return != self.config.n_step_return:
+                self.replay_buffer.change_n_steps(self.config.n_step_return)
             logging.info(f"Loaded pre-train buffer from {self.args.pre_train}")
         else:
             self.replay_buffer = ReplayBufferGpu(
@@ -234,7 +236,7 @@ class SACLearner:
             for self.current_training_step in range(
                 int(self.replay_buffer.size() * self.config.utd_ratio)
             ):
-                self._train_step(self.writer)
+                self._train_step(self.writer, pre_training=True)
                 if (self.current_training_step + 1) % self.replay_buffer.size() == 0:
                     logging.info(
                         f"{time.strftime('%Y-%m-%d %H:%M:%S')} Pass {(self.current_training_step + 1) // self.replay_buffer.size()} through the pre-train buffer completed."
@@ -287,6 +289,11 @@ class SACLearner:
                 print("Learner finished training.")
 
                 self._sync_nodes()
+                # model checkpoint
+                torch.save(
+                    self.actor.state_dict(),
+                    os.path.join(self.checkpoint_path, "actor_state_dict.pth"),
+                )
 
         except SystemExit:
             logging.info("Quit training request received. Closing learner process...")
@@ -298,7 +305,7 @@ class SACLearner:
             self.close()
             logging.error(f"An error occurred in the RLPD Learner: {e}", exc_info=True)
 
-    def _train_step(self, writer):
+    def _train_step(self, writer, pre_training=False):
         """Perform a single training step using data from the replay buffer.
         This updates both the critics and the policy networks."""
         if self.expert_buffer is not None:  # Do RLPD training
@@ -326,10 +333,19 @@ class SACLearner:
             ensemble_samples = random.sample(
                 range(self.config.num_critics), self.config.critic_subset_size
             )
-            qf_next_targets = [
-                self.q_target_networks[i](next_obs, next_state_actions).view(-1)
-                for i in ensemble_samples
-            ]
+            qf_next_targets = (
+                [
+                    self.q_target_networks[i](next_obs, next_state_actions).view(-1)
+                    for i in ensemble_samples
+                ]
+                if not self.config.pre_train_perfect or not pre_training
+                else [
+                    self.q_target_networks[i](next_obs, data.next_perfect_actions).view(  # type: ignore # insufficient type info
+                        -1
+                    )
+                    for i in ensemble_samples
+                ]
+            )
             min_qf_next_targets = torch.min(torch.stack(qf_next_targets), dim=0)[
                 0
             ] - self.alpha * next_state_log_pis.view(-1)
@@ -435,12 +451,6 @@ class SACLearner:
                 )
             writer.add_scalar(
                 "entropy", -log_pi.mean().item(), self.current_training_step
-            )
-
-            # model checkpoint
-            torch.save(
-                self.actor.state_dict(),
-                os.path.join(self.checkpoint_path, "actor_state_dict.pth"),
             )
 
     def _update_targets(self):

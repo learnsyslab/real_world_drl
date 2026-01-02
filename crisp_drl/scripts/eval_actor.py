@@ -22,20 +22,20 @@ env = make_env.create_simulated_env(
             np.array([-1.0, -1.0, -2.0]) * 1e-3,  # np.zeros(3),
             np.array([1.0, 1.0, -1.9]) * 1e-3,  # np.zeros(3),
         ),
-        "live_view": True,
-    }
+        "live_view": False,
+    },
 )
 
 
 # Alternate between going to the goal position and moving randomly with probaility p
 N_ROLLOUTS = 100
-model_name = "1cam_128_16_full_pre_ds100_9_utd32"
+N_TRIALS = 1
+model_name = "1cam_128_16_head_ds150_85el2_utd20"
 ideal_goal_pos = np.array([0.6, 0.0])
 ideal_grasp_pos = np.array([0.0, 0.0])
-n_success = 0
-total_successful_length = 0
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-actor = Actor(action_space=env.action_space, config=Config())
+actor = Actor(Config())
 actor.load_state_dict(torch.load(f"checkpoints/{model_name}/actor_state_dict.pth"))
 actor.to(device)
 actor.eval()
@@ -46,35 +46,38 @@ shared_encoder.load_state_dict(torch.load(shared_encoder_path))
 shared_encoder.to(device)
 shared_encoder.eval()
 
-for i in range(N_ROLLOUTS):
-    # new reset wrapper: automatically place brick back and pick it up again
-    obs, reset_info = env.reset()
-    # compute goal position
-    actual_grasp_pos = reset_info["reset.grasped.position"]
-    goal_pos = ideal_goal_pos.copy()
-    goal_pos[0] += actual_grasp_pos[0] - ideal_grasp_pos[0]
+for _ in range(N_TRIALS):
+    n_success = 0
+    total_successful_length = 0
+    for i in range(N_ROLLOUTS):
+        # new reset wrapper: automatically place brick back and pick it up again
+        obs, reset_info = env.reset()
+        # compute goal position
+        actual_grasp_pos = reset_info["reset.grasped.position"]
+        goal_pos = ideal_goal_pos.copy()
+        goal_pos[0] += actual_grasp_pos[0] - ideal_grasp_pos[0]
 
-    episode_length = 0
-    while True:
-        episode_length += 1
-        action, _ = actor(shared_encoder(obs.unsqueeze(0).to(device)))
-        action = action.cpu().detach().squeeze(0).numpy()
+        episode_length = 0
+        while True:
+            episode_length += 1
+            action, _ = actor(shared_encoder(obs.unsqueeze(0).to(device)))
+            action = action.cpu().detach().squeeze(0).numpy()
 
-        obs, reward, terminated, truncated, info = env.step(action)
+            obs, reward, terminated, truncated, info = env.step(action)
 
-        if terminated or truncated:
-            if terminated:
-                n_success += 1
-                total_successful_length += episode_length
-            if i % 10 == 9:
-                print(
-                    f"Total episodes = {i + 1}, success rate = {n_success / (i + 1) * 100:.2f}%; Episode finished: Length = {episode_length}, Success: {terminated}"
-                )
+            if terminated or truncated:
+                if terminated:
+                    n_success += 1
+                    total_successful_length += episode_length
+                if i % 10 == 9:
+                    print(
+                        f"Total episodes = {i + 1}, success rate = {n_success / (i + 1) * 100:.2f}%; Episode finished: Length = {episode_length}, Success: {terminated}"
+                    )
 
-            break
-print(
-    f"Total episodes = {i + 1}, success rate = {n_success / (i + 1) * 100:.2f}%; Episode finished: Length = {episode_length}, Success: {terminated}, Average Successful Length: {total_successful_length / n_success if n_success > 0 else 0:.2f}"  # type: ignore
-)
+                break
+    print(
+        f"Total episodes = {i + 1}, success rate = {n_success / (i + 1) * 100:.2f}%; Episode finished: Length = {episode_length}, Success: {terminated}, Average Successful Length: {total_successful_length / n_success if n_success > 0 else 0:.2f}"  # type: ignore
+    )
 env.close()
 
 
@@ -100,12 +103,98 @@ env.close()
 # ds500v2 -> 96-97% l=18.69 utd8; 0.33, 0.8, 0.9, 0.95, 0.999 100 each
 # ds500_0 -> 8% l=26 utd8; 0.0 500
 # ds500_33 -> 61% l=41.85 utd8; 0.33 500
-# ds500_8 -> 99-100% l=15.51-16.47 utd8; 0.8 500
-# ds500_9 -> 99-100% l=18.09-20.30; utd8; 0.9 500
 # ds500_999 -> 18% l=50.56; utd8; 0.999 500
 
-# ds200_8 -> 66-68-73-77% l=29.58-31.94-35.44-35.80 utd20; 0.8 200
+# ds100_9 -> 29-31-33-34% l=34.32-39.42-41.86-45.09 utd32; 0.9 100
 # ds200_9 -> 61-67-69-73% l=29-75-34.60-35.04-36.85 utd20; 0.9 200
+# ds500_9 -> 99-100% l=18.09-20.30; utd8; 0.9 500
+
 
 # ds100_8 -> 35-37-40-43% l=30.23-31.88-33.24-36.86 utd32; 0.8 100
-# ds100_9 -> 29-31-33-34% l=34.32-39.42-41.86-45.09 utd32; 0.9 100
+# ds200_8 -> 66-68-73-77% l=29.58-31.94-35.44-35.80 utd20; 0.8 200
+# ds300_8 -> 90-92-95% l=21.95-25.37-26.34 utd12; 0.8 300
+# ds400_8 -> 97-99% l=17.28-18.15 utd10; 0.8 400
+# ds500_8 -> 99-100% l=15.51-16.47 utd8; 0.8 500
+
+# ds200_75 -> 51-53-60% l=23.62-26.63-28.27 utd20; 0.75 200
+# ds200_85 -> 80-83-84% l=33.15-34.80-35.49 utd20; 0.85 200
+
+# ds100_85 -> 16% l=36.81 utd40; 0.85 100
+
+# ds200_85e  -> 95-96% l=35.42-37.42 utd20; 0.85 200 extended safety box
+# ds200_85es2 -> 91-93% l=27.33-30.96 utd20; 0.85 200 extended safety box, second subset, seed 2
+# ds200_85e2 -> 59-60% l=35.49-36.77 utd20; 0.85 200 extended safety box, second subset
+
+# ds100_85e  -> 59-65-66-73% l=35.44-38.42-39.17-40.76 utd40; 0.85 100 extended safety box
+# ds100_85e2 -> 19-29% l=37.95-40.21 utd40; 0.85 100 extended safety box, second subset
+
+# Data is important -> How does good data look like? Coverage? -> Compare datasets; use fixed randomisation scheme?
+# Try more robust method (longer rollouts <-> perffect Q)
+
+# with 2 q fns:
+# ds200_85e2_q2 -> 54-56% l=33.50-36.61 utd20; 0.85 200 extended safety box, second subset, 2 q fns
+# with half entropy coeff (alpha=0.0005):
+# ds200_85e2_a05 -> 53-60% l=38.83-41.43 utd20; 0.85 200 extended safety box, second subset, alpha=0.0005
+
+# with 3-step returns:
+# ds200_85e2_nstp3 -> 15% l=36.87 utd20; 0.85 200 extended safety box, second subset, n_step_return=3
+# ds200_85e2_nstp2 -> 47-56% l=31.00-31.02 utd20; 0.85 200 extended safety box, second subset, n_step_return=2
+
+# with pre-training of Q-fn with perfect actions:
+# ds200_85e2_pfq -> 54-60% l=33.32-34.04 utd20; 0.85 200 extended safety box, second subset, pre-train perfect actions for Q-fn targets
+
+# compute dataset metrics: average rollout length, average successful length, success rate, coverage across state space
+# success rate important?
+
+# dss200_85e1 -> 64-71% l=36.46-37.81 utd20; 0.85 200 extended safety box
+# dss200_85e2 -> 50-56% l=40.56-43.77 utd20; 0.85 200 extended safety box
+
+# datasets: _e -> success rate 0.785; _e2 -> success rate 0.73
+#         s_e1 -> success rate 0.765;s_e2 -> success rate 0.72
+
+# with only completed rollouts in dataset:
+# dss200_85ec -> 32-38% l=31.60-38.47 utd20; 0.85 200 extended safety box
+# dss100_85ec -> 29-32% l=29.12-38.07 utd20; 0.85 200 extended safety box
+
+# with 80/90% completed rollouts in dataset:
+# ds200_85ec8 -> 62-66% l=37.71-41.89
+# ds100_85ec9 -> 43-48% l=31.15-35.84
+
+
+# after 200 rollouts rlpd:
+# ds200_85e2 s2 -> 91-97% l=23.34-24.53 ; rlpd utd4
+# ds200_85e2 s3 -> 95-99% l=25.26-25.33 ; rlpd utd4
+# after many rollouts rlpd with utd20:
+# ds200_85e2 s2 -> 59-61% l=33.59-39.56 ; rlpd utd20, 250 rollouts
+# ds200_85e2 s3 -> 93-95% l=26.55-27.41 ; rlpd utd20, 400 rollouts
+
+# longer demo rollouts (150):
+# ds200_85el1 -> 93-97% l=27.13-31.98
+# ds200_85el2 -> 95-96% l=35.23-38.81
+
+# with only 100 demos:
+# ds100_85el1 -> 34-42% l=23.23-26.97
+# ds100_85el2 -> 38-51% l=31.06-41.39
+
+# even longer demo rollouts (200, p=0.9):
+# ds150_9exl1 -> 82-86% l=47.78-50.70
+# ds150_9exl2 -> 94-96% l=35.17-36.06
+
+# p=0.88
+# ds150_88exl1 -> 31-35% l=35.32-41.43
+# ds150_88exl2 -> 86-86% l=43.02-58.62
+
+# baseline: p=0.85 l=150
+# ds150_85el1 -> 96-96% l=32.83-32.10
+# ds150_85el2 -> 88-91% l=37.05-40.40
+
+# baseline: p=0.85 l=120
+# ds120_85el1 -> 38-39% l=28.54-31.68
+# ds120_85el2 -> 65-73% l=47.09-52.41
+
+# with weight decay:
+# ds120_85el1_w1e-4 -> 18-26% l=46.78-71.27
+# ds120_85el1_w1e-5 -> 19-22% l=61.63-71.09
+
+# with pre-trained image encoder:
+# ds150_85el2_utd20 -> 68-73% l=40.15-46.94

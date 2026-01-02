@@ -13,7 +13,11 @@ import subprocess
 from torchvision.models import resnet18, ResNet18_Weights
 from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
 import torch.multiprocessing as mp
-from pynput import keyboard
+
+try:
+    from pynput import keyboard
+except ImportError:
+    print("pynput not installed, keyboard interrupt will not be available.")
 from gymnasium import spaces
 import imageio
 from crisp_drl.agents.shared.config import Config
@@ -1121,6 +1125,7 @@ class SafetyBoxWrapperXY(ActionWrapper):
         ideal_grasp_position=np.array([0.58833, -0.13817]),
         coarse=True,
         randomize=True,
+        randomization_box_radius=None,
     ):
         super().__init__(env)
         self.step_size_xy = step_size
@@ -1132,6 +1137,10 @@ class SafetyBoxWrapperXY(ActionWrapper):
         self._obs = None
         self.randomize = randomize
         self.coarse = coarse
+        if randomization_box_radius is not None:
+            self.randomization_box_radius = randomization_box_radius
+        else:
+            self.randomization_box_radius = box_radius * 0.8
 
     def reset(self, *, seed=None, options=None):
         obs, info = self.env.reset(seed=seed, options=options)
@@ -1142,7 +1151,7 @@ class SafetyBoxWrapperXY(ActionWrapper):
         self.ideal_goal_position = self.goal_position.copy()
         if self.randomize:
             self.goal_position += np.random.uniform(
-                -self.box_radius * 0.8, self.box_radius * 0.8, size=(2,)
+                -self.randomization_box_radius, self.randomization_box_radius, size=(2,)
             )
         self._obs = obs
         return obs, info
@@ -1631,4 +1640,4 @@ class ObservationNormalizerWrapper(ObservationWrapper):
 #     ],
 # )
 # env = NoRotationNoGripperNoZActionWrapper(env)
-# automatic termination?
+# automatic termination? -> not yet

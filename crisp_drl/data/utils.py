@@ -194,11 +194,13 @@ def load_buffer_from_lerobot_dataset(dataset, buffer, num_episodes: int):
 
 def ae_state_dict_from_file(file_path: str):
     """Load a state dict from a file."""
-    d = torch.load(file_path)["model_state_dict"]
-    # replace keys enoder.* with *
+    # d = torch.load(file_path)["model_state_dict"]
+    d = torch.load(file_path)
+    # replace keys enoder.* or similar with *
+    prefix = "image_encoders.0."
     new_d = {}
     for k, v in d.items():
-        if k.startswith("encoder."):
-            new_k = k[len("encoder.") :]
+        if k.startswith(prefix):
+            new_k = k[len(prefix) :]
             new_d[new_k] = v
     return new_d

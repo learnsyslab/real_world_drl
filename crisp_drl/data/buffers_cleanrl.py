@@ -75,6 +75,7 @@ class ReplayBufferSamplesWithPerfectActions(NamedTuple):
     actions: th.Tensor
     perfect_actions: th.Tensor
     next_observations: th.Tensor
+    next_perfect_actions: th.Tensor
     dones: th.Tensor
     rewards: th.Tensor
 
@@ -1069,6 +1070,9 @@ class ReplayBufferGpuWithPerfectActions:
             self.actions[batch_inds_act],
             self.perfect_actions[batch_inds_act],
             self.observations[batch_inds_obs + self.n_step_return],
+            self.perfect_actions[
+                batch_inds_act + self.n_step_return
+            ],  # validity: only used in non-terminal states
             self.terminateds[batch_inds_obs + self.n_step_return].reshape(-1, 1),
             rew_sum.reshape(-1, 1),
         )
