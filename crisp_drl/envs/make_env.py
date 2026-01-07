@@ -9,10 +9,10 @@ import time
 import random
 import numpy as np
 
-from crisp_gym.manipulator_env_config import NoCamFrankaEnvConfig, FrankaEnvConfig
+from crisp_gym.envs.manipulator_env_config import NoCamFrankaEnvConfig, FrankaEnvConfig
 from crisp_py.camera.camera_config import CameraConfig
 from crisp_py.gripper.gripper import GripperConfig
-from crisp_gym.manipulator_env import ManipulatorCartesianEnv, make_env
+from crisp_gym.envs.manipulator_env import ManipulatorCartesianEnv, make_env
 from crisp_gym.util.rl_utils import load_actions_safe
 from crisp_gym.config.home import home_close_to_table
 from torch.utils.tensorboard import SummaryWriter
@@ -24,7 +24,6 @@ from copy import deepcopy
 from crisp_drl.agents.shared.config import Config
 from crisp_drl.agents.shared.networks_cleanrl import Actor
 from crisp_drl.agents.shared.env_wrappers import (
-    ActionTimeStampWrapper,
     BelowZTerminationWrapper,
     CLIWrapper,
     CustomTerminationWrapper,
@@ -34,11 +33,9 @@ from crisp_drl.agents.shared.env_wrappers import (
     ImageEncoderWrapper,
     DinoImageEncoderWrapper,
     InsertionResetWrapper,
-    LastObservationWrapper,
     NaiveToGoalPositionWrapper,
     NaiveZForceWrapper,
     NoRotationActionWrapper,
-    NoRotationNoGripperActionWrapper,
     NoRotationNoGripperNoZActionClippedWrapperSim,
     NoRotationNoGripperNoZActionWrapper,
     ObservationFormatterWrapper,
@@ -51,6 +48,13 @@ from crisp_drl.agents.shared.env_wrappers import (
 from crisp_drl.data.utils import crisp_batch_concat_obs_to_tensor, crisp_obs_to_tensor
 from crisp_drl.training.training_cli import clear_terminal
 import mujid.env.env as mujid_env
+
+from crisp_gym.envs.env_wrapper import (
+    InsertionWrapper,
+    LastObservationWrapper,
+    NoRotationNoGripperActionWrapper,
+    ActionTimeStampWrapper,
+)
 
 
 def create_real_env() -> gym.Env:
@@ -116,6 +120,50 @@ def create_real_env() -> gym.Env:
     )  # 268 or 1036
     env = NoRotationNoGripperNoZActionWrapper(env)
 
+    return env
+
+
+def create_real_env_v3(config: Config) -> gym.Env:
+    env = make_env("my_env_v3")
+    print("Env created.")
+    env.wait_until_ready()
+    print("Env ready.")
+
+    env = ActionTimeStampWrapper(env)
+    env = NoRotationNoGripperActionWrapper(env)
+    env = LastObservationWrapper(env)
+    env = InsertionWrapper(
+        env,
+        grasp_randomisation_z_range=(0.0005, 0.0015),
+        home_config=config.custom_home_position,
+        grasp_position_ground_truth=config.grasp_position_ground_truth,
+        goal_position_ground_truth=config.goal_position_ground_truth,
+        step_limit=config.episode_length,
+    )
+    env = ContainerWatcherWrapper(env, ctx=multiprocessing.get_context("spawn"))
+    # obs["observation.state.cartesian"][2] < 0.049)
+    #  # functools.partial(observation_has_z_pressure_or_below, error_threshold=0.005, previous_error_threshold=0.003,
+    #  # min_z_height=0.055, terminate_z_height = 0.0475))
+    # maybe something with z velocity
+    env = CLIWrapper(env)
+
+    env = ImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))
+    env = DictObservationToInfoMover(env)
+
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
+    env = ObservationFormatterWrapper(
+        env,
+        "cuda",
+        keys_ranges_scales=[
+            ("observation.previous.action", (0, 2), 1000.0),
+            ("observation.previous.error.cartesian", (0, 2), 1000.0),
+            ("observation.velocity.cartesian", (0, 2), 1000.0),
+            ("observation.error.cartesian", (0, 2), 1000.0),
+            ("observation.images.wrist_camera", (0, 512), 1.0),
+        ],
+    )
     return env
 
 

@@ -95,7 +95,7 @@ class Config:
     """the hidden dimension of the vision head"""
     vision_head_output_dim: int = 16
     """the output dimension of the vision head"""
-    actor_nonvision_input_dim: int = 11
+    actor_nonvision_input_dim: int = 8
     """the input dimension of the non-vision part of the actor network"""
     actor_output_dim: int = 2
     """the output dimension of the actor network"""
@@ -109,3 +109,26 @@ class Config:
     """if true, the gradients from the actor and critic will be backpropagated through the shared encoder"""
     pre_train_perfect: bool = False
     """if true, pre-train the Q-fn with perfect actions before training the RL agent"""
+
+    custom_home_position: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [
+                -0.03049143,
+                0.4469818,
+                -0.02475526,
+                -2.3372357,
+                0.01456,
+                2.7885091,
+                0.71526223,
+            ]
+        )
+    )
+    """custom home position for the robot end-effector"""
+    goal_position_ground_truth: np.ndarray = field(
+        default_factory=lambda: np.array([0.54262590, -0.030810941, 0.051836114])
+    )
+    """the ground truth goal position in the real world"""
+    grasp_position_ground_truth: np.ndarray = field(
+        default_factory=lambda: np.array([0.5106526, -0.03026352, 0.04147444])
+    )
+    """the ground truth grasp position in the real world"""

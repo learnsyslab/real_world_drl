@@ -109,8 +109,6 @@ def create_sim_reward_fn(
 def create_real_reward_fn(
     config: Config,
     max_rew=None,
-    ideal_goal_pos_xy=None,
-    ideal_grasp_pos_xy=None,
     event_reward_map=None,
 ):
     def reward_fn(
@@ -126,7 +124,7 @@ def create_real_reward_fn(
                 all_observations,
                 all_rewards,
                 all_infos,
-                {"E_CONTROLLER_ISSUE", "E_TORQUE"},
+                {"E_CONTROLLER_ISSUE", "E_TORQUE", "E_ROLLOUT_UNUSABLE"},
             )
         )
 

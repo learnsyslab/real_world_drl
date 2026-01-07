@@ -1002,21 +1002,20 @@ class DictObservationToInfoMover(Wrapper):
         observation, reward, terminated, truncated, info = self.env.step(
             action, block=block
         )
-        image_keys = [
-            k for k in observation.keys() if k.startswith("observation.images.")
-        ]
-        info["observation"] = copy.copy(observation)
-        for key in image_keys:
-            info["observation"].pop(key)
+        info["observation"] = self.obs_info(observation)
         return observation, reward, terminated, truncated, info
 
     def reset(self, *, seed=None, options=None):
         obs, info = self.env.reset(seed=seed, options=options)
-        image_keys = [k for k in obs.keys() if k.startswith("observation.images.")]
-        info["observation"] = copy.copy(obs)
-        for key in image_keys:
-            info["observation"].pop(key)
+        info["observation"] = self.obs_info(obs)
         return obs, info
+
+    def obs_info(self, obs):
+        image_keys = [k for k in obs.keys() if k.startswith("observation.images.")]
+        obs_copy = copy.copy(obs)
+        for key in image_keys:
+            obs_copy.pop(key)
+        return obs_copy
 
 
 class VideoWrapper(Wrapper):
@@ -1234,7 +1233,11 @@ def controller_container_watcher(out_queue):
     env.pop("DYLD_LIBRARY_PATH", None)  # For macOS
     env.pop("SSL_CERT_FILE", None)
     env.pop("OPENSSL_CONF", None)
+    ppid = os.getppid()
     while True:
+        if os.getppid() != ppid:
+            print("[CONTROLLER] Parent process changed, exiting container watcher")
+            return
         error_out = subprocess.run(
             [
                 "ssh",
@@ -1338,9 +1341,7 @@ class ContainerWatcherWrapper(Wrapper):
             target=controller_container_watcher,
             args=(self.controller_container_watcher_event_queue,),
         )
-        self.controller_container_watcher_thread.daemon = (
-            True  # such that it is automatically stopped when the main thread exits
-        )
+        self.controller_container_watcher_thread.daemon = True
         self.controller_container_watcher_thread.start()
         self.is_running = True
 
@@ -1377,9 +1378,7 @@ class ContainerWatcherWrapper(Wrapper):
     def step(
         self, action, block=False
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
-        observation, reward, terminated, truncated, info = self.env.step(
-            action, block=block
-        )
+        observation, reward, terminated, truncated, info = self.env.step(action)
 
         # check for controller container events
         temp_events = []
@@ -1453,9 +1452,9 @@ def observation_has_z_pressure_or_below(
 
 
 class CLIWrapper(Wrapper):
-    def __init__(self, env, termination_fn):
+    def __init__(self, env):  # , termination_fn):
         super().__init__(env)
-        self.termination_fn = termination_fn
+        # self.termination_fn = termination_fn
         self.listener = keyboard.Listener(on_press=self.on_press)
         self.listener.start()
         self.ready_key = "r"
@@ -1468,29 +1467,31 @@ class CLIWrapper(Wrapper):
             action, block=block
         )
         # wait for s/f when gripper open
-        if self.termination_fn(observation):
-            terminated = True
-            print("Place successful? ([s]uccess/[f]ail)")
-            while True:
-                while self.other_key is None:
-                    time.sleep(0.05)
-                if self.other_key not in "sfu":
-                    print(
-                        f"[CLI] Ignoring {self.other_key}, waiting for whether the run was success."
-                    )
-                    self.other_key = None
-                    continue
-                now = time.time()
-                event = {"s": "E_SUCCESS", "f": "E_FAIL", "u": "E_ROLLOUT_UNUSABLE"}[
-                    self.other_key
-                ]
-                self.other_key = None
+        # if self.termination_fn(observation):
+        #     terminated = True
+        #     print("Place successful? ([s]uccess/[f]ail)")
+        #     while True:
+        #         while self.other_key is None:
+        #             time.sleep(0.05)
+        #         if self.other_key not in "sfu":
+        #             print(
+        #                 f"[CLI] Ignoring {self.other_key}, waiting for whether the run was success."
+        #             )
+        #             self.other_key = None
+        #             continue
+        #         now = time.time()
+        #         event = {"s": "E_SUCCESS", "f": "E_FAIL", "u": "E_ROLLOUT_UNUSABLE"}[
+        #             self.other_key
+        #         ]
+        #         self.other_key = None
 
-                print(f"[CLI] {event}")
-                append_or_insert(info, "custom_events", (now, event))
-                break
-
-        elif self.other_key is not None:
+        #         print(f"[CLI] {event}")
+        #         append_or_insert(info, "custom_events", (now, event))
+        #         break
+        # elif
+        if truncated:
+            time.sleep(2.0)
+        if self.other_key is not None:
             if self.other_key == "u":
                 truncated = True
                 append_or_insert(
@@ -1512,12 +1513,13 @@ class CLIWrapper(Wrapper):
 
     def reset(self, *, seed=None, options=None):
         # wait for key "r"
-        print(f"[CLI] Waiting for ready")
+        # print(f"[CLI] Waiting for ready")
         # while not self.environment_ready:
         #     time.sleep(0.1)
         self.environment_ready = False
         obs, info = self.env.reset(seed=seed, options=options)
         if self.other_key is not None and self.other_key != "u":
+            print(f"[CLI] Resetting other_key on reset from {self.other_key}")
             self.other_key = None
         return obs, info
 
@@ -1589,55 +1591,3 @@ class ObservationNormalizerWrapper(ObservationWrapper):
 
     def observation(self, observation):
         return (observation - self.means) / self.stds
-
-
-# crisp gym: no image cropping there, new controller parameters
-
-# global safety box: make wrapper instead of modifying env directly
-
-#
-
-# Foundationpose interface wrapper
-# on reset:
-#   reset with custom homing position, gripper open
-#   take observation,
-#   PE:
-#   pass to SAM3 for segmentation,
-#   look at average pixel color to determine which block is which => error: set rollout unusable flag -> add to step info
-#   2x:
-#       set param in fp and fpt to correct mesh
-#       get pose from fp,
-#       set orientation to prior,
-#       pass 4x to fpt
-#   compute relative transform from observed pose to demo pose for grasped block in global frame
-#   go to demo pose with PI-style controller
-#   grasp block and move up
-#   PE of grasped block
-#   compute relative transform from grasped block to placed block in global frame
-#   make delta xy 0
-#   move down until contact (e.g. force threshold)
-# while stepping:
-#   use estimated pose for safety box; step size as parameter
-#   apply z-force
-
-
-# env = LastObservationWrapper(env)
-# env = ContainerWatcherWrapper(env, ctx=multiprocessing.get_context("spawn"))
-# env = CLIWrapper(env, termination_fn=lambda _obs: False)
-
-# env = ImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))  -> add custom cropping
-# env = DictObservationToInfoMover(env)
-# env = ObservationFormatterWrapper(
-#     env,
-#     "cuda",
-#     keys_ranges_scales=[
-#         ("observation.previous.action", (0, 2), 10.0),
-#         ("observation.previous.error.cartesian", (0, 3), 10.0),
-#         ("observation.velocity.cartesian", (0, 3), 100.0),
-#         ("observation.error.cartesian", (0, 3), 10.0),
-#         ("observation.images.wrist_camera", (0, 512), 1.0),
-#         # ('observation.images.side_camera', (0, 512), 1.0)
-#     ],
-# )
-# env = NoRotationNoGripperNoZActionWrapper(env)
-# automatic termination? -> not yet
