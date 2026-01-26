@@ -3,6 +3,8 @@ import numpy as np
 from pathlib import Path
 from gymnasium import spaces
 import torch
+import pickle
+from crisp_drl.agents.shared.config import Config
 from crisp_drl.data.buffers_cleanrl import ReplayBufferGpuWithPerfectActions
 
 # Combine per-subfolder data and cross-folder into single rollout buffers with additional field perfect_action
@@ -79,10 +81,10 @@ exp_folders_to_skip = {
     "20251231-103020_0.9_77",  # l=77.66
     "20251231-135935_0.88_82",  # l= 71.63
 }
-base_folder = "rollout_data/collect_data"
-global_buffer_file_name = "replay_buffer_120_85_el2.joblib"
-SUBSET_SIZE = 120
-N_SKIP = 120
+base_folder = "rollout_data/collect_data_real"
+global_buffer_file_name = "replay_buffer_rw300v2_8.joblib"
+SUBSET_SIZE = 300
+N_SKIP = 0
 # N_COMPLETION_TARGET = 180
 
 # 0) Load all data from subfolders
@@ -120,6 +122,18 @@ for exp_folder in os.listdir(base_folder):
         i += 1
         if i <= N_SKIP:
             continue
+        with open(run_file.with_name(run_file.stem + "_info.pkl"), "rb") as f:
+            info_data = pickle.load(f)
+        for info in info_data:
+            custom_events = info.get("custom_events", [])
+            event_names = [event[1] for event in custom_events]
+            if (
+                "E_ROLLOUT_UNUSABLE" in event_names
+                or "E_CONTROLLER_ISSUE" in event_names
+                or "E_TORQUE" in event_names
+            ):
+                print(f"  Skipping unusable rollout: {run_path}")
+                continue
 
         all_run_data[exp_folder].append(run_data)
         if len(all_run_data[exp_folder]) >= SUBSET_SIZE:
@@ -143,29 +157,35 @@ for exp_folder, run_datas in all_run_data.items():
     buffer_sizes[exp_folder] = total_size
 global_buffer_size = sum(buffer_sizes.values())
 
+config = Config()
 # 2) create buffers
 buffers = {}
 for exp_folder, size in buffer_sizes.items():
     buffers[exp_folder] = ReplayBufferGpuWithPerfectActions(
         action_space=spaces.Box(low=-np.inf, high=np.inf, shape=(2,)),
         n_step_return=1,
-        gamma=0.99,
+        gamma=config.gamma,
         device="cuda",
         buffer_size=size,
-        observation_dim=384 + 11,
+        observation_dim=config.n_cameras * config.vision_head_input_dim
+        + config.actor_nonvision_input_dim,
     )
 global_buffer = ReplayBufferGpuWithPerfectActions(
     action_space=spaces.Box(low=-np.inf, high=np.inf, shape=(2,)),
     n_step_return=1,
-    gamma=0.99,
+    gamma=config.gamma,
     device="cuda",
     buffer_size=global_buffer_size,
-    observation_dim=384 + 11,
+    observation_dim=config.n_cameras * config.vision_head_input_dim
+    + config.actor_nonvision_input_dim,
 )
 
+n_rollouts_total = 0
 # 3) fill buffers
 for exp_folder, run_datas in all_run_data.items():
-    for run_data in run_datas:  # [: len(run_datas) // 2]:
+    # print(f"Filling buffers for folder: {exp_folder}")
+    for i, run_data in enumerate(run_datas):  # [: len(run_datas) // 2]:
+        # print(f"  Processing rollout {i + 1} / {len(run_datas)}")
         all_observations = run_data["observations"]
         all_actions = run_data["actions"]
         all_rewards = run_data["rewards"]
@@ -190,6 +210,8 @@ for exp_folder, run_datas in all_run_data.items():
             perfect_action=perf_act,
             terminated=terminated,
         )
+        n_rollouts_total += 1
+print(f"Total number of rollouts added: {n_rollouts_total}")
 # 4) save buffers
 # for exp_folder, buffer in buffers.items():
 #     save_path = Path(base_folder) / exp_folder

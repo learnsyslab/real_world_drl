@@ -1,4 +1,4 @@
-from crisp_gym.manipulator_env import ManipulatorCartesianEnv, make_env
+from crisp_gym.envs.manipulator_env import ManipulatorCartesianEnv, make_env
 import numpy as np
 from pynput import keyboard
 

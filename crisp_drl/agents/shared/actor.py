@@ -28,7 +28,7 @@ from crisp_drl.envs import make_rew
 
 
 class SACActor:
-    def __init__(self, args, parameters_queue: mp.Queue, run_name: str, env):
+    def __init__(self, args, parameters_queue: mp.Queue, run_name: str, env, rew_fn):
         self.config = Config()
         self.args = args
         self.run_name = run_name
@@ -53,22 +53,13 @@ class SACActor:
         self.update_policy_after = self.config.update_policy_after
         self.learning_starts = self.config.learning_starts
         self.env = env
-        self.reward_fn = make_rew.create_sim_reward_fn(
-            self.config,
-            ideal_goal_pos_xy=np.array([0.6, 0.0]),
-            ideal_grasp_pos_xy=np.array([0.0, 0.0]),
-            event_reward_map={
-                "E_SUCCESS": 0.1 / (1 - self.config.gamma) * 3,
-                "E_FAIL": -0.1 / (1 - self.config.gamma) / 2 * 3,
-                "E_SAFETY_BOX_VIOLATION": 0.0,  # -0.05,
-            },
-        )
+        self.reward_fn = rew_fn
 
         # checkpoint names of model to be loaded
         self.load_model = args.resume_training or args.load_policy
 
         # policy
-        self.actor = Actor(self.env.action_space, self.config).to(self.device)
+        self.actor = Actor(self.config).to(self.device)
         if self.load_model is not None:
             self.actor.load_state_dict(
                 torch.load(f"checkpoints/{self.load_model}/actor_state_dict.pth")
@@ -116,6 +107,7 @@ class SACActor:
         try:
             # reset the episode variables
             obs, reset_info = self.env.reset(seed=self.config.seed)
+            obs = obs["observation.formatted"]
             actual_grasp_pos = reset_info["reset.grasped.position"]
 
             all_actions = []
@@ -126,6 +118,7 @@ class SACActor:
             dts = {"enc": [], "actor": [], "step": [], "out": [], "loop": []}
             last_episode_rewards = []
             last_episode_successes = []
+            all_episode_successes = []
 
             episode_length = 0
             sum_of_returns = 0.0
@@ -149,8 +142,9 @@ class SACActor:
                 t2 = time.perf_counter()
                 all_actions.append(action)
                 obs, reward, termination, truncation, info = self.env.step(
-                    action.cpu().numpy(), block=True
+                    action.cpu().numpy()
                 )
+                obs = obs["observation.formatted"]
                 all_observations.append(obs)
                 all_infos.append(info)
                 all_rewards.append(reward)
@@ -173,6 +167,7 @@ class SACActor:
                     ):
                         self.global_step -= episode_length
                         obs, reset_info = self.env.reset()
+                        obs = obs["observation.formatted"]
                         all_actions = []
                         all_rewards = []
                         all_observations = [obs]
@@ -187,53 +182,65 @@ class SACActor:
                             "loop": [],
                         }
                         continue
+
+                    all_actions, all_observations, all_rewards, all_infos = (
+                        self.reward_fn(
+                            all_actions,
+                            all_observations,
+                            all_rewards,
+                            all_infos,
+                            actual_grasp_pos_xy=actual_grasp_pos[:2],
+                        )
+                    )
+
+                    if "custom_events" in all_infos[-1] and "E_SUCCESS" in map(
+                        lambda x: x[1], all_infos[-1]["custom_events"]
+                    ):
+                        last_episode_successes.append(1)
+                        all_episode_successes.append(1)
+                    else:
+                        last_episode_successes.append(0)
+                        all_episode_successes.append(0)
+                    if len(last_episode_successes) > 20:
+                        last_episode_successes.pop(0)
+
+                    data_queue.put(
+                        (all_actions, all_observations, all_rewards, termination)
+                    )
+                    if termination:
+                        print(f"Episode {self.episode_num} terminated.")
+                    elif truncation:
+                        print(f"Episode {self.episode_num} truncated.")
+                    self.episode_num += 1
+                    if self.episode_num >= self.args.max_episodes > 0:
+                        print("Reached maximum number of episodes. Stopping actor.")
+                        break
+                    episode_return = sum(all_rewards)
+
+                    last_episode_rewards.append(episode_return)
+                    if len(last_episode_rewards) > 10:
+                        last_episode_rewards.pop(0)
+                    # print(all_infos)
+
+                    sum_of_returns = sum(last_episode_rewards)
+                    sum_of_squared_returns = sum(
+                        map(lambda x: x**2, last_episode_rewards)
+                    )
+                    reward_window_size = len(last_episode_rewards)
+                    eps_return_std = (
+                        sum_of_squared_returns / reward_window_size
+                        - (sum_of_returns / reward_window_size) ** 2
+                        + 1e-10
+                    ) ** 0.5
+
                     if not self.args.eval:
-                        all_actions, all_observations, all_rewards, all_infos = (
-                            self.reward_fn(
-                                all_actions,
-                                all_observations,
-                                all_rewards,
-                                all_infos,
-                                actual_grasp_pos_xy=actual_grasp_pos[:2],
-                            )
-                        )
-
-                        data_queue.put(
-                            (all_actions, all_observations, all_rewards, termination)
-                        )
-
-                        self.episode_num += 1
-                        episode_return = sum(all_rewards)
-
                         self.writer.add_scalar(
                             "charts/episodic_return", episode_return, self.global_step
                         )
                         self.writer.add_scalar(
                             "charts/episodic_length", episode_length, self.global_step
                         )
-                        last_episode_rewards.append(episode_return)
-                        if len(last_episode_rewards) > 10:
-                            last_episode_rewards.pop(0)
-                        # print(all_infos)
-                        if "custom_events" in all_infos[-1] and "E_SUCCESS" in map(
-                            lambda x: x[1], all_infos[-1]["custom_events"]
-                        ):
-                            last_episode_successes.append(1)
-                        else:
-                            last_episode_successes.append(0)
-                        if len(last_episode_successes) > 20:
-                            last_episode_successes.pop(0)
 
-                        sum_of_returns = sum(last_episode_rewards)
-                        sum_of_squared_returns = sum(
-                            map(lambda x: x**2, last_episode_rewards)
-                        )
-                        reward_window_size = len(last_episode_rewards)
-                        eps_return_std = (
-                            sum_of_squared_returns / reward_window_size
-                            - (sum_of_returns / reward_window_size) ** 2
-                            + 1e-10
-                        ) ** 0.5
                         self.writer.add_scalar(
                             "charts/avg_return",
                             sum_of_returns / reward_window_size,
@@ -286,11 +293,13 @@ class SACActor:
                         self.writer.add_scalar(
                             "charts/t_loop_std", np.std(dts["loop"]), self.global_step
                         )
+
                     # reset the episode variables
                     logging.info(f"Episode length: {episode_length}")
                     episode_length = 0
 
                     obs, reset_info = self.env.reset()
+                    obs = obs["observation.formatted"]
                     actual_grasp_pos = reset_info["reset.grasped.position"]
 
                     all_actions = []
@@ -307,6 +316,9 @@ class SACActor:
                         self.save_tb_additional_info()
                         self._sync_nodes()
                         logging.info("Learner fininshed gradient updates.")
+                    logging.info(
+                        f"success? {last_episode_successes[-1] == 1}; n_rollouts: {len(last_episode_successes)}; last success rate: {np.mean(last_episode_successes)}; all success rate: {np.mean(all_episode_successes)}"
+                    )
 
         except SystemExit:
             logging.info("Quit Training request received. Terminating actor process...")
@@ -328,7 +340,7 @@ class SACActor:
             self.writer.close()
         # Clean up the environment
         self.env.close()
-        if rclpy.ok():
+        if rclpy.ok():  # pyright: ignore[reportPrivateImportUsage]
             rclpy.shutdown()
 
     def _sync_nodes(self):

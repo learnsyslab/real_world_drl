@@ -681,16 +681,15 @@ class ReplayBufferGpu:
         self,
         buffer_size: int,
         observation_dim: int,
-        action_space: spaces.Space,
+        action_dim: int,
         n_step_return: int = 1,
         gamma: float = 0.99,
         device: th.device | str = "auto",
     ):
         self.buffer_size = max(buffer_size, 1)
         self.observation_dim = observation_dim
-        self.action_space = action_space
         self.obs_shape = (observation_dim,)
-        self.action_dim = get_action_dim(action_space)
+        self.action_dim = action_dim
         self.pos_obs = 0
         self.pos_acts = 0
         self.device = get_device(device)
@@ -1013,6 +1012,9 @@ class ReplayBufferGpuWithPerfectActions:
         assert self.pos_obs + batch_size_obs <= self.buffer_size, (
             "Buffer overflow not handled yet"
         )
+
+        # print(f"Obs shape: {obs.shape}; batch size obs: {batch_size_obs}")
+        # print(f"Action shape: {action.shape}; batch size act: {batch_size_act}")
 
         self.observations[self.pos_obs : self.pos_obs + batch_size_obs] = obs
         self.actions[self.pos_acts : self.pos_acts + batch_size_act] = action

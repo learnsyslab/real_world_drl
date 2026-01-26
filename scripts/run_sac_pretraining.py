@@ -66,7 +66,7 @@ def main():
 
     learner = SACLearner(
         args,
-        parameters_queue=None,
+        parameters_queue=None,  # type: ignore
         run_name=run_name,
     )
     learner.pre_train()

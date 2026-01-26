@@ -1,15 +1,20 @@
+import json
+import os
 from pathlib import Path
 import time
+import imageio
 import numpy as np
 import pickle
 
 from crisp_drl.agents.shared.config import Config
 from crisp_drl.envs import make_env, make_rew
 import sys
+# import debugpy
+
 
 # Alternate between going to the goal position and moving randomly with probaility p
-ps = [0.85]
-N_ROLLOUTS = 100
+ps = [0.8]
+N_ROLLOUTS = 25
 max_random_action_magnitude = 0.3e-3
 perfect_action_magnitude = 0.00025
 
@@ -19,7 +24,8 @@ if len(sys.argv) > 1:
 
 config = Config()
 
-env = make_env.create_real_env_v3(config)
+
+env = make_env.create_real_env_v3_timo(config)
 
 
 reward_fn = make_rew.create_real_reward_fn(
@@ -61,6 +67,7 @@ for p in ps:
         all_observations = [obs.cpu().numpy()]
         all_infos = [reset_info]
         info = reset_info
+
         while True:
             perfect_action = (
                 goal_pos - info["observation"]["observation.state.cartesian"][:2]
@@ -98,19 +105,20 @@ for p in ps:
             all_infos,
             actual_grasp_pos_xy=actual_grasp_pos[:2],
         )
-        last_custom_events = all_infos[-1].get("custom_events", [])
+        last_custom_events = map(lambda x: x[1], all_infos[-1].get("custom_events", []))
         if (
             "E_ROLLOUT_UNUSABLE" in last_custom_events
             or "E_CONTROLLER_ISSUE" in last_custom_events
             or "E_TORQUE" in last_custom_events
         ):
+            print("Rollout unusable, skipping saving this rollout.")
             continue
 
         if terminated:
             n_success += 1
             total_successful_length += len(all_actions)
         print(
-            f"Episode finished: Length = {len(all_actions)}, Success: {terminated}, success rate = {n_success / (i + 1) * 100:.2f}%"
+            f"Episode finished: Length = {len(all_actions)}, Success: {terminated}, success rate = {n_success / (i + 1) * 100:.2f}%; i = {i}"
         )
         # save data
         np.savez_compressed(
@@ -121,6 +129,54 @@ for p in ps:
             perfect_actions=all_perfect_actions,
             terminated=terminated,
         )
+        all_wrist_cam_images = [
+            info["observation"]["observation.images.wrist_camera_raw"]
+            for info in all_infos
+        ]
+        imageio.mimwrite(
+            os.path.join(data_dir / f"rollout_{i:03d}_info_wrist_camera.mp4"),
+            all_wrist_cam_images,
+            format="mp4",  # pyright: ignore[reportArgumentType]
+            fps=config.control_frequency,
+            codec="libx264",
+        )  # type: ignore
+
+        for info in all_infos:
+            # delete large images to save space
+            if (
+                "observation" in info
+                and "observation.images.wrist_camera_raw" in info["observation"]
+            ):
+                info["observation"].pop("observation.images.wrist_camera_raw")
+            if (
+                "observation" in info
+                and "observation.images.wrist_depth_camera_raw" in info["observation"]
+            ):
+                info["observation"].pop("observation.images.wrist_depth_camera_raw")
+
+        if (
+            "reset.pose_estimation.purple" in reset_info
+            and "reset.pose_estimation.lavender" in reset_info
+            and "reset.pose_estimation.joint_state" in reset_info
+            and "reset.pose_estimation.cartesian" in reset_info
+        ):
+            with open(data_dir / f"rollout_{i:03d}_pose_estimation.json", "w") as f:
+                json.dump(
+                    {
+                        "purple": reset_info["reset.pose_estimation.purple"].tolist(),
+                        "lavender": reset_info[
+                            "reset.pose_estimation.lavender"
+                        ].tolist(),
+                        "joint_state": reset_info[
+                            "reset.pose_estimation.joint_state"
+                        ].tolist(),
+                        "cartesian": reset_info[
+                            "reset.pose_estimation.cartesian"
+                        ].tolist(),
+                    },
+                    f,
+                )
+
         with open(data_dir / f"rollout_{i:03d}_info.pkl", "wb") as f:
             pickle.dump(all_infos, f)
 

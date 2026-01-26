@@ -105,7 +105,7 @@ class Config:
     actor_std: float = 0.03
     """the fixed standard deviation for the actor's action distribution"""
 
-    shared_encoder_gradient: bool = False
+    shared_encoder_gradient: bool = True
     """if true, the gradients from the actor and critic will be backpropagated through the shared encoder"""
     pre_train_perfect: bool = False
     """if true, pre-train the Q-fn with perfect actions before training the RL agent"""
@@ -125,10 +125,54 @@ class Config:
     )
     """custom home position for the robot end-effector"""
     goal_position_ground_truth: np.ndarray = field(
-        default_factory=lambda: np.array([0.54262590, -0.030810941, 0.051836114])
-    )
+        default_factory=lambda: np.array([0.54279631, -0.030636687, 0.054106168])
+    )  # 0.54262590, -0.030810941, 0.051836114
     """the ground truth goal position in the real world"""
     grasp_position_ground_truth: np.ndarray = field(
-        default_factory=lambda: np.array([0.5106526, -0.03026352, 0.04147444])
-    )
+        default_factory=lambda: np.array([0.51101995, -0.030473206, 0.042312632])
+    )  # 0.5106526, -0.03026352, 0.04147444
     """the ground truth grasp position in the real world"""
+
+    demo_pose_estimation_euler: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [0.52215743, -0.0288643, 0.05809896, -3.141059, -0.00374691, 0.00447622]
+        )
+    )
+    pose_estimation_include_demo: bool = False
+    """whether to include the demo pose in the pose estimation computation"""
+    pose_estimation_assumed_orientation: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [
+                [
+                    [-0.02442653477191925, -0.997778058052063, -0.0619833804666996],
+                    [-0.9342041015625, 0.0007091141305863857, 0.35673803091049194],
+                    [-0.35590144991874695, 0.06661905348300934, -0.9321458339691162],
+                ]
+                # [0.03445333, -0.8581947, -0.51216656],
+                # [-0.99939716, -0.02739692, -0.02132249],
+                # [0.00426707, 0.51259243, -0.85862136],
+            ]
+        )
+    )
+    """the assumed orientation (rotation matrix) for pose estimation"""
+    demo_pose_lavender: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [
+                [0.99831641, -0.05123854, -0.02718068, 0.51861272],
+                [0.05093913, 0.99863431, -0.0115972, -0.03614451],
+                [0.02773775, 0.01019306, 0.99956331, 0.04604851],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+    )
+    demo_pose_purple: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [
+                [0.99568652, -0.03302998, 0.08670136, 0.53851665],
+                [0.02700199, 0.99719533, 0.06980042, -0.03773232],
+                [-0.08876377, -0.06715828, 0.993786, 0.0154441],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+    )
+    """the pose matrices extracted from the demo for the two blocks used to compute the relative goal position"""

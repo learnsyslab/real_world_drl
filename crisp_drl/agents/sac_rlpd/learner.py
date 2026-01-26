@@ -175,7 +175,7 @@ class SACLearner:
                 buffer_size=self.config.buffer_size,
                 observation_dim=self.config.actor_nonvision_input_dim
                 + self.config.vision_head_input_dim * self.config.n_cameras,
-                action_space=action_space,
+                action_dim=self.config.actor_output_dim,
                 device=self.device,
                 n_step_return=self.config.n_step_return,
                 gamma=self.config.gamma,
@@ -184,7 +184,7 @@ class SACLearner:
         # Automatic entropy tuning
         if self.config.autotune:
             self.target_entropy = -torch.prod(
-                torch.Tensor(self.action_space.shape).to(self.device)
+                torch.Tensor((self.config.actor_output_dim,)).to(self.device)
             ).item()
             if self.load_model is not None:
                 self.log_alpha = (

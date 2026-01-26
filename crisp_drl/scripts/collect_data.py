@@ -12,6 +12,8 @@ from crisp_drl.agents.shared.config import Config
 from crisp_drl.envs import make_env, make_rew
 import sys
 
+# export MUJOCO_GL=egl
+
 # Alternate between going to the goal position and moving randomly with probaility p
 ps = [1.0]
 N_ROLLOUTS = 400
@@ -28,12 +30,7 @@ if len(sys.argv) > 1:
 env = make_env.create_simulated_env(
     {
         "initial_keyframe": 2,
-        "lego_shift_range": (-0.002, 0.002),
-        "initial_position_range": (
-            np.array([-1.0, -1.0, -2.0]) * 1e-3,  # np.zeros(3),
-            np.array([1.0, 1.0, -1.9]) * 1e-3,  # np.zeros(3),
-        ),
-        "live_view": True,
+        "live_view": False,
     }
 )
 
@@ -73,13 +70,11 @@ for p in ps:
         all_actions = []
         all_rewards = []
         all_perfect_actions = []
-        all_observations = [obs.cpu().numpy()]
+        all_observations = [obs["observation.formatted"].cpu().numpy()]
         all_infos = [reset_info]
         info = reset_info
         while True:
-            perfect_action = (
-                goal_pos - info["observation"]["observation.state.cartesian"][:2]
-            )
+            perfect_action = goal_pos - obs["observation.state.cartesian"][:2]
             perfect_action = (
                 perfect_action
                 / np.linalg.norm(perfect_action)
@@ -98,7 +93,7 @@ for p in ps:
             all_actions.append(action.copy())
 
             obs, reward, terminated, truncated, info = env.step(action)
-            all_observations.append(obs.cpu().numpy())
+            all_observations.append(obs["observation.formatted"].cpu().numpy())
             all_infos.append(info)
             all_rewards.append(reward)
 

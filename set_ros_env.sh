@@ -22,8 +22,10 @@
 export ROS_DOMAIN_ID=101
 export GIT_LFS_SKIP_SMUDGE=1
 export CRISP_CONFIG_PATH=/home/linusschwarz/repos/crisp_configs
-export NETWORK_INTERFACE=enp4s0
-export ROS_LOCALHOST_ONLY=0
+export NETWORK_INTERFACE=enp128s31f6
+export ROS_NETWORK_INTERFACE=enp128s31f6
+export ROS_STATIC_PEERS='127.0.0.1;10.157.163.155'
+# export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI=file:///home/linusschwarz/repos/crisp_gym/scripts/cyclone_config.xml
 
-ros2 daemon stop
-ros2 daemon start

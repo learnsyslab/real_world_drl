@@ -65,7 +65,7 @@ class FixedNorm(nn.Module):
         self.register_buffer("eps", torch.tensor(eps, dtype=torch.float32))
 
     def forward(self, x):
-        return (x - self.mean) / (self.std + self.eps)
+        return (x - self.mean) / (self.std + self.eps)  # pyright: ignore[reportOperatorIssue]
 
 
 class ImageEncoder(nn.Module):
@@ -344,7 +344,7 @@ class Actor(nn.Module):
         log_prob = log_prob.sum(1, keepdim=True)
         x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
         y_t = torch.tanh(x_t)
-        action = y_t * self.action_scale + self.action_bias
+        action = y_t * self.action_scale + self.action_bias  # pyright: ignore[reportOperatorIssue]
         return action, log_prob
 
     def forward(self, x):
@@ -362,7 +362,7 @@ class Actor(nn.Module):
         normal = torch.distributions.Normal(mean, std)
         x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
         y_t = torch.tanh(x_t)
-        action = y_t * self.action_scale + self.action_bias
+        action = y_t * self.action_scale + self.action_bias  # pyright: ignore[reportOperatorIssue]
 
         log_prob = normal.log_prob(x_t) - torch.log((1 - y_t.pow(2)) + 1e-6)
         log_prob = log_prob.sum(1, keepdim=True)

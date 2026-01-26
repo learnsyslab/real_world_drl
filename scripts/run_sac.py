@@ -6,7 +6,6 @@ import logging
 import os
 
 from argparse import ArgumentParser
-from gymnasium import spaces
 
 from crisp_drl.agents.shared.actor import SACActor
 from crisp_drl.agents.sac_rlpd.learner import SACLearner
@@ -15,7 +14,7 @@ from crisp_drl.agents.shared.config import Config
 import signal
 from contextlib import contextmanager
 
-from crisp_drl.envs import make_env
+from crisp_drl.envs import make_env, make_rew
 
 
 @contextmanager
@@ -44,31 +43,28 @@ def launch_processes(args):
     else:
         run_name = f"{config.env_name}__{algo_name}__{timestamp}"
 
-    try:
-        # start actor
-        actor_process = ctx.Process(
-            target=launch_actor,
-            args=(
-                args,
-                data_queue,
-                parameters_queue,
-                run_name,
-            ),
+    # start actor
+    actor_process = ctx.Process(
+        target=launch_actor,
+        args=(
+            args,
+            data_queue,
+            parameters_queue,
+            run_name,
+        ),
+    )
+    actor_process.start()
+    logging.info(f"RLPD actor process started with PID: {actor_process.pid}")
+
+    if not args.eval:
+        # start learner
+        learner_process = ctx.Process(
+            target=launch_learner,
+            args=(args, data_queue, parameters_queue, run_name),
         )
-        actor_process.start()
-        logging.info(f"RLPD actor process started with PID: {actor_process.pid}")
-
-        if not args.eval:
-            # start learner
-            learner_process = ctx.Process(
-                target=launch_learner,
-                args=(args, data_queue, parameters_queue, run_name),
-            )
-            learner_process.start()
-            logging.info(
-                f"RLPD learner process started with PID: {learner_process.pid}"
-            )
-
+        learner_process.start()
+        logging.info(f"RLPD learner process started with PID: {learner_process.pid}")
+    try:
         time.sleep(100000000)
 
     except KeyboardInterrupt:
@@ -79,9 +75,9 @@ def launch_processes(args):
             if "actor_process" in locals():
                 actor_process.join(timeout=10)
                 if not args.eval:
-                    learner_process.join(timeout=60)
+                    learner_process.join(timeout=60)  # pyright: ignore[reportPossiblyUnboundVariable]
 
-                if rclpy.ok():
+                if rclpy.ok():  # pyright: ignore[reportPrivateImportUsage]
                     rclpy.shutdown()
 
                 if actor_process.is_alive():
@@ -91,12 +87,12 @@ def launch_processes(args):
                 logging.info("SAC actor process terminated succesfully.")
 
                 if not args.eval:
-                    if learner_process.is_alive():
+                    if learner_process.is_alive():  # pyright: ignore[reportPossiblyUnboundVariable]
                         logging.info(
-                            f"Trying to force terminating Learner Process with PID: {learner_process.pid}."
+                            f"Trying to force terminating Learner Process with PID: {learner_process.pid}."  # pyright: ignore[reportPossiblyUnboundVariable]
                         )
-                        learner_process.terminate()
-                        learner_process.join()
+                        learner_process.terminate()  # pyright: ignore[reportPossiblyUnboundVariable]
+                        learner_process.join()  # pyright: ignore[reportPossiblyUnboundVariable]
                     logging.info("SAC learner process terminated succesfully.")
                 logging.info("All nodes terminated.")
 
@@ -109,18 +105,41 @@ def launch_actor(
 ):
     logging.basicConfig(level=logging.INFO)
     try:
-        env = make_env.create_simulated_env(
-            {
-                "initial_keyframe": 2,
-                "lego_shift_range": (-0.002, 0.002),
-                "initial_position_range": (
-                    np.array([-1.0, -1.0, -2.0]) * 1e-3,  # np.zeros(3),
-                    np.array([1.0, 1.0, -1.9]) * 1e-3,  # np.zeros(3),
-                ),
-                "live_view": False,
-            }
+        # env = make_env.create_simulated_env(
+        #     {
+        #         "initial_keyframe": 2,
+        #         "lego_shift_range": (-0.002, 0.002),
+        #         "initial_position_range": (
+        #             np.array([-1.0, -1.0, -2.0]) * 1e-3,  # np.zeros(3),
+        #             np.array([1.0, 1.0, -1.9]) * 1e-3,  # np.zeros(3),
+        #         ),
+        #         "live_view": False,
+        #     }
+        # )
+        config = Config()
+        env = make_env.create_real_env_v3(config, args)
+        # rew_fn = make_rew.create_sim_reward_fn(  # noqa: F821
+        #     self.config,
+        #     ideal_goal_pos_xy=np.array([0.6, 0.0]),
+        #     ideal_grasp_pos_xy=np.array([0.0, 0.0]),
+        #     event_reward_map={
+        #         "E_SUCCESS": 0.1 / (1 - self.config.gamma) * 3,
+        #         "E_FAIL": -0.1 / (1 - self.config.gamma) / 2 * 3,
+        #         "E_SAFETY_BOX_VIOLATION": 0.0,  # -0.05,
+        #     },
+        # )
+        rew_fn = make_rew.create_real_reward_fn(
+            config,
+            event_reward_map={
+                "E_SUCCESS": 0.1 / (1 - config.gamma) * 3,
+                "E_FAIL": -0.1 / (1 - config.gamma) / 2 * 3,
+                "E_SAFETY_BOX_VIOLATION": 0.0,  # -0.05,
+                "E_ROLLOUT_UNUSABLE": -100,
+                "E_CONTROLLER_ISSUE": -100,
+                "E_TORQUE": -100,
+            },
         )
-        actor = SACActor(args, parameters_queue, run_name, env)
+        actor = SACActor(args, parameters_queue, run_name, env, rew_fn)
     except Exception as e:
         logging.error(f"Failed to initialize SAC Actor: {e}", exc_info=True)
         return
@@ -133,12 +152,10 @@ def launch_actor(
 
 def launch_learner(args, data_queue, parameters_queue, run_name):
     logging.basicConfig(level=logging.INFO)
-    action_space = spaces.Box(-np.inf, np.inf, (2,))
 
     try:
         learner = SACLearner(
             args,
-            action_space,
             parameters_queue=parameters_queue,
             run_name=run_name,
         )
@@ -188,6 +205,18 @@ def main():
     )
     argparse.add_argument(
         "--eval", action="store_true", help="Run model in evaluation mode."
+    )
+    argparse.add_argument(
+        "--use_pose_estimation",
+        action="store_true",
+        help="Use pose estimation module in the environment.",
+    )
+    # argument for maximum number of episodes to run
+    argparse.add_argument(
+        "--max_episodes",
+        type=int,
+        default=1000000,
+        help="Maximum number of episodes to run.",
     )
     argparse.add_argument(
         "--load_encoder", type=str, help="Checkpoint name of encoder to be loaded."

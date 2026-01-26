@@ -1,49 +1,98 @@
 [workspace]
-preview = ["pixi-build"]
-authors = ["Luka Hofer <luka.hofer@tum.de>"]
+authors = [
+    "Daniel San José Pro <42489409+danielsanjosepro@users.noreply.github.com>",
+]
+name = "franka_ros2_pixi"
+version = "0.1.0"
 channels = [
     "https://fast.prefix.dev/conda-forge",
     "https://conda.anaconda.org/pytorch",
     "https://conda.anaconda.org/nvidia",
 ]
-name = "rl-manipulation-base"
-version = "0.1.0"
 platforms = ["linux-64"]
 
 [activation]
-scripts = ["set_ros_env.sh"]
-
-[system-requirements]
-cuda = "12.0"
+scripts = ["set_ros_env.sh", "ros_ws/install/setup.sh"]
 
 [dependencies]
-python = ">=3.11.13,<3.12"
-pip = "*"
-compilers = ">=1.9.0,<2"
-cmake = ">=4.0.3,<5"
-pkg-config = ">=0.29.2,<0.30"
-make = ">=4.4.1,<5"
-ninja = ">=1.12.1,<2"
+python = "*"
+compilers = "*"
+cmake = "*"
+pkg-config = "*"
+make = "*"
+ninja = "*"
+pytorch-cuda = ">=12.4,<13"
+cuda-version = "*"
+cudnn = ">=8.9,<9"
+pip = ">=25.1.1,<26"
 typing_inspect = ">=0.9.0,<0.10"
 libstdcxx-ng = ">=15.1.0,<16"
 datasets = ">=3.6.0,<4"
-joblib = ">=1.2,<2"
-pytorch-cuda = "==12.4"          # CUDA 12.x compatible
+joblib = ">=1.5.1,<2"
 tifffile = ">=2025.6.11,<2026"
+cuda-nvcc = ">=12.4.131,<13"
+
+[pypi-dependencies]
+debugpy = ">=1.8.14,<2"
 
 [target.linux.dependencies]
 libgl-devel = "*"
 
 [environments]
-dev = { features = ["dev"] }
-humble = { features = ["humble"] }
-humble-lerobot = { features = ["humble", "lerobot"] }
-lerobot = { features = ["lerobot"] }
+jazzy-only = { features = ["jazzy", "dev", "extra"] }
+jazzy-crisp = { features = ["jazzy", "dev", "extra", "crisp"] }
+jazzy = { features = [
+    "jazzy",
+    "dev",
+    "extra",
+    "crisp",
+    "lerobot",
+    "pose_estimation",
+] }
 
-[feature.dev.pypi-dependencies]
-pre-commit = "*"
-ruff = "*"
+# jazzy
+[feature.jazzy]
+channels = ["https://prefix.dev/robostack-jazzy"]
 
+[feature.jazzy.dependencies]
+colcon-common-extensions = "*"
+pinocchio = ">=3.7.0,<4"
+poco = ">=1.14.2,<2"
+ros-jazzy-ament-clang-format = ">=0.17.2,<0.18"
+ros-jazzy-desktop = "*"
+ros-jazzy-joint-state-publisher = ">=2.4.0,<3"
+ros-jazzy-moveit-core = ">=2.12.3,<3"
+ros-jazzy-moveit-kinematics = ">=2.12.3,<3"
+ros-jazzy-moveit-planners-ompl = ">=2.12.3,<3"
+ros-jazzy-moveit-ros-move-group = ">=2.12.3,<3"
+ros-jazzy-rmw-cyclonedds-cpp = "*"
+ros-jazzy-rmw-zenoh-cpp = "*"
+ros-jazzy-ros2-control = "*"
+ros-jazzy-ros2-control-cmake = ">=0.2.1,<0.3"
+ros-jazzy-ros2-controllers = "*"
+ros-jazzy-xacro = ">=2.0.13,<3"
+rosdep = "*"
+
+[feature.jazzy.tasks]
+clone = "git clone https://github.com/frankarobotics/franka_ros2.git -b jazzy src/franka_ros2 && git clone https://github.com/frankarobotics/franka_description.git src/franka_description && git clone --recurse-submodules https://github.com/frankarobotics/libfranka.git src/libfranka"
+update-libfranka = "cd src/libfranka && git submodule update --init --recursive && cd ../../"
+apply-patches = "bash scripts/apply_patches.sh"
+ignore-gazebo = "touch src/franka_ros2/franka_gazebo/COLCON_IGNORE"
+build = "colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -Wno-dev"
+clone-crisp = "git clone https://github.com/utiasdsl/crisp_controllers.git src/crisp_controllers"
+setup = { depends-on = [
+    "clone",
+    "update-libfranka",
+    "apply-patches",
+    "ignore-gazebo",
+    "build",
+] }
+franka = "ros2 launch scripts/launch/franka.launch.py"
+
+
+[feature.lerobot.dependencies]
+pynput = "*"
+rerun-sdk = "==0.22.0"
 
 [feature.lerobot.pypi-dependencies]
 lerobot = { git = "https://github.com/huggingface/lerobot", rev = "dacd1d7f5c719c3e56d7b7154a751bef6d5bd23c", extras = [
@@ -56,35 +105,31 @@ rich = ">=14.0.0, <15"
 "torchaudio" = { version = "*", index = "https://download.pytorch.org/whl/cu128" }
 
 
-[feature.lerobot.dependencies]
-pynput = "*"
-rerun-sdk = "==0.22.0"
-python = ">=3.11.13,<3.14"
+[feature.dev.pypi-dependencies]
+ruff = "*"
+bumpver = "*"
+build = "*"
+twine = "*"
+pre-commit = "*"
+pytest = "*"     # for testing
 
+[feature.extra.pypi-dependencies]
+rich = "*"       # For nice prints
+matplotlib = "*" # to do some plots
 
-[feature.humble]
-channels = ["https://prefix.dev/robostack-humble"]
-
-[feature.humble.dependencies]
-ros-humble-desktop = "*"
-colcon-common-extensions = "*"
-ros-humble-ros2-control = "*"
-ros-humble-ros2-controllers = "*"
-rosdep = "*"
-ros-humble-rmw-cyclonedds-cpp = "*"
-pinocchio = ">=3.4.0,<4"
-tsid = ">=1.8.0,<2"
-# [tool.pixi.dependencies]
-
-[pypi-dependencies]
+[feature.crisp.pypi-dependencies]
 crisp_drl = { path = ".", editable = true }
-# torch = "*"
 crisp_gym = { path = "../crisp_gym", editable = true }
 crisp_python = { path = "../crisp_py", editable = true }
 tensorboard = ">=2.20.0, <3"
 gymnasium = { version = ">=0.29.1, <2", extras = ["classic-control"] }
 mujid = { path = "../mujid", editable = true }
 
+[feature.crisp.system-requirements]
+cuda = "12.0"
 
-[tasks]
-configure = "bash scripts/configure.sh"
+[feature.pose_estimation.pypi-dependencies]
+"decord" = "*"
+pycocotools = "*"
+sam3 = { path = "./sam3", editable = true }
+pyvista = "*"
