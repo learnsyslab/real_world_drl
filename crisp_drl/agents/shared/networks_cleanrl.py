@@ -24,7 +24,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributions as D
 
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 
 
 class SoftQNetwork(nn.Module):

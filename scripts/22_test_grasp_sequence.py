@@ -1,5 +1,5 @@
 import time
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 from crisp_drl.envs.make_env import create_real_env_v3
 
 env = create_real_env_v3(config=Config())

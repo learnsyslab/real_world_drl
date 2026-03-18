@@ -1,0 +1,78 @@
+/home/linusschwarz/repos/real_world_drl/sam3/sam3/model_builder.py:8: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+Using cache found in /home/linusschwarz/.cache/torch/hub/facebookresearch_dinov2_main
+/home/linusschwarz/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/layers/swiglu_ffn.py:51: UserWarning: xFormers is not available (SwiGLU)
+  warnings.warn("xFormers is not available (SwiGLU)")
+/home/linusschwarz/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/layers/attention.py:33: UserWarning: xFormers is not available (Attention)
+  warnings.warn("xFormers is not available (Attention)")
+/home/linusschwarz/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/layers/block.py:40: UserWarning: xFormers is not available (Block)
+  warnings.warn("xFormers is not available (Block)")
+/home/linusschwarz/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/layers/patch_embed.py:72: TracerWarning: Converting a tensor to a Python boolean might cause the trace to be incorrect. We can't record the data flow of Python values, so this value will be treated as a constant in the future. This means that the trace might not generalize to other inputs!
+  assert H % patch_H == 0, f"Input image height {H} is not a multiple of patch height {patch_H}"
+/home/linusschwarz/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/layers/patch_embed.py:73: TracerWarning: Converting a tensor to a Python boolean might cause the trace to be incorrect. We can't record the data flow of Python values, so this value will be treated as a constant in the future. This means that the trace might not generalize to other inputs!
+  assert W % patch_W == 0, f"Input image width {W} is not a multiple of patch width: {patch_W}"
+/home/linusschwarz/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/models/vision_transformer.py:184: TracerWarning: Converting a tensor to a Python boolean might cause the trace to be incorrect. We can't record the data flow of Python values, so this value will be treated as a constant in the future. This means that the trace might not generalize to other inputs!
+  if npatch == N and w == h:
+/home/linusschwarz/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/models/vision_transformer.py:192: TracerWarning: Converting a tensor to a Python float might cause the trace to be incorrect. We can't record the data flow of Python values, so this value will be treated as a constant in the future. This means that the trace might not generalize to other inputs!
+  M = int(math.sqrt(N))  # Recover the number of patches in each dimension
+/home/linusschwarz/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/models/vision_transformer.py:193: TracerWarning: Converting a tensor to a Python boolean might cause the trace to be incorrect. We can't record the data flow of Python values, so this value will be treated as a constant in the future. This means that the trace might not generalize to other inputs!
+  assert N == M * M
+/home/linusschwarz/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/models/vision_transformer.py:210: TracerWarning: Converting a tensor to a Python boolean might cause the trace to be incorrect. We can't record the data flow of Python values, so this value will be treated as a constant in the future. This means that the trace might not generalize to other inputs!
+  assert (w0, h0) == patch_pos_embed.shape[-2:]
+/home/linusschwarz/repos/real_world_drl/crisp_drl/agents/shared/networks_cleanrl.py:63: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.detach().clone() or sourceTensor.detach().clone().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  self.register_buffer("mean", torch.tensor(mean, dtype=torch.float32))
+/home/linusschwarz/repos/real_world_drl/crisp_drl/agents/shared/networks_cleanrl.py:64: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.detach().clone() or sourceTensor.detach().clone().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  self.register_buffer("std", torch.tensor(std, dtype=torch.float32))
+/home/linusschwarz/repos/real_world_drl/crisp_drl/agents/shared/env_wrappers.py:772: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.detach().clone() or sourceTensor.detach().clone().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  extracted = torch.tensor(
+pynput not installed, keyboard interrupt will not be available.
+pynput not installed, keyboard interrupt will not be available.
+[InsertionWrapperSim] [__init__] Eval mode: True
+Loading DINOv2 model: dinov2_vits14_reg...
+  DINOv2 traced with TorchScript
+DinoImageEncoderWrapper initialized:
+  Cameras: 1, Image size: (256, 256)
+  Output dim per camera: 384
+Image key: observation.images.wrist_camera_1, shape: (256, 256, 3)
+Traceback (most recent call last):
+  File "/home/linusschwarz/repos/real_world_drl/crisp_drl/scripts/eval_actor.py", line 70, in <module>
+    shared_encoder(obs["observation.formatted"].unsqueeze(0).to(device))
+  File "/home/linusschwarz/repos/real_world_drl/.pixi/envs/jazzy/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linusschwarz/repos/real_world_drl/.pixi/envs/jazzy/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linusschwarz/repos/real_world_drl/crisp_drl/agents/shared/networks_cleanrl.py", line 191, in forward
+    out = self.image_encoders[i](x[:, slice_start:slice_end])
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linusschwarz/repos/real_world_drl/.pixi/envs/jazzy/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linusschwarz/repos/real_world_drl/.pixi/envs/jazzy/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linusschwarz/repos/real_world_drl/crisp_drl/agents/shared/networks_cleanrl.py", line 89, in forward
+    x = self.fc1(x)
+        ^^^^^^^^^^^
+  File "/home/linusschwarz/repos/real_world_drl/.pixi/envs/jazzy/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linusschwarz/repos/real_world_drl/.pixi/envs/jazzy/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linusschwarz/repos/real_world_drl/.pixi/envs/jazzy/lib/python3.12/site-packages/torch/nn/modules/linear.py", line 125, in forward
+    return F.linear(input, self.weight, self.bias)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: mat1 and mat2 shapes cannot be multiplied (1x0 and 384x128)
+Exception ignored in: <function Renderer.__del__ at 0x77e58d3cf2e0>
+Traceback (most recent call last):
+  File "/home/linusschwarz/repos/real_world_drl/.pixi/envs/jazzy/lib/python3.12/site-packages/mujoco/renderer.py", line 340, in __del__
+  File "/home/linusschwarz/repos/real_world_drl/.pixi/envs/jazzy/lib/python3.12/site-packages/mujoco/renderer.py", line 326, in close
+  File "/home/linusschwarz/repos/real_world_drl/.pixi/envs/jazzy/lib/python3.12/site-packages/mujoco/egl/__init__.py", line 129, in free
+TypeError: 'NoneType' object is not callable
+Exception ignored in: <function GLContext.__del__ at 0x77e58d3cea20>
+Traceback (most recent call last):
+  File "/home/linusschwarz/repos/real_world_drl/.pixi/envs/jazzy/lib/python3.12/site-packages/mujoco/egl/__init__.py", line 138, in __del__
+  File "/home/linusschwarz/repos/real_world_drl/.pixi/envs/jazzy/lib/python3.12/site-packages/mujoco/egl/__init__.py", line 129, in free
+TypeError: 'NoneType' object is not callable

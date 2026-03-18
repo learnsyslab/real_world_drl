@@ -3,22 +3,15 @@ import tifffile
 import time
 
 from crisp_drl.envs.pose_estimation_helper import PoseEstimationHelper
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 
 config = Config()
 
-estimation_position_euler = [
-    0.5187528,
-    -0.03277275,
-    0.07176751,
-    3.1414583,
-    -0.00552173,
-    0.00340042,
-]  # x, y, z, roll, pitch, yaw
+estimation_position_euler = config.demo_grasp_pose_estimation_pose_euler
 
-image = imageio.imread("test_images/demo_img_color.tiff")
+image = imageio.imread("test_images/demo_img_color_0.tiff")
 print("Image shape:", image.shape, "dtype:", image.dtype)
-depth_img = tifffile.imread("test_images/demo_img_depth.tiff")
+depth_img = tifffile.imread("test_images/demo_img_depth_0.tiff")
 
 t0 = time.time()
 pose_helper = PoseEstimationHelper(

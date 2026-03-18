@@ -19,3 +19,5 @@ datasets
 ros_ws
 sam3
 test_images
+eval
+plots

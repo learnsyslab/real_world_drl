@@ -19,11 +19,11 @@ import sys
 # Alternate between going to the goal position and moving randomly with probaility p
 
 
-N_ROLLOUTS = 1000
+N_ROLLOUTS = 300
 max_random_action_magnitude = 0.00025
 perfect_action_magnitude = 0.00025
-ideal_goal_pos = np.array([0.6, 0.0])
-ideal_grasp_pos = np.array([0.0, 0.0])
+ideal_goal_pos = np.array([0.6, 0.0, 0.132])
+ideal_grasp_pos = np.array([0.0, 0.0, 0.0])
 
 base_exp_name = ""
 if len(sys.argv) > 1:
@@ -60,8 +60,6 @@ env = make_env.create_simulated_env(
 
 reward_fn = make_rew.create_sim_reward_fn(
     config,
-    ideal_goal_pos_xy=np.array([0.6, 0.0]),
-    ideal_grasp_pos_xy=np.array([0.0, 0.0]),
     event_reward_map={
         "E_SUCCESS": 0.1 / (1 - config.gamma) * 3,
         "E_FAIL": -0.1 / (1 - config.gamma) / 2 * 3,
@@ -91,6 +89,7 @@ for p in ps:
         actual_grasp_pos = reset_info["reset.grasped.position"]
         goal_pos = ideal_goal_pos.copy()
         goal_pos[0] -= actual_grasp_pos[0]
+        goal_pos[2] -= actual_grasp_pos[2]
 
         all_actions = []
         all_rewards = []
@@ -99,7 +98,7 @@ for p in ps:
         all_infos = [reset_info]
         info = reset_info
         while True:
-            perfect_action = goal_pos - obs["observation.state.cartesian"][:2]
+            perfect_action = goal_pos - obs["observation.state.cartesian"][:3]
             perfect_action = (
                 perfect_action
                 / np.linalg.norm(perfect_action)
@@ -111,7 +110,7 @@ for p in ps:
                 action = np.random.uniform(
                     -max_random_action_magnitude,
                     max_random_action_magnitude,
-                    size=(2,),
+                    size=(3,),
                 )
             else:
                 action = perfect_action
@@ -142,7 +141,6 @@ for p in ps:
             all_observations,
             all_rewards,
             all_infos,
-            actual_grasp_pos_xy=actual_grasp_pos[:2],
         )
 
         # save data

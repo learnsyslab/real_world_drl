@@ -12,7 +12,7 @@ class Sam3Detector:
         processor = Sam3Processor(model, confidence_threshold=0.25)
         self.processor = processor
 
-    def segment(self, image: np.ndarray) -> dict[str, np.ndarray]:
+    def segment_lego(self, image: np.ndarray) -> dict[str, np.ndarray]:
         inference_state = self.processor.set_image(Image.fromarray(image))
         output = self.processor.set_text_prompt(
             state=inference_state, prompt="small lego brick"
@@ -44,11 +44,43 @@ class Sam3Detector:
             "lavender": masks[lightest_mask_idx]
             .cpu()
             .numpy()
-            .reshape(mask.shape[-2], mask.shape[-1])
+            .reshape(mask.shape[-2], mask.shape[-1])  # pyright: ignore[reportPossiblyUnboundVariable]
             * 255,
             "purple": masks[darkest_mask_idx]
             .cpu()
             .numpy()
-            .reshape(mask.shape[-2], mask.shape[-1])
+            .reshape(mask.shape[-2], mask.shape[-1])  # pyright: ignore[reportPossiblyUnboundVariable]
             * 255,
         }
+
+    def segment_siemens(self, image: np.ndarray) -> np.ndarray:
+        inference_state = self.processor.set_image(Image.fromarray(image))
+        output = self.processor.set_text_prompt(
+            state=inference_state, prompt="black cover with circular grille"
+        )
+        masks, _boxes, scores = output["masks"], output["boxes"], output["scores"]
+        scores = scores.cpu().numpy()
+        if len(masks) == 0:
+            raise ValueError("[SAM3 Segment] No masks found")
+        mask_idx = 0
+        if len(masks) > 1:
+            scores_sorted = np.sort(scores)
+            if scores_sorted[-1] - scores_sorted[-2] < 0.1:
+                print(
+                    f"Warning: more than one mask detected (scores {scores.tolist()}), "
+                    "choosing the one with highest score, although the difference to the second "
+                    f"highest score is only {scores_sorted[-1] - scores_sorted[-2]:.2f}"
+                )
+            if scores_sorted[-1] < 0.5:
+                print(
+                    f"Warning: best mask is not confident, score: {scores_sorted[-1]:.2f} "
+                )
+            mask_idx = np.argsort(scores)[-1]
+
+        return (
+            masks[mask_idx]
+            .cpu()
+            .numpy()
+            .reshape(masks[0].shape[-2], masks[0].shape[-1])
+            * 255
+        )

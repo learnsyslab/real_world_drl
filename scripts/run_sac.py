@@ -9,11 +9,12 @@ from argparse import ArgumentParser
 
 from crisp_drl.agents.shared.actor import SACActor
 from crisp_drl.agents.sac_rlpd.learner import SACLearner
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 
 import signal
 from contextlib import contextmanager
 
+from crisp_drl.agents.shared.insertion_env_config import SiemensConfig
 from crisp_drl.envs import make_env, make_rew
 
 
@@ -26,7 +27,7 @@ def no_interrupts():
         signal.signal(signal.SIGINT, old_handler)
 
 
-def launch_processes(args):
+def launch_processes(args, config):
     rclpy.init()
     ctx = mp.get_context("spawn")
 
@@ -48,6 +49,7 @@ def launch_processes(args):
         target=launch_actor,
         args=(
             args,
+            config,
             data_queue,
             parameters_queue,
             run_name,
@@ -60,7 +62,7 @@ def launch_processes(args):
         # start learner
         learner_process = ctx.Process(
             target=launch_learner,
-            args=(args, data_queue, parameters_queue, run_name),
+            args=(args, config, data_queue, parameters_queue, run_name),
         )
         learner_process.start()
         logging.info(f"RLPD learner process started with PID: {learner_process.pid}")
@@ -99,6 +101,7 @@ def launch_processes(args):
 
 def launch_actor(
     args,
+    config,
     data_queue,
     parameters_queue,
     run_name,
@@ -116,8 +119,8 @@ def launch_actor(
         #         "live_view": False,
         #     }
         # )
-        config = Config()
-        env = make_env.create_real_env_v3(config, args)
+        # env = make_env.create_real_env_v4(config, args)
+        env = make_env.create_real_env_s1(config, env_config=SiemensConfig(), args=args)
         # rew_fn = make_rew.create_sim_reward_fn(  # noqa: F821
         #     self.config,
         #     ideal_goal_pos_xy=np.array([0.6, 0.0]),
@@ -139,7 +142,7 @@ def launch_actor(
                 "E_TORQUE": -100,
             },
         )
-        actor = SACActor(args, parameters_queue, run_name, env, rew_fn)
+        actor = SACActor(args, config, parameters_queue, run_name, env, rew_fn)
     except Exception as e:
         logging.error(f"Failed to initialize SAC Actor: {e}", exc_info=True)
         return
@@ -150,12 +153,13 @@ def launch_actor(
         actor.close()
 
 
-def launch_learner(args, data_queue, parameters_queue, run_name):
+def launch_learner(args, config, data_queue, parameters_queue, run_name):
     logging.basicConfig(level=logging.INFO)
 
     try:
         learner = SACLearner(
             args,
+            config=config,
             parameters_queue=parameters_queue,
             run_name=run_name,
         )
@@ -222,7 +226,8 @@ def main():
         "--load_encoder", type=str, help="Checkpoint name of encoder to be loaded."
     )
     args = argparse.parse_args()
-    launch_processes(args)
+    config = Config()
+    launch_processes(args, config)
 
 
 if __name__ == "__main__":

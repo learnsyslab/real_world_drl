@@ -17,7 +17,7 @@ from crisp_drl.data import buffers_cleanrl
 from crisp_drl.data.buffers_cleanrl import (
     ReplayBufferGpu,
 )
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 from crisp_drl.agents.shared.networks_cleanrl import SharedEncoder, SoftQNetwork, Actor
 
 
@@ -25,15 +25,12 @@ class SACLearner:
     def __init__(
         self,
         args,
+        config: Config,
         parameters_queue: mp.Queue,
         run_name: str,
     ):
         # Store the configuration parameters
-        self.config = Config()
-        assert int(self.config.update_policy_after * self.config.utd_ratio) > 0, (
-            "Invalid combination of update_policy_after and utd_ratio. "
-            "Ensure that int(update_policy_after * utd_ratio) > 0."
-        )
+        self.config = config
         self.args = args
 
         # check gym environment
@@ -233,14 +230,38 @@ class SACLearner:
             logging.info(
                 f"Learner starts training... (total steps: {int(self.replay_buffer.size() * self.config.utd_ratio)})"
             )
+            last_save_pre_utd1 = 0.0
             for self.current_training_step in range(
                 int(self.replay_buffer.size() * self.config.utd_ratio)
             ):
                 self._train_step(self.writer, pre_training=True)
-                if (self.current_training_step + 1) % self.replay_buffer.size() == 0:
+                n_pass_raw = (
+                    self.current_training_step + 1
+                ) / self.replay_buffer.size()
+                # checkpoint for utd<1
+                if (
+                    n_pass_raw < 1
+                    and n_pass_raw // self.config.pre_train_save_interval_pre_1
+                    != last_save_pre_utd1 // self.config.pre_train_save_interval_pre_1
+                ):
+                    last_save_pre_utd1 = n_pass_raw
+                    n_pass_cleaned = (
+                        n_pass_raw // self.config.pre_train_save_interval_pre_1
+                    ) * self.config.pre_train_save_interval_pre_1
                     logging.info(
-                        f"{time.strftime('%Y-%m-%d %H:%M:%S')} Pass {(self.current_training_step + 1) // self.replay_buffer.size()} through the pre-train buffer completed."
+                        f"{time.strftime('%Y-%m-%d %H:%M:%S')} Pass {n_pass_cleaned:.2f} through the pre-train buffer completed."
                     )
+                    self.save_model(n_pass_cleaned)
+
+                # checkpoints for utd >= 1
+                if (self.current_training_step + 1) % self.replay_buffer.size() == 0:
+                    n_pass = int(n_pass_raw)
+                    logging.info(
+                        f"{time.strftime('%Y-%m-%d %H:%M:%S')} Pass {n_pass} through the pre-train buffer completed."
+                    )
+                    if n_pass % self.config.pre_train_save_interval == 0:
+                        # model checkpoint
+                        self.save_model(n_pass)
             print("Learner finished training.")
 
         except SystemExit:
@@ -248,7 +269,7 @@ class SACLearner:
         except KeyboardInterrupt:
             logging.info("Keyboard interrupt received. Terminating learner process...")
         except Exception as e:
-            logging.error(f"An error occurred in the RLPD Learner: {e}", exc_info=True)
+            logging.error(f"An error occurred in the SAC Learner: {e}", exc_info=True)
         finally:
             self.close()
 
@@ -303,7 +324,7 @@ class SACLearner:
             self.close()
         except Exception as e:
             self.close()
-            logging.error(f"An error occurred in the RLPD Learner: {e}", exc_info=True)
+            logging.error(f"An error occurred in the SAC Learner: {e}", exc_info=True)
 
     def _train_step(self, writer, pre_training=False):
         """Perform a single training step using data from the replay buffer.
@@ -482,62 +503,69 @@ class SACLearner:
     def close(self):
         """Close the learner and clean up resources."""
         logging.info("Executing SAC Learner closing behavior...")
+        # for pre-training runs, only save checkpoints through self.pre_train()
+        if not self.args.pre_train:
+            self.save_model()
+        if not self.args.eval:
+            self.writer.close()
+        torch.cuda.empty_cache()
 
+    def save_model(self, pre_train_passes=None):
+        """Save the model parameters and optimizer states to the checkpoint path."""
+        checkpoint_dir = self.checkpoint_path
+        if pre_train_passes is not None:
+            checkpoint_dir = os.path.join(
+                self.checkpoint_path,
+                f"pretrain_{pre_train_passes}"
+                if type(pre_train_passes) is int
+                else f"pretrain_{pre_train_passes:.2f}",
+            )
+            os.makedirs(checkpoint_dir, exist_ok=True)
         # Save the model parameters
         torch.save(
             self.actor.state_dict(),
-            os.path.join(self.checkpoint_path, "actor_state_dict.pth"),
+            os.path.join(checkpoint_dir, "actor_state_dict.pth"),
         )
         for idx in range(self.config.num_critics):
             torch.save(
                 self.q_networks[idx].state_dict(),
-                os.path.join(self.checkpoint_path, f"qf{idx + 1}_state_dict.pth"),
+                os.path.join(checkpoint_dir, f"qf{idx + 1}_state_dict.pth"),
             )
             torch.save(
                 self.q_target_networks[idx].state_dict(),
-                os.path.join(
-                    self.checkpoint_path, f"qf{idx + 1}_target_state_dict.pth"
-                ),
+                os.path.join(checkpoint_dir, f"qf{idx + 1}_target_state_dict.pth"),
             )
         if self.config.autotune:
-            torch.save(
-                self.log_alpha, os.path.join(self.checkpoint_path, "log_alpha.pth")
-            )
+            torch.save(self.log_alpha, os.path.join(checkpoint_dir, "log_alpha.pth"))
             torch.save(
                 self.a_optimizer.state_dict(),
-                os.path.join(self.checkpoint_path, "a_optimizer_state_dict.pth"),
+                os.path.join(checkpoint_dir, "a_optimizer_state_dict.pth"),
             )
         torch.save(
             self.shared_encoder.state_dict(),
-            os.path.join(self.checkpoint_path, "shared_encoder_state_dict.pth"),
+            os.path.join(checkpoint_dir, "shared_encoder_state_dict.pth"),
         )
 
         torch.save(
             self.q_optimizer.state_dict(),
-            os.path.join(self.checkpoint_path, "q_optimizer_state_dict.pth"),
+            os.path.join(checkpoint_dir, "q_optimizer_state_dict.pth"),
         )
         if self.config.shared_encoder_gradient:
             torch.save(
                 self.shared_encoder_optimizer.state_dict(),
-                os.path.join(
-                    self.checkpoint_path, "shared_encoder_optimizer_state_dict.pth"
-                ),
+                os.path.join(checkpoint_dir, "shared_encoder_optimizer_state_dict.pth"),
             )
         torch.save(
             self.actor_optimizer.state_dict(),
-            os.path.join(self.checkpoint_path, "actor_optimizer_state_dict.pth"),
+            os.path.join(checkpoint_dir, "actor_optimizer_state_dict.pth"),
         )
-        with open(
-            os.path.join(self.checkpoint_path, "current_training_step"), "w"
-        ) as f:
+        with open(os.path.join(checkpoint_dir, "current_training_step"), "w") as f:
             f.write(str(self.current_training_step))
 
         if not self.args.eval:
-            with open(os.path.join(self.checkpoint_path, "global_step"), "w") as f:
+            with open(os.path.join(checkpoint_dir, "global_step"), "w") as f:
                 f.write(f"{self.global_step} {self.episode_num}")
-            self.writer.close()
 
-        self.replay_buffer.save_buffer(self.checkpoint_path)
-        torch.cuda.empty_cache()
+        if not self.args.pre_train:
+            self.replay_buffer.save_buffer(checkpoint_dir)
         logging.info("Model parameters saved successfully.")
-        return

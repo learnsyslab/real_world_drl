@@ -9,7 +9,7 @@ from argparse import ArgumentParser
 from gymnasium import spaces
 
 from crisp_drl.agents.sac_rlpd.learner import SACLearner
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 
 
 def main():
@@ -52,20 +52,45 @@ def main():
     argparse.add_argument(
         "--load_encoder", type=str, help="Checkpoint name of encoder to be loaded."
     )
+    argparse.add_argument(
+        "--seed", type=int, default=None, help="Random seed for training."
+    )
+    argparse.add_argument(
+        "--utd_ratio", type=float, default=None, help="Random seed for training."
+    )
+    argparse.add_argument(
+        "--n_cameras", type=int, default=None, help="Random seed for training."
+    )
+    argparse.add_argument(
+        "--actor_nonvision_input_dim",
+        type=int,
+        default=None,
+        help="Random seed for training.",
+    )
     args = argparse.parse_args()
 
     rclpy.init()
+    kwargs = {}
+    if args.seed is not None:
+        kwargs["seed"] = args.seed
+    if args.utd_ratio is not None:
+        kwargs["utd_ratio"] = args.utd_ratio
+    if args.n_cameras is not None:
+        kwargs["n_cameras"] = args.n_cameras
+    if args.actor_nonvision_input_dim is not None:
+        kwargs["actor_nonvision_input_dim"] = args.actor_nonvision_input_dim
+    config = Config(**kwargs)
 
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     algo_name = str(os.path.dirname(__file__).split("/")[-1])
     if args.run_name is not None:
         run_name = args.run_name
     else:
-        config = Config()
         run_name = f"{config.env_name}__{algo_name}__{timestamp}"
 
     learner = SACLearner(
         args,
+        config,
         parameters_queue=None,  # type: ignore
         run_name=run_name,
     )

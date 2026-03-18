@@ -43,6 +43,10 @@ class Config:
     """if true, use camera image observations"""
     total_timesteps: int = 199_000
     """total timesteps of the experiments"""
+    pre_train_save_interval: int = 1
+    """epochs between saving pre-training checkpoints"""
+    pre_train_save_interval_pre_1: float = 0.1
+    """epochs between saving pre-training checkpoints before utd=1"""
     episode_length: int = 150
     """the maximum length of an episode"""
     buffer_size: int = 200_000
@@ -54,7 +58,7 @@ class Config:
     tau: float = 0.005
     """target smoothing coefficient (default: 0.005)"""
     batch_size: int = 512
-    """the batch size of sample from the reply memory"""
+    """the batch size of sample from the replay memory"""
     learning_starts: int = 512
     """timestep to start learning"""
     policy_lr: float = 3e-4
@@ -67,9 +71,7 @@ class Config:
     """number of Q networks to sample for calculating the target value"""
     critic_subset_size: int = 2
     """number of Q networks to use for calculating the target value"""
-    update_policy_after: int = 1
-    """number of time steps after which the policy is updated"""
-    utd_ratio: float = 20.0
+    utd_ratio: float = 30.0
     """the ratio of policy updates to environment steps taken"""
     alpha: float = 0.001  # 0.001
     """Entropy regularization coefficient."""
@@ -95,7 +97,7 @@ class Config:
     """the hidden dimension of the vision head"""
     vision_head_output_dim: int = 16
     """the output dimension of the vision head"""
-    actor_nonvision_input_dim: int = 8
+    actor_nonvision_input_dim: int = 14  #  14  # 8
     """the input dimension of the non-vision part of the actor network"""
     actor_output_dim: int = 2
     """the output dimension of the actor network"""
@@ -113,32 +115,37 @@ class Config:
     custom_home_position: np.ndarray = field(
         default_factory=lambda: np.array(
             [
-                -0.03049143,
-                0.4469818,
-                -0.02475526,
-                -2.3372357,
-                0.01456,
-                2.7885091,
-                0.71526223,
+                -0.02646138,
+                0.35014075,
+                -0.03229037,
+                -2.3585236,
+                0.0231909,
+                2.713794,
+                0.70426035,
             ]
         )
     )
     """custom home position for the robot end-effector"""
     goal_position_ground_truth: np.ndarray = field(
-        default_factory=lambda: np.array([0.54279631, -0.030636687, 0.054106168])
-    )  # 0.54262590, -0.030810941, 0.051836114
+        default_factory=lambda: np.array([0.5417, -0.031, 0.08956918])
+    )  # 0.54262590, -0.030810941, 0.051836114 # 0.5422, -0.03125
     """the ground truth goal position in the real world"""
     grasp_position_ground_truth: np.ndarray = field(
-        default_factory=lambda: np.array([0.51101995, -0.030473206, 0.042312632])
+        default_factory=lambda: np.array([0.5100313, -0.03166383, 0.07772372])
     )  # 0.5106526, -0.03026352, 0.04147444
     """the ground truth grasp position in the real world"""
-
-    demo_pose_estimation_euler: np.ndarray = field(
+    demo_grasp_pose_estimation_pose_euler: np.ndarray = field(
         default_factory=lambda: np.array(
-            [0.52215743, -0.0288643, 0.05809896, -3.141059, -0.00374691, 0.00447622]
+            [0.51002705, -0.03166126, 0.07771762, 3.1398149, -0.00529997, 0.00330537]
         )
     )
-    pose_estimation_include_demo: bool = False
+    """the position used during pose estimation for grasping during demo"""
+
+    demo_goal_pose_estimation_euler: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [0.52480197, -0.03154222, 0.0966146, -3.1412485, -0.00335749, 0.00383465]
+        )
+    )
     """whether to include the demo pose in the pose estimation computation"""
     pose_estimation_assumed_orientation: np.ndarray = field(
         default_factory=lambda: np.array(
@@ -148,31 +155,18 @@ class Config:
                     [-0.9342041015625, 0.0007091141305863857, 0.35673803091049194],
                     [-0.35590144991874695, 0.06661905348300934, -0.9321458339691162],
                 ]
-                # [0.03445333, -0.8581947, -0.51216656],
-                # [-0.99939716, -0.02739692, -0.02132249],
-                # [0.00426707, 0.51259243, -0.85862136],
             ]
         )
     )
     """the assumed orientation (rotation matrix) for pose estimation"""
-    demo_pose_lavender: np.ndarray = field(
+    demo_grasped_pose_lavender: np.ndarray = field(
         default_factory=lambda: np.array(
             [
-                [0.99831641, -0.05123854, -0.02718068, 0.51861272],
-                [0.05093913, 0.99863431, -0.0115972, -0.03614451],
-                [0.02773775, 0.01019306, 0.99956331, 0.04604851],
+                [0.99956242, -0.01966487, -0.02209571, 0.51189277],
+                [0.02016189, 0.99954325, 0.02250109, -0.03525977],
+                [0.02164308, -0.02293679, 0.99950251, 0.05194422],
                 [0.0, 0.0, 0.0, 1.0],
             ]
         )
     )
-    demo_pose_purple: np.ndarray = field(
-        default_factory=lambda: np.array(
-            [
-                [0.99568652, -0.03302998, 0.08670136, 0.53851665],
-                [0.02700199, 0.99719533, 0.06980042, -0.03773232],
-                [-0.08876377, -0.06715828, 0.993786, 0.0154441],
-                [0.0, 0.0, 0.0, 1.0],
-            ]
-        )
-    )
-    """the pose matrices extracted from the demo for the two blocks used to compute the relative goal position"""
+    """the pose matrix extracted from the demo for the lavender brick before grasping"""

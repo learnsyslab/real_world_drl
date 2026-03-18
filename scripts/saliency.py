@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 from crisp_drl.data.buffers_cleanrl import ReplayBufferGpu
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 from crisp_drl.agents.shared.networks_cleanrl import SharedEncoder, SoftQNetwork, Actor
 
 

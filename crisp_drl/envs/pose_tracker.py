@@ -111,7 +111,7 @@ class PoseTracker(Node):
         pose_input_msg.tensors = [pose_input_tensor]
         return pose_input_msg
 
-    def _set_mesh_file(self, color: str):
+    def _set_mesh_file_lego(self, color: str):
         """Set the mesh file path parameter based on color using parameter client."""
         mesh_path_map = {
             "lavender": "/workspaces/isaac_ros-dev/lego_assets/lego_2x2_lavender_up.obj",
@@ -122,9 +122,17 @@ class PoseTracker(Node):
             raise ValueError(f"Unknown color: {color}. Must be 'lavender' or 'purple'")
 
         mesh_path = mesh_path_map[color]
+        self._set_mesh_path(mesh_path)
 
-        # Create parameter client for the foundationpose node
-        param_client = AsyncParameterClient(self, "/foundationpose")
+    def _set_mesh_file_siemens(self):
+        """Set the mesh file path parameter using parameter client."""
+        self._set_mesh_path(
+            "/workspaces/isaac_ros-dev/lego_assets/SiemensLid_centered.obj"
+        )
+
+    def _set_mesh_path(self, mesh_path):
+        # Create parameter client for the foundationpose tracking node
+        param_client = AsyncParameterClient(self, "/foundationpose_tracking_node")
 
         try:
             # Set the parameter
@@ -164,12 +172,36 @@ class PoseTracker(Node):
             self.get_logger().error(f"Failed to set mesh file: {e}")
             raise
 
-    def track(
+    def track_lego(
         self,
         image: np.ndarray,
         depth: np.ndarray,
         initial_pose: np.ndarray,
         color: str,
+        passes: int = 4,
+        randomization: float = 0.0,
+        timeout: float = 10.0,
+    ) -> np.ndarray:
+        self._set_mesh_file_lego(color)
+        return self._track(image, depth, initial_pose, passes, randomization, timeout)
+
+    def track_siemens(
+        self,
+        image: np.ndarray,
+        depth: np.ndarray,
+        initial_pose: np.ndarray,
+        passes: int = 4,
+        randomization: float = 0.0,
+        timeout: float = 10.0,
+    ) -> np.ndarray:
+        self._set_mesh_file_siemens()
+        return self._track(image, depth, initial_pose, passes, randomization, timeout)
+
+    def _track(
+        self,
+        image: np.ndarray,
+        depth: np.ndarray,
+        initial_pose: np.ndarray,
         passes: int = 4,
         randomization: float = 0.0,
         timeout: float = 10.0,
@@ -193,8 +225,6 @@ class PoseTracker(Node):
 
         if initial_pose.shape != (4, 4):
             raise ValueError("initial_pose must be a 4x4 matrix")
-
-        self._set_mesh_file(color)
 
         current_pose = np.array(initial_pose, dtype=np.float32)
         if randomization > 0.0:

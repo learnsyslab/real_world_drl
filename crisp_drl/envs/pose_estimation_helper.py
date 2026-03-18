@@ -129,17 +129,17 @@ class PoseEstimationHelper:
 
         return world_pose_matrix
 
-    def _estimate(self, image: np.ndarray, depth: np.ndarray):
+    def _estimate_lego(self, image: np.ndarray, depth: np.ndarray):
         depth_f32 = depth.astype(np.float32) / 1000.0  # Convert to meters
-        masks = self.segmenter.segment(image)
+        masks = self.segmenter.segment_lego(image)
         poses = {
-            key: self.pose_estimator.estimate(image, depth_f32, masks[key], key)
+            key: self.pose_estimator.estimate_lego(image, depth_f32, masks[key], key)
             for key in masks
         }
         for key in poses:
             poses[key][:3, :3] = self.assumed_orientation
         return {
-            key: self.pose_tracker.track(image, depth_f32, poses[key], key)
+            key: self.pose_tracker.track_lego(image, depth_f32, poses[key], key)
             for key in poses
         }
 
@@ -149,7 +149,7 @@ class PoseEstimationHelper:
         depth: np.ndarray,
         estimation_position_euler: list[float] | np.ndarray,
     ) -> np.ndarray:
-        refined_poses = self._estimate(image, depth)
+        refined_poses = self._estimate_lego(image, depth)
         return self._compute_translation_in_world_frame(
             refined_poses["lavender"],
             refined_poses["purple"],
@@ -162,7 +162,7 @@ class PoseEstimationHelper:
         depth: np.ndarray,
         estimation_position_euler: list[float] | np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
-        refined_poses = self._estimate(image, depth)
+        refined_poses = self._estimate_lego(image, depth)
         return self._compute_pose_in_world_frame(
             refined_poses["lavender"],
             estimation_position_euler,
@@ -170,3 +170,20 @@ class PoseEstimationHelper:
             refined_poses["purple"],
             estimation_position_euler,
         )
+
+    def estimate_siemens_ee_frame(
+        self, image: np.ndarray, depth: np.ndarray
+    ) -> np.ndarray:
+        depth_f32 = depth.astype(np.float32) / 1000.0  # Convert to meters
+        mask = self.segmenter.segment_siemens(image)
+        pose = self.pose_estimator.estimate_siemens(image, depth_f32, mask)
+        pose[:3, :3] = self.assumed_orientation
+        return self.pose_tracker.track_siemens(image, depth_f32, pose)
+
+    def estimate_siemens_ee_frame_coarse(
+        self, image: np.ndarray, depth: np.ndarray
+    ) -> np.ndarray:
+        depth_f32 = depth.astype(np.float32) / 1000.0  # Convert to meters
+        mask = self.segmenter.segment_siemens(image)
+        pose = self.pose_estimator.estimate_siemens(image, depth_f32, mask)
+        return pose

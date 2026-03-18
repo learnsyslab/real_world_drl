@@ -1,6 +1,9 @@
+import json
 import logging
 import os
+from turtle import fd
 import gymnasium as gym
+from pyparsing import line
 import torch
 import torch.multiprocessing as mp
 
@@ -22,14 +25,22 @@ from crisp_drl.agents.shared.rewards import (
     xy_action_magnitude_dense_reward,
     xy_dense_simple_place_reward,
 )
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 from crisp_drl.agents.shared.networks_cleanrl import Actor, SharedEncoder
 from crisp_drl.envs import make_rew
 
 
 class SACActor:
-    def __init__(self, args, parameters_queue: mp.Queue, run_name: str, env, rew_fn):
-        self.config = Config()
+    def __init__(
+        self,
+        args,
+        config: Config,
+        parameters_queue: mp.Queue,
+        run_name: str,
+        env,
+        rew_fn,
+    ):
+        self.config = config
         self.args = args
         self.run_name = run_name
         self.checkpoint_path = os.path.join("checkpoints", self.run_name)
@@ -50,7 +61,6 @@ class SACActor:
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() and self.config.cuda else "cpu"
         )
-        self.update_policy_after = self.config.update_policy_after
         self.learning_starts = self.config.learning_starts
         self.env = env
         self.reward_fn = rew_fn
@@ -107,6 +117,7 @@ class SACActor:
         try:
             # reset the episode variables
             obs, reset_info = self.env.reset(seed=self.config.seed)
+            perfect_action = obs["observation.perfect_action"]
             obs = obs["observation.formatted"]
             actual_grasp_pos = reset_info["reset.grasped.position"]
 
@@ -144,6 +155,7 @@ class SACActor:
                 obs, reward, termination, truncation, info = self.env.step(
                     action.cpu().numpy()
                 )
+                perfect_action = obs["observation.perfect_action"]
                 obs = obs["observation.formatted"]
                 all_observations.append(obs)
                 all_infos.append(info)
@@ -167,6 +179,7 @@ class SACActor:
                     ):
                         self.global_step -= episode_length
                         obs, reset_info = self.env.reset()
+                        perfect_action = obs["observation.perfect_action"]
                         obs = obs["observation.formatted"]
                         all_actions = []
                         all_rewards = []
@@ -193,9 +206,39 @@ class SACActor:
                         )
                     )
 
-                    if "custom_events" in all_infos[-1] and "E_SUCCESS" in map(
+                    episode_successful = "custom_events" in all_infos[
+                        -1
+                    ] and "E_SUCCESS" in map(
                         lambda x: x[1], all_infos[-1]["custom_events"]
-                    ):
+                    )
+
+                    if self.args.eval:
+                        # save "reset.grasped.delta", "reset.goal_position.offset", "observation.perfect_action"
+                        # in a thread-safe way
+                        fd = os.open(
+                            os.path.join(self.checkpoint_path, "eval_infos.jsonl"),
+                            os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+                            0o644,
+                        )
+                        line = json.dumps(
+                            {
+                                "reset.grasped.delta": all_infos[0][
+                                    "reset.grasped.delta"
+                                ].tolist(),
+                                "reset.goal_position.offset": all_infos[0][
+                                    "reset.goal_position.offset"
+                                ].tolist(),
+                                "observation.perfect_action": perfect_action.tolist(),
+                                "episode_successful": episode_successful,
+                                "length": episode_length,
+                                "datetime": time.strftime(
+                                    "%Y-%m-%d %H:%M:%S", time.localtime()
+                                ),
+                            }
+                        )
+                        os.write(fd, (line + "\n").encode())
+                        os.close(fd)
+                    if episode_successful:
                         last_episode_successes.append(1)
                         all_episode_successes.append(1)
                     else:
@@ -214,6 +257,9 @@ class SACActor:
                     self.episode_num += 1
                     if self.episode_num >= self.args.max_episodes > 0:
                         print("Reached maximum number of episodes. Stopping actor.")
+                        print(
+                            f"Mean success rate: {np.mean(all_episode_successes) * 100:.2f} %"
+                        )
                         break
                     episode_return = sum(all_rewards)
 
@@ -299,6 +345,7 @@ class SACActor:
                     episode_length = 0
 
                     obs, reset_info = self.env.reset()
+                    perfect_action = obs["observation.perfect_action"]
                     obs = obs["observation.formatted"]
                     actual_grasp_pos = reset_info["reset.grasped.position"]
 
@@ -339,6 +386,9 @@ class SACActor:
             self.save_tb_additional_info()
             self.writer.close()
         # Clean up the environment
+        self.env.reset(
+            options={"last_reset": True}
+        )  # reset to a known state before closing
         self.env.close()
         if rclpy.ok():  # pyright: ignore[reportPrivateImportUsage]
             rclpy.shutdown()

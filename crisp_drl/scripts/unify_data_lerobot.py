@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 from crisp_drl.data.buffers_cleanrl import ReplayBufferGpu
 
 
@@ -72,7 +72,7 @@ def main() -> None:
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path("rollout_data"),
+        default=Path("rollout_data/collect_data_real"),
         help="Root directory where the dataset is stored.",
     )
     parser.add_argument(

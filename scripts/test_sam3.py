@@ -20,7 +20,7 @@ def main():
     t2 = time.time()
     print(f"Model loaded in {t2 - t1:.2f} seconds.")
 
-    masks_dict = detector.segment(image)
+    masks_dict = detector.segment_lego(image)
     t3 = time.time()
     print(f"Inference completed in {t3 - t2:.2f} seconds.")
 

@@ -6,7 +6,7 @@ import imageio
 import numpy as np
 import pickle
 
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 from crisp_drl.envs import make_env, make_rew
 import sys
 # import debugpy

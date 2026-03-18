@@ -4,14 +4,18 @@ import argparse
 import os
 import torch
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from crisp_gym.manipulator_env_config import FrankaEnvConfig
+from crisp_gym.envs.manipulator_env_config import FrankaEnvConfig
 from crisp_py.camera.camera_config import CameraConfig
 from crisp_py.gripper.gripper import GripperConfig
-from crisp_gym.manipulator_env import ManipulatorCartesianEnv, make_env, make_env_config
+from crisp_gym.envs.manipulator_env import (
+    ManipulatorCartesianEnv,
+    make_env,
+    make_env_config,
+)
 
 from crisp_drl.data.buffers_cleanrl import ReplayBuffer
 from crisp_drl.data.utils import load_buffer_from_lerobot_dataset
-from crisp_drl.agents.rlpd.config import RLPD_Config
+from crisp_drl.agents.shared.algorithm_config import Config
 
 
 def main():

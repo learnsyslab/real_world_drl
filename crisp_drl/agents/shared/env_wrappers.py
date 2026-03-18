@@ -2,7 +2,7 @@ import copy
 import multiprocessing
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, SupportsFloat
 import cv2
 from gymnasium import RewardWrapper, ActionWrapper, ObservationWrapper, Wrapper
 
@@ -23,7 +23,7 @@ except ImportError:
     print("pynput not installed, keyboard interrupt will not be available.")
 from gymnasium import spaces
 import imageio
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 
 
 # Make cuDNN deterministic for consistent inference
@@ -598,7 +598,10 @@ class DinoImageEncoderWrapper(ObservationWrapper):
                 return (x - self.mean) / self.std
 
         dino_backbone = torch.hub.load(
-            "facebookresearch/dinov2", dino_model_name, trust_repo=True
+            "/home/linusschwarz/.cache/torch/hub/facebookresearch_dinov2_main",
+            dino_model_name,
+            trust_repo=True,
+            source="local",
         ).to(self.device)
         dino_backbone.eval()
 
@@ -721,10 +724,8 @@ class LastObservationWrapper(Wrapper):
         # self.last_gripper_error = observation["observation.error.gripper"]
         return observation, info
 
-    def step(self, action, block=False):
-        observation, reward, terminated, truncated, info = self.env.step(
-            action, block=block
-        )
+    def step(self, action):
+        observation, reward, terminated, truncated, info = self.env.step(action)
         current_cartesian_state = observation["observation.state.cartesian"][:3]
         # current_gripper_state = observation["observation.state.gripper"]
 
@@ -806,10 +807,8 @@ class NoRotationNoGripperActionWrapper(Wrapper):
     def action(self, action):
         return np.concatenate((action, np.zeros(4)))
 
-    def step(
-        self, action, block=False
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
-        return self.env.step(self.action(action), block=block)
+    def step(self, action) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        return self.env.step(self.action(action))
 
 
 class NoRotationNoGripperNoZActionWrapper(Wrapper):
@@ -820,10 +819,20 @@ class NoRotationNoGripperNoZActionWrapper(Wrapper):
     def action(self, action):
         return np.concatenate((action, np.zeros(5)))
 
-    def step(
-        self, action, block=False
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
-        return self.env.step(self.action(action), block=block)
+    def step(self, action) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        return self.env.step(self.action(action))  # pyright: ignore[reportReturnType]
+
+
+class NoGripperActionWrapper(Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.action_space = spaces.Box(-np.inf, np.inf, (6,))
+
+    def action(self, action):
+        return np.concatenate((action, [0]))
+
+    def step(self, action) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        return self.env.step(self.action(action))  # pyright: ignore[reportReturnType]
 
 
 class NoRotationNoGripperNoZActionClippedWrapperSim(Wrapper):
@@ -837,7 +846,21 @@ class NoRotationNoGripperNoZActionClippedWrapperSim(Wrapper):
         action[3] = 1.0  # No rotation quaternion w=1
         return action
 
-    def step(self, action) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+    def step(self, action) -> tuple[Any, SupportsFloat, bool, bool, dict[str, Any]]:
+        return self.env.step(self.action(action))
+
+
+class NoRotationNoGripperWrapperSim(Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.action_space = spaces.Box(-np.inf, np.inf, (3,))
+
+    def action(self, action):
+        action = np.concatenate((action, np.zeros(4)))
+        action[3] = 1.0  # No rotation quaternion w=1
+        return action
+
+    def step(self, action) -> tuple[Any, SupportsFloat, bool, bool, dict[str, Any]]:
         return self.env.step(self.action(action))
 
 
@@ -958,13 +981,9 @@ class ActionTimeStampWrapper(ActionWrapper):
     def __init__(self, env):
         super().__init__(env)
 
-    def step(
-        self, action, block=False
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+    def step(self, action) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         time_stamp = time.time()
-        observation, reward, terminated, truncated, info = self.env.step(
-            action, block=block
-        )
+        observation, reward, terminated, truncated, info = self.env.step(action)
         info["action_t"] = time_stamp
         return observation, reward, terminated, truncated, info
 
@@ -1617,7 +1636,7 @@ class ObservationNormalizerWrapper(ObservationWrapper):
         return (observation - self.means) / self.stds
 
 
-class InsertionWrapper(Wrapper):
+class PoseEstimationEvalWrapper(Wrapper):
     def __init__(
         self,
         env,
@@ -1629,11 +1648,10 @@ class InsertionWrapper(Wrapper):
         safety_box_step_size=0.0005,
         z_step_size=0.00025 * 0.1,
         max_z_error_deviation=0.001 * 0.1,
-        target_z_error=0.025 * 0.1,
+        target_z_error=0.025 * 0.08,
         step_limit=150,
         minimal_start_goal_distance=0.003,
         is_eval=False,
-        use_pose_estimation=False,
     ):
         super().__init__(env)
         self.config = config
@@ -1643,6 +1661,7 @@ class InsertionWrapper(Wrapper):
         self.grasp_randomisation_x_range = grasp_randomisation_x_range
         self.grasp_randomisation_z_range = grasp_randomisation_z_range
         self.goal_position_randomisation_xy_range = goal_position_randomisation_xy_range
+        self.reset_grasp_delta = np.zeros(3)
         self.safety_box_radius = safety_box_radius
         self.safety_box_step_size = safety_box_step_size
         self.z_step_size = z_step_size
@@ -1655,13 +1674,8 @@ class InsertionWrapper(Wrapper):
         self.n_steps = 0
         self.minimal_start_goal_distance = minimal_start_goal_distance
         self.is_eval = is_eval
-        self.use_pose_estimation = use_pose_estimation
-        self.pose_estimation_helper = (
-            PoseEstimationHelper(
-                assumed_orientation=config.pose_estimation_assumed_orientation
-            )
-            if use_pose_estimation
-            else None
+        self.pose_estimation_helper = PoseEstimationHelper(
+            assumed_orientation=config.pose_estimation_assumed_orientation
         )
         self.pose_estimation_position_euler = np.array(
             config.demo_pose_estimation_euler
@@ -1780,185 +1794,104 @@ class InsertionWrapper(Wrapper):
         self.obs, *_ = self.env.step(np.array([0.0, 0.0, self.after_grasp_lift_height]))
 
         # compute goal position
-        if self.use_pose_estimation and self.pose_estimation_helper is not None:
-            # go to pose estimation position; estimate; compare to demo pose estimation; compute goal position
-            print("Moving to pose estimation position...")
+        # go to pose estimation position; estimate; compare to demo pose estimation; compute goal position
+        print("Moving to pose estimation position...")
 
-            for _ in range(10):
-                delta = (
-                    self.pose_estimation_position_euler[0:3]
-                    - self.obs["observation.state.cartesian"][0:3]
-                )
-                self.obs, *_ = self.env.step(delta / 10.0)
-
-            time.sleep(0.5)
-            print("Refining pose estimation position...")
-
-            self.obs, *_ = self.env.step(np.zeros(3))
-            for _ in range(10):
-                delta = (
-                    self.pose_estimation_position_euler[0:3]
-                    - self.obs["observation.state.cartesian"][0:3]
-                )
-                print(f"Compensating for {delta}")
-                self.obs, *_ = self.env.step(
-                    np.clip(
-                        delta / 2.0, -self.delta_z_i_clipping, self.delta_z_i_clipping
-                    )
-                )
-            time.sleep(0.5)
-            print("Finalizing pose estimation position...")
-
-            self.obs, *_ = self.env.step(np.zeros(3))
-            self.actual_estimation_position = np.copy(
-                self.obs["observation.state.cartesian"]
-            )
-            pose_estimation_joint_state = np.copy(self.obs["observation.state.joints"])
-            print("Estimating pose...")
-            lavender_pose, purple_pose = (
-                self.pose_estimation_helper.estimate_two_lego_bricks_absolute(
-                    self.obs["observation.images.wrist_camera"],
-                    self.obs["observation.images.wrist_depth_camera"],
-                    self.actual_estimation_position,
-                )
-            )
-
-            # raise NotImplementedError("Check this formula again carefully!")
-            # e = estiation, g = goal, d = demo, i = inference
-            if self.config.pose_estimation_include_demo:
-                self.goal_position = (
-                    self.actual_estimation_position[:3]
-                    + self.goal_position_ground_truth[:3]
-                    - self.pose_estimation_position_euler[:3]
-                    + purple_pose[:3, 3]
-                    - self.config.demo_pose_purple[:3, 3]
-                    - (lavender_pose[:3, 3] - self.config.demo_pose_lavender[:3, 3])
-                )
-
-            else:
-                self.goal_position = (
-                    self.actual_estimation_position[:3]
-                    + purple_pose[:3, 3]
-                    - lavender_pose[:3, 3]
-                )
-
-        else:
-            self.goal_position = np.copy(self.goal_position_ground_truth)
-            goal_position_randomisation_xy = np.zeros(2)
-            while np.linalg.norm(goal_position_randomisation_xy) < 0.001:
-                goal_position_randomisation_xy = np.random.uniform(
-                    self.goal_position_randomisation_xy_range[0],
-                    self.goal_position_randomisation_xy_range[1],
-                    size=2,
-                )
-
-            self.goal_position[:2] += goal_position_randomisation_xy
-            self.goal_position[0] += (
-                self.actual_grasp_position[0] - self.grasp_position_ground_truth[0]
-            )
-            self.goal_position[2] += (
-                self.actual_grasp_position[2] - self.grasp_position_ground_truth[2]
-            )
-
-        if not self.is_eval:
-            self.start_position = self.goal_position_ground_truth.copy()
-            while (
-                np.linalg.norm(
-                    self.start_position[:2] - self.goal_position_ground_truth[:2]
-                )
-                < self.minimal_start_goal_distance
-            ):
-                self.start_position[:2] = self.goal_position[:2] + np.random.uniform(
-                    -self.safety_box_radius, self.safety_box_radius, size=2
-                )
-        else:
-            self.start_position = self.goal_position.copy()
-
-        # move to start position quickly
-        print("Moving to start position...")
-        delta = self.start_position[0:2] - self.obs["observation.state.cartesian"][0:2]
         for _ in range(10):
+            delta = (
+                self.pose_estimation_position_euler[0:3]
+                - self.obs["observation.state.cartesian"][0:3]
+            )
+            self.obs, *_ = self.env.step(delta / 10.0)
+
+        time.sleep(0.5)
+        print("Refining pose estimation position...")
+
+        self.obs, *_ = self.env.step(np.zeros(3))
+        for _ in range(10):
+            delta = (
+                self.pose_estimation_position_euler[0:3]
+                - self.obs["observation.state.cartesian"][0:3]
+            )
+            print(f"Compensating for {delta}")
             self.obs, *_ = self.env.step(
-                np.array([delta[0] / 10.0, delta[1] / 10.0, 0.0])
+                np.clip(delta / 2.0, -self.delta_z_i_clipping, self.delta_z_i_clipping)
             )
+        time.sleep(0.5)
+        print("Finalizing pose estimation position...")
 
-        # lower down slowly until z-force is established in steps of 3mm
-        print("Establishing contact...")
-        while (
-            abs(
-                self.obs["observation.state.cartesian"][2]
-                - self.obs["observation.state.target"][2]
+        self.obs, *_ = self.env.step(np.zeros(3))
+        self.actual_estimation_position = np.copy(
+            self.obs["observation.state.cartesian"]
+        )
+        pose_estimation_joint_state = np.copy(self.obs["observation.state.joints"])
+        print("Estimating pose...")
+        lavender_pose, purple_pose = (
+            self.pose_estimation_helper.estimate_two_lego_bricks_absolute(
+                self.obs["observation.images.wrist_camera"],
+                self.obs["observation.images.wrist_depth_camera"],
+                self.actual_estimation_position,
             )
-            < self.delta_z_contact_error
-        ):
-            delta_xy = (
-                self.start_position[0:2] - self.obs["observation.state.cartesian"][0:2]
-            )
-            delta_z = (
-                -self.delta_z_contact_step_size
-                if self.obs["observation.velocity.cartesian"][2]
-                > -self.delta_z_contact_careful_threshold_velocity
-                or abs(
-                    self.start_position[2] - self.obs["observation.state.cartesian"][2]
-                )
-                > self.delta_z_contact_careful_threshold_distance
-                else 0.0
-            )
-            self.obs, *_ = self.env.step(np.array([delta_xy[0], delta_xy[1], delta_z]))
+        )
 
-        # relieve some force by reducing controller z-error
-        if (
-            abs(
-                self.obs["observation.state.cartesian"][2]
-                - self.obs["observation.state.target"][2]
-            )
-            > self.target_z_error
-        ):
-            delta_z = (
-                abs(
-                    self.obs["observation.state.cartesian"][2]
-                    - self.obs["observation.state.target"][2]
-                )
-                - self.target_z_error
-            )
-            self.obs, *_ = self.env.step(np.array([0.0, 0.0, delta_z]))
-        self.n_steps = 0
+        # raise NotImplementedError("Check this formula again carefully!")
+        # e = estiation, g = goal, d = demo, i = inference
+
+        predicted_goal_position = (
+            self.actual_estimation_position[:3]
+            + purple_pose[:3, 3]
+            - lavender_pose[:3, 3]
+        )
+
         self.obs, reset_info = self.env.reset()
-        reset_info["reset.grasped.position"] = self.actual_grasp_position
-        if self.use_pose_estimation:
-            reset_info["reset.pose_estimation.lavender"] = lavender_pose  # pyright: ignore[reportPossiblyUnboundVariable]
-            reset_info["reset.pose_estimation.purple"] = purple_pose  # pyright: ignore[reportPossiblyUnboundVariable]
-            reset_info["reset.pose_estimation.joint_state"] = (
-                pose_estimation_joint_state  # pyright: ignore[reportPossiblyUnboundVariable]
-            )
-            reset_info["reset.pose_estimation.cartesian"] = (
-                self.actual_estimation_position
-            )  # pyright: ignore[reportPossiblyUnboundVariable]
+
         print("Reset complete.")
+        self.reset_grasp_delta = (
+            self.actual_grasp_position - self.grasp_position_ground_truth
+        )
+        adjusted_ground_truth_goal_position = (
+            self.goal_position_ground_truth + self.reset_grasp_delta
+        )
+        goal_position_error = (
+            predicted_goal_position - adjusted_ground_truth_goal_position
+        )
+        # Populate reset info
+        reset_info["pose_estimation.lavender"] = lavender_pose
+        reset_info["pose_estimation.purple"] = purple_pose
+        reset_info["pose_estimation.joint_state"] = pose_estimation_joint_state
+        reset_info["pose_estimation.cartesian"] = self.actual_estimation_position
+        reset_info["pose_estimation.predicted_goal_position"] = predicted_goal_position
+        reset_info["pose_estimation.ground_truth_goal_position"] = (
+            adjusted_ground_truth_goal_position
+        )
+        reset_info["pose_estimation.goal_position_error"] = goal_position_error
+        reset_info["pose_estimation.grasp_delta"] = self.reset_grasp_delta
+        reset_info["pose_estimation.actual_grasp_position"] = self.actual_grasp_position
+
+        print(f"[PoseEstimationEvalWrapper] Goal position error: {goal_position_error}")
+        print(
+            f"[PoseEstimationEvalWrapper] Error norm: {np.linalg.norm(goal_position_error[:2]):.6f} (xy), {abs(goal_position_error[2]):.6f} (z)"
+        )
+
         return self.obs, reset_info
 
     def step(self, action) -> tuple[Any, Any, bool, bool, dict[str, Any]]:
-        action = np.array([action[0], action[1], 0.0])
+        """Step is not needed for pose estimation evaluation, just pass through."""
+        return self.env.step(action)
 
-        z_error = self.obs["observation.error.cartesian"][2]
-        if z_error > -self.target_z_error + self.max_z_error_deviation:
-            action[2] -= self.z_step_size
-        elif z_error < -self.target_z_error - self.max_z_error_deviation:
-            action[2] += self.z_step_size
 
-        current_pos_xy = self.obs["observation.state.cartesian"][:2]
-        delta_xy = self.goal_position[:2] - current_pos_xy
-        norm_xy = np.linalg.norm(delta_xy)
-        if norm_xy > self.safety_box_radius:
-            action[:2] = delta_xy * self.safety_box_step_size / norm_xy
-
-        self.obs, reward, terminated, truncated, info = self.env.step(action)
-
-        self.n_steps += 1
-        if self.n_steps >= self.step_limit:
-            truncated = True
-
-        return self.obs, reward, terminated, truncated, info
+def random_point_in_ellipse(x_range, y_range):
+    rho = np.random.random()
+    phi = np.random.random() * 2 * np.pi
+    x = np.sqrt(rho) * np.cos(phi)
+    y = np.sqrt(rho) * np.sin(phi)
+    width = x_range[1] - x_range[0]
+    x_center = (x_range[1] + x_range[0]) / 2.0
+    height = y_range[1] - y_range[0]
+    y_center = (y_range[1] + y_range[0]) / 2.0
+    x = x * width / 2.0 + x_center
+    y = y * height / 2.0 + y_center
+    return np.array([x, y])
 
 
 class InsertionWrapperSim(Wrapper):
@@ -1968,6 +1901,7 @@ class InsertionWrapperSim(Wrapper):
         config: Config,
         grasp_randomisation_x_range=(-0.002, 0.002),
         grasp_randomisation_z_range=(0.0005, 0.002),
+        grasp_randomisation_mode="box",
         goal_position_randomisation_xy_range=(-0.0028, 0.0028),
         safety_box_radius=0.003,
         safety_box_step_size=0.0005,
@@ -1985,6 +1919,7 @@ class InsertionWrapperSim(Wrapper):
         self.goal_position_ground_truth = np.array([0.6, 0.0, 0.0])
         self.grasp_randomisation_x_range = grasp_randomisation_x_range
         self.grasp_randomisation_z_range = grasp_randomisation_z_range
+        self.grasp_randomisation_mode = grasp_randomisation_mode
         self.goal_position_randomisation_xy_range = goal_position_randomisation_xy_range
         self.safety_box_radius = safety_box_radius
         self.safety_box_step_size = safety_box_step_size
@@ -2001,12 +1936,18 @@ class InsertionWrapperSim(Wrapper):
     def reset(
         self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None
     ) -> tuple[Any, dict[str, Any]]:
-        grasp_randomisation_x = np.random.uniform(
-            self.grasp_randomisation_x_range[0], self.grasp_randomisation_x_range[1]
-        )
-        grasp_randomisation_z = np.random.uniform(
-            self.grasp_randomisation_z_range[0], self.grasp_randomisation_z_range[1]
-        )
+        if self.grasp_randomisation_mode == "box":
+            grasp_randomisation_x = np.random.uniform(
+                self.grasp_randomisation_x_range[0], self.grasp_randomisation_x_range[1]
+            )
+            grasp_randomisation_z = np.random.uniform(
+                self.grasp_randomisation_z_range[0], self.grasp_randomisation_z_range[1]
+            )
+        elif self.grasp_randomisation_mode == "ellipse":
+            grasp_randomisation_x, grasp_randomisation_z = random_point_in_ellipse(
+                self.grasp_randomisation_x_range,
+                self.grasp_randomisation_z_range,
+            )
 
         self.grasp_position = np.array(
             [grasp_randomisation_x, 0.0, grasp_randomisation_z]
@@ -2047,6 +1988,13 @@ class InsertionWrapperSim(Wrapper):
             },
         )
 
+        reset_info["reset.grasped.delta"] = self.grasp_position
+        goal_position_offset = self.goal_position - (
+            self.goal_position_ground_truth + self.grasp_position
+        )
+        reset_info["reset.goal_position.offset"] = goal_position_offset
+        self.obs = self.add_perfect_action_to_obs(self.obs)
+        self.n_steps = 0
         return self.obs, reset_info
 
     def step(self, action) -> tuple[Any, Any, bool, bool, dict[str, Any]]:
@@ -2065,9 +2013,150 @@ class InsertionWrapperSim(Wrapper):
             action[:2] = delta_xy * self.safety_box_step_size / norm_xy
 
         self.obs, reward, terminated, truncated, info = self.env.step(action)
+        self.obs = self.add_perfect_action_to_obs(self.obs)
 
         self.n_steps += 1
         if self.n_steps >= self.step_limit:
             truncated = True
 
         return self.obs, reward, terminated, truncated, info
+
+    def add_perfect_action_to_obs(self, obs):
+        obs["observation.perfect_action"] = obs["observation.state.cartesian"][:3] - (
+            self.goal_position_ground_truth + self.grasp_position
+        )
+        return obs
+
+
+class InsertionWrapperSim3D(Wrapper):
+    def __init__(
+        self,
+        env,
+        config: Config,
+        grasp_randomisation_x_range=(-0.002, 0.002),
+        grasp_randomisation_z_range=(0.0005, 0.002),
+        grasp_randomisation_mode="box",
+        goal_position_randomisation_xyz_range=(-0.0028, 0.0028),
+        safety_box_radius=0.003,
+        safety_box_step_size=0.0005,
+        step_limit=150,
+        minimal_start_goal_distance=0.003,
+        is_eval=False,
+    ):
+        super().__init__(env)
+        self.config = config
+        self.home_config = config.custom_home_position
+        self.grasp_position_ground_truth = config.grasp_position_ground_truth
+        self.goal_position_ground_truth = np.array([0.6, 0.0, 0.0])
+        self.grasp_randomisation_x_range = grasp_randomisation_x_range
+        self.grasp_randomisation_z_range = grasp_randomisation_z_range
+        self.grasp_randomisation_mode = grasp_randomisation_mode
+        self.goal_position_randomisation_xyz_range = (
+            goal_position_randomisation_xyz_range
+        )
+        self.safety_box_radius = safety_box_radius
+        self.safety_box_step_size = safety_box_step_size
+        self.step_limit = step_limit
+        self.action_space = spaces.Box(-np.inf, np.inf, (3,))
+        self.n_steps = 0
+        self.minimal_start_goal_distance = minimal_start_goal_distance
+        self.is_eval = is_eval
+        print("[InsertionWrapperSim] [__init__] Eval mode:", is_eval)
+
+    def reset(
+        self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None
+    ) -> tuple[Any, dict[str, Any]]:
+        if self.grasp_randomisation_mode == "box":
+            grasp_randomisation_x = np.random.uniform(
+                self.grasp_randomisation_x_range[0], self.grasp_randomisation_x_range[1]
+            )
+            grasp_randomisation_z = np.random.uniform(
+                self.grasp_randomisation_z_range[0], self.grasp_randomisation_z_range[1]
+            )
+        elif self.grasp_randomisation_mode == "ellipse":
+            grasp_randomisation_x, grasp_randomisation_z = random_point_in_ellipse(
+                self.grasp_randomisation_x_range,
+                self.grasp_randomisation_z_range,
+            )
+
+        self.grasp_position = np.array(
+            [grasp_randomisation_x, 0.0, grasp_randomisation_z]
+        )
+
+        self.goal_position = np.copy(self.goal_position_ground_truth)
+        goal_position_randomisation_xyz = np.zeros(2)
+        while np.linalg.norm(goal_position_randomisation_xyz) < 0.001:
+            goal_position_randomisation_xyz = np.random.uniform(
+                self.goal_position_randomisation_xyz_range[0],
+                self.goal_position_randomisation_xyz_range[1],
+                size=3,
+            )
+
+        self.goal_position += goal_position_randomisation_xyz
+        self.goal_position[0] += self.grasp_position[0]  # ground truth is at 0
+        self.goal_position[2] += self.grasp_position[2]  # ground truth is at 0
+
+        if not self.is_eval:
+            self.start_position = self.goal_position_ground_truth.copy()
+            while (
+                np.linalg.norm(
+                    self.start_position[:3] - self.goal_position_ground_truth[:3]
+                )
+                < self.minimal_start_goal_distance
+            ):
+                self.start_position[:3] = self.goal_position[:3] + np.random.uniform(
+                    -self.safety_box_radius, self.safety_box_radius, size=3
+                )
+        else:
+            self.start_position = self.goal_position.copy()
+
+        self.obs, reset_info = self.env.reset(
+            seed=seed,
+            options={
+                "start_position": self.start_position,
+                "grasp_position": self.grasp_position,
+            },
+        )
+
+        reset_info["reset.grasped.delta"] = self.grasp_position
+        goal_position_offset = self.goal_position - (
+            self.goal_position_ground_truth + self.grasp_position
+        )
+        reset_info["reset.goal_position.offset"] = goal_position_offset
+        self.obs = self.add_perfect_action_to_obs(self.obs)
+        self.n_steps = 0
+        return self.obs, reset_info
+
+    def step(self, action) -> tuple[Any, Any, bool, bool, dict[str, Any]]:
+        action = np.array([action[0], action[1], action[2], 1.0, 0.0, 0.0, 0.0])
+
+        # current_pos_xyz = self.obs["observation.state.cartesian"][:3]
+        # delta_xyz = self.goal_position[:3] - current_pos_xyz
+        # norm_xyz = np.linalg.norm(delta_xyz)
+        # if norm_xyz > self.safety_box_radius:
+        #     action[:3] = delta_xyz * self.safety_box_step_size / norm_xyz
+
+        # apply safety box
+        current_pos_xyz = self.obs["observation.state.cartesian"][:3]
+        delta_xyz = current_pos_xyz - self.goal_position[:3]
+        delta_xyz_clipped = np.clip(
+            delta_xyz, -self.safety_box_radius, self.safety_box_radius
+        )
+        if np.any(delta_xyz_clipped != delta_xyz):
+            correcting_action = delta_xyz_clipped - delta_xyz
+            action[:3] = correcting_action
+
+        self.obs, reward, terminated, truncated, info = self.env.step(action)
+        self.obs = self.add_perfect_action_to_obs(self.obs)
+
+        self.n_steps += 1
+        if self.n_steps >= self.step_limit:
+            truncated = True
+
+        return self.obs, reward, terminated, truncated, info
+
+    def add_perfect_action_to_obs(self, obs):
+        obs["observation.perfect_action"] = (
+            self.goal_position_ground_truth + self.grasp_position
+        ) - obs["observation.state.cartesian"][:3]
+        return obs

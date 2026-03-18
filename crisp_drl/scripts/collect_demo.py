@@ -1,3 +1,5 @@
+import os
+import sys
 import cv2
 import tifffile
 from crisp_gym.envs.manipulator_env import ManipulatorCartesianEnv, make_env
@@ -14,31 +16,58 @@ env.home()
 env.reset()
 print("Env reset.")
 
+i_demo_img = 0
+
+exp_name = "siemens"
+rot_deg = 1
+
+save_to_file = len(sys.argv) > 1 and sys.argv[1] == "--save"
+
+
+def print_and_write(line):
+    line = str(line)
+    if save_to_file:
+        fd = os.open(
+            os.path.join("rollout_data/demos", f"{exp_name}.jsonl"),
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+            0o644,
+        )
+        os.write(fd, (line + "\n").encode())
+        os.close(fd)
+    print(line)
+
 
 def on_press(key):
+    global i_demo_img
     """Handle keyboard events in background."""
     if hasattr(key, "char"):
         if key.char == "o":
             env.step(np.array([0, 0, 0, 0, 0, 0, 0.2]))
-            print("Executed: gripper open")
+            print_and_write("Executed: gripper open")
+        if key.char == "y":
+            env.step(np.array([0, 0, 0, 0, np.deg2rad(rot_deg), 0, 0.0]))
+            print_and_write(f"Executed: rotate +y {rot_deg}°")
+        if key.char == "x":
+            env.step(np.array([0, 0, 0, 0, np.deg2rad(-rot_deg), 0, 0.0]))
+            print_and_write(f"Executed: rotate -y {rot_deg}°")
         elif key.char == "c":
             env.step(np.array([0, 0, 0, 0, 0, 0, -0.2]))
-            print("Executed: gripper close")
+            print_and_write("Executed: gripper close")
         elif key.char == "r":
             obs, *_ = env.step(np.zeros(7))
-            print(obs["observation.state.cartesian"])
+            print_and_write(obs["observation.state.cartesian"])
         elif key.char == "f":
             obs, *_ = env.step(np.zeros(7))
-            print([(k, obs[k]) for k in obs if "image" not in k])
-            print([k for k in obs if "image" in k])
+            print_and_write([(k, obs[k]) for k in obs if "image" not in k])
+            print_and_write([k for k in obs if "image" in k])
         elif key.char == "i":
             obs, *_ = env.step(np.zeros(7))
             tifffile.imwrite(
-                "test_images/demo_img_color.tiff",
+                f"test_images/demo_img_color_{i_demo_img}_{exp_name}.tiff",
                 obs["observation.images.wrist_camera"],
             )
             tifffile.imwrite(
-                "test_images/demo_img_depth.tiff",
+                f"test_images/demo_img_depth_{i_demo_img}_{exp_name}.tiff",
                 obs["observation.images.wrist_depth_camera"],
             )
             # cv2.imwrite(
@@ -50,7 +79,7 @@ def on_press(key):
             #     ),
             # )
             tifffile.imwrite(
-                "test_images/demo_img_color_resized_cropped.tiff",
+                f"test_images/demo_img_color_resized_cropped_{i_demo_img}_{exp_name}.tiff",
                 cv2.resize(
                     obs["observation.images.wrist_camera"][
                         175 : 175 + 224, 346 : 346 + 224
@@ -73,11 +102,13 @@ def on_press(key):
             #     ],
             # )
             tifffile.imwrite(
-                "test_images/demo_img_color_cropped.tiff",
+                f"test_images/demo_img_color_cropped_{i_demo_img}_{exp_name}.tiff",
                 obs["observation.images.wrist_camera"][
                     175 : 175 + 224, 346 : 346 + 224
                 ],
             )
+
+            i_demo_img += 1
 
 
 # 346, 175
@@ -99,3 +130,15 @@ env.close()
 # home: -0.0263873 ,  0.34892041, -0.02547229, -2.3921653 ,  0.01901308, 2.74496494,  0.71526465
 # grasp: 5.1047003e-01 -2.9486790e-02  4.1392598e-02
 # place: 5.4190356e-01 -2.9769510e-02  5.1701453e-02
+
+
+# Keyboard listener active. Press 'o' to open gripper, 'c' to close, 'r' to print_and_write state.
+# if[('task', ''), ('observation.state.cartesian', array([ 0.51002705, -0.03166126,  0.07771762,  3.1398149 , -0.00529997,
+#         0.00330537], dtype=float32)), ('observation.state.gripper', array([0.48168105], dtype=float32)), ('observation.target.gripper', array([0.5], dtype=float32)), ('observation.state.joints', array([-0.02646138,  0.35014075, -0.03229037, -2.3585236 ,  0.0231909 ,
+#         2.713794  ,  0.70426035], dtype=float32)), ('dt_camera', 1.4479737728834152e-06), ('observation.state.target', array([ 3.08386065e-01, -1.66665085e-04,  4.87584074e-01, -3.13918706e+00,
+#        -4.33491024e-03,  2.47853464e-03]))]
+# ['observation.images.wrist_camera', 'observation.images.wrist_depth_camera']
+# Executed: gripper close
+# cr[ 0.5100313  -0.03166383  0.07772372  3.1398158  -0.00531182  0.00329709]
+# ir[ 0.52480197 -0.03154222  0.0966146  -3.1412485  -0.00335749  0.00383465]
+# [ 0.5421958  -0.03224613  0.08956918 -3.14106    -0.00318236  0.00329792]

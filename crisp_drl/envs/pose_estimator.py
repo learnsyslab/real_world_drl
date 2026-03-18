@@ -78,7 +78,7 @@ class PoseEstimator(Node):
         except Exception as e:
             self.get_logger().error(f"Error processing pose: {e}")
 
-    def _set_mesh_file(self, color: str):
+    def _set_mesh_file_lego(self, color: str):
         """Set the mesh file path parameter based on color using parameter client."""
         mesh_path_map = {
             "lavender": "/workspaces/isaac_ros-dev/lego_assets/lego_2x2_lavender_up.obj",
@@ -89,7 +89,13 @@ class PoseEstimator(Node):
             raise ValueError(f"Unknown color: {color}. Must be 'lavender' or 'purple'")
 
         mesh_path = mesh_path_map[color]
+        self._set_mesh_path(mesh_path)
 
+    def _set_mesh_file_siemens(self):
+        mesh_path = "/workspaces/isaac_ros-dev/lego_assets/SiemensLid_centered.obj"
+        self._set_mesh_path(mesh_path)
+
+    def _set_mesh_path(self, mesh_path):
         # Create parameter client for the foundationpose node
         param_client = AsyncParameterClient(self, "/foundationpose")
 
@@ -131,7 +137,7 @@ class PoseEstimator(Node):
             self.get_logger().error(f"Failed to set mesh file: {e}")
             raise
 
-    def estimate(
+    def estimate_lego(
         self, image: np.ndarray, depth: np.ndarray, mask: np.ndarray, color: str
     ) -> np.ndarray:
         """
@@ -147,8 +153,28 @@ class PoseEstimator(Node):
             4x4 pose matrix as numpy array
         """
         # Set the mesh file based on color
-        self._set_mesh_file(color)
+        self._set_mesh_file_lego(color)
+        return self._estimate(image, depth, mask)
 
+    def estimate_siemens(
+        self, image: np.ndarray, depth: np.ndarray, mask: np.ndarray
+    ) -> np.ndarray:
+        """
+        Estimate 6DoF pose for an object.
+
+        Args:
+            image: RGB image as numpy array (HxWx3, uint8)
+            depth: Depth image as numpy array (HxW, float32 in meters)
+            mask: Segmentation mask (HxW, binary or from SAM3)
+            color: Object color ("lavender" or "purple") to select correct mesh
+
+        Returns:
+            4x4 pose matrix as numpy array
+        """
+        self._set_mesh_file_siemens()
+        return self._estimate(image, depth, mask)
+
+    def _estimate(self, image: np.ndarray, depth: np.ndarray, mask: np.ndarray):
         # Convert to ROS messages
         time_now_msg = self.get_clock().now().to_msg()
 

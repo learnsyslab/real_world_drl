@@ -4,25 +4,27 @@ import time
 import numpy as np
 
 from crisp_drl.agents.shared.algorithm_config import Config
+from crisp_drl.agents.shared.insertion_env_config import SiemensConfig
 from crisp_drl.envs import make_env, make_rew
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 # Alternate between going to the goal position and moving randomly with probability p
-p = 0.75
-N_ROLLOUTS = 30
+p = 0.82
+N_ROLLOUTS = 7
 max_random_action_magnitude = 0.25e-3
 perfect_action_magnitude = 0.25e-3
 
-base_exp_name = "run_4"
+base_exp_name = "run_s_1b"
 exp_name = f"{base_exp_name}_{p}"
 
 repo_id = f"collect_data_real/{exp_name}"
 data_dir = Path("rollout_data") / repo_id
 
 config = Config()
+env_config = SiemensConfig()
 
-env = make_env.create_real_env_v4(config)
+env = make_env.create_real_env_s1(config, env_config)
 
 reward_fn = make_rew.create_real_reward_fn(
     config,
@@ -79,12 +81,12 @@ def create_or_load_lerobot_dataset():
         "action": {
             "shape": (2,),
             "dtype": "float32",
-            "names": ["dx", "dy"],
+            "names": ["dy", "dz"],
         },
         "perfect_action": {
             "shape": (2,),
             "dtype": "float32",
-            "names": ["dx", "dy"],
+            "names": ["dy", "dz"],
         },
         "grasp_delta": {
             "shape": (3,),
@@ -92,9 +94,9 @@ def create_or_load_lerobot_dataset():
             "names": ["grasp_dx", "grasp_dy", "grasp_dz"],
         },
         "goal_position_delta": {
-            "shape": (2,),
+            "shape": (3,),
             "dtype": "float32",
-            "names": ["goal_dx", "goal_dy"],
+            "names": ["goal_dx", "goal_dy", "goal_dz"],
         },
         "reward": {
             "shape": (1,),
@@ -129,7 +131,10 @@ def create_or_load_lerobot_dataset():
             "dtype": "float32",
         },
         "observation.formatted": {
-            "shape": (config.vision_head_input_dim + config.actor_nonvision_input_dim,),
+            "shape": (
+                config.vision_head_input_dim * env_config.n_cameras
+                + config.actor_nonvision_input_dim,
+            ),
             "dtype": "float32",
         },
         # "observation.images.wrist_camera": {
@@ -177,9 +182,8 @@ try:
 
         # compute goal position
         grasp_delta = reset_info["reset.grasped.delta"]
-        goal_pos = config.goal_position_ground_truth[:2].copy()
-        goal_pos[0] += grasp_delta[0]
-        goal_position_delta = reset_info["reset.goal_position.offset"][:2]
+
+        goal_position_delta = reset_info["reset.goal_position.offset"]
 
         all_actions = []
         all_rewards = []
@@ -191,15 +195,17 @@ try:
         is_first = True
         episode_start_time = time.time()
         frame_index = 0
+        shifted_goal_pos = env_config.goal_position_ground_truth + grasp_delta
 
         while True:
-            perfect_action = goal_pos - obs["observation.state.cartesian"][:2]
-            perfect_action = (
-                perfect_action
-                / np.linalg.norm(perfect_action)
-                * perfect_action_magnitude
+            current_pos = obs["observation.state.cartesian"][:3]
+            perfect_action_yz = shifted_goal_pos[1:3] - current_pos[1:3]
+            perfect_action_yz_norm = np.linalg.norm(perfect_action_yz)
+            perfect_action_yz = (
+                min(1.0, perfect_action_magnitude / perfect_action_yz_norm)
+                * perfect_action_yz
             )
-            all_perfect_actions.append(perfect_action)
+            all_perfect_actions.append(perfect_action_yz)
 
             if np.random.rand() < p:
                 action = np.random.uniform(
@@ -208,7 +214,7 @@ try:
                     size=(2,),
                 )
             else:
-                action = perfect_action
+                action = perfect_action_yz
             all_actions.append(action.copy())
 
             obs, reward, terminated, truncated, info = env.step(action)
@@ -219,11 +225,14 @@ try:
             if terminated or truncated:
                 break
 
-        perfect_action = goal_pos - obs["observation.state.cartesian"][:2]
-        perfect_action = (
-            perfect_action / np.linalg.norm(perfect_action) * perfect_action_magnitude
+        current_pos = obs["observation.state.cartesian"][:3]
+        perfect_action_yz = shifted_goal_pos[1:3] - current_pos[1:3]
+        perfect_action_yz_norm = np.linalg.norm(perfect_action_yz)
+        perfect_action_yz = (
+            min(1.0, perfect_action_magnitude / perfect_action_yz_norm)
+            * perfect_action_yz
         )
-        all_perfect_actions.append(perfect_action)
+        all_perfect_actions.append(perfect_action_yz)
 
         # compute rewards
         all_actions, all_observations, all_rewards, all_infos = reward_fn(
@@ -284,7 +293,7 @@ try:
                     ].astype(np.float32),
                     "observation.previous.action": all_observations[frame_idx][
                         "observation.previous.action"
-                    ].astype(np.float32),
+                    ][:3].astype(np.float32),
                     "observation.previous.error.cartesian": all_observations[frame_idx][
                         "observation.previous.error.cartesian"
                     ].astype(np.float32),

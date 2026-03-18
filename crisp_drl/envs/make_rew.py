@@ -1,4 +1,4 @@
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 from crisp_drl.agents.shared.rewards import (
     prune_after_async_termination,
     sparse_event_reward,

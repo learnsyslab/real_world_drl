@@ -3,7 +3,7 @@ import numpy as np
 import cv2
 from PIL import Image
 import tifffile
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 from crisp_drl.envs.pose_estimator import PoseEstimator
 from crisp_drl.envs.pose_tracker import PoseTracker
 import pyvista as pv
@@ -220,7 +220,7 @@ def main():
             print(f"\nEstimating pose for {color} brick...")
             t_est_start = time.time()
 
-            pose_matrix = estimator.estimate(image_np, depth_f32, mask, color)
+            pose_matrix = estimator.estimate_lego(image_np, depth_f32, mask, color)
             t_est_end = time.time()
 
             print(
@@ -232,7 +232,7 @@ def main():
 
             pose_matrix[:3, :3] = sac_config.pose_estimation_assumed_orientation
 
-            final_pose = tracker.track(
+            final_pose = tracker.track_lego(
                 image_np,
                 depth_f32,
                 initial_pose=pose_matrix,

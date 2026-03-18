@@ -9,6 +9,8 @@ import time
 import random
 import numpy as np
 
+from crisp_drl.agents.shared.insertion_env_config import SiemensConfig
+from crisp_drl.agents.shared.insertion_wrapper_s import InsertionWrapperSiemens
 from crisp_gym.envs.manipulator_env_config import NoCamFrankaEnvConfig, FrankaEnvConfig
 from crisp_py.camera.camera_config import CameraConfig
 from crisp_py.gripper.gripper import GripperConfig
@@ -21,7 +23,7 @@ from pathlib import Path
 from copy import deepcopy
 
 
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 from crisp_drl.agents.shared.networks_cleanrl import Actor
 from crisp_drl.agents.shared.env_wrappers import (
     BelowZTerminationWrapper,
@@ -31,21 +33,27 @@ from crisp_drl.agents.shared.env_wrappers import (
     ContainerWatcherWrapper,
     FarAwayTerminationWrapper,
     ImageEncoderWrapper,
-    InsertionWrapper,
     DinoImageEncoderWrapper,
     InsertionResetWrapper,
     InsertionWrapperSim,
+    InsertionWrapperSim3D,
     NaiveToGoalPositionWrapper,
     NaiveZForceWrapper,
     NoRotationActionWrapper,
     NoRotationNoGripperNoZActionClippedWrapperSim,
     NoRotationNoGripperNoZActionWrapper,
+    NoGripperActionWrapper,
+    NoRotationNoGripperWrapperSim,
     ObservationFormatterWrapper,
     SafetyBoxWrapperXY,
     StepLimitEnforcerWrapper,
     TimeMeasurementWrapper,
     observation_has_z_pressure,
     observation_has_z_pressure_or_below,
+)
+from crisp_drl.agents.shared.insertion_wrapper import (
+    InsertionWrapper,
+    SensorTareWrapper,
 )
 from crisp_drl.data.utils import crisp_batch_concat_obs_to_tensor, crisp_obs_to_tensor
 from crisp_drl.training.training_cli import clear_terminal
@@ -215,33 +223,52 @@ def create_real_env_v3_timo(config: Config) -> gym.Env:
     return env
 
 
-def create_simulated_env(config: dict, is_eval=False) -> gym.Env:
-    """Create a new environment instance."""
-    sac_config = Config()
-    config["n_cameras"] = sac_config.n_cameras
-    env = mujid_env.MujidEnv(
-        config=config,
-    )
+def create_real_env_v4(config: Config, args=None) -> gym.Env:
+    env = make_env("my_env_v4")
+    print("Env created.")
+    env.wait_until_ready()
+    print("Env ready.")
+
     env = ActionTimeStampWrapper(env)
+    env = NoRotationNoGripperActionWrapper(env)
     env = LastObservationWrapper(env)
-    env = InsertionWrapperSim(
+    # env = ContainerWatcherWrapper(env, ctx=multiprocessing.get_context("spawn"))
+    env = SensorTareWrapper(
         env,
-        config=sac_config,
-        grasp_randomisation_z_range=(0.0005, 0.0015),
-        step_limit=sac_config.episode_length
-        if not is_eval
-        else 2 * sac_config.episode_length,
-        is_eval=is_eval,
+        sensor_key="observation.state.sensors_bota_ft_sensor",
+        sensor_data_shape=(6,),
     )
-    env = CustomTerminationWrapper(env, termination_fn=custom_sim_termination)
+    is_eval = False if args is None else args.eval
+    env = InsertionWrapper(
+        env,
+        config=config,
+        grasp_randomisation_z_range=(0.0005, 0.0015) if is_eval else (0.00025, 0.00175),
+        grasp_randomisation_x_range=(-0.0015, 0.0015) if is_eval else (-0.002, 0.002),
+        safety_box_radius=0.004 if is_eval else 0.003,
+        step_limit=config.episode_length if not is_eval else 2 * config.episode_length,
+        is_eval=is_eval,
+        use_pose_estimation=True
+        if args is not None and args.use_pose_estimation
+        else False,
+    )
+
+    # obs["observation.state.cartesian"][2] < 0.049)
+    #  # functools.partial(observation_has_z_pressure_or_below, error_threshold=0.005, previous_error_threshold=0.003,
+    #  # min_z_height=0.055, terminate_z_height = 0.0475))
+    # maybe something with z velocity
+    env = CLIWrapper(env)
+
     env = DinoImageEncoderWrapper(
         env,
-        n_cameras=sac_config.n_cameras,
+        n_cameras=config.n_cameras,
+        image_keys=["observation.images.wrist_camera"],
         image_size=(256, 256),
-        crops={"observation.images.wrist_camera_1": (0, 256, 0, 256)},
-        image_keys=["observation.images.wrist_camera_1"],
+        crops={
+            "observation.images.wrist_camera": (175, 175 + 224, 346, 346 + 224)
+        },  #  (227, 483, 138, 394)},
+        rescales={"observation.images.wrist_camera": 1.5},
     )
-    # env = ImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))
+
     assert torch.cuda.is_available(), (
         "CUDA must be available to use ObservationFormatterWrapper"
     )
@@ -249,17 +276,250 @@ def create_simulated_env(config: dict, is_eval=False) -> gym.Env:
         env,
         "cuda",
         keys_ranges_scales=[
-            # ("observation.previous.action", (0, 2), 1000.0),
-            # ("observation.previous.error.cartesian", (0, 3), 1000.0),
-            # ("observation.velocity.cartesian", (0, 3), 1000.0),
+            ("observation.previous.action", (0, 2), 1000.0),
+            ("observation.previous.error.cartesian", (0, 2), 1000.0),
+            ("observation.velocity.cartesian", (0, 2), 1000.0),
             ("observation.error.cartesian", (0, 2), 1000.0),
-            ("observation.features.wrist_camera_1", (0, 512), 1.0),
-            # ("observation.images.wrist_camera_2", (0, 512), 1.0),
+            ("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1),
+            ("observation.features.wrist_camera", (0, 512), 1.0),
         ],
     )
-    env = NoRotationNoGripperNoZActionClippedWrapperSim(env, clip=0.0003)
+    return env
+
+
+def create_real_env_s1(
+    alg_config: Config, env_config: SiemensConfig, args=None
+) -> gym.Env:
+    env = make_env("my_env_v4")
+    print("Env created.")
+    env.wait_until_ready()
+    print("Env ready.")
+
+    env = ActionTimeStampWrapper(env)
+    env = NoGripperActionWrapper(env)
+    env = LastObservationWrapper(env)
+    # env = ContainerWatcherWrapper(env, ctx=multiprocessing.get_context("spawn"))
+    env = SensorTareWrapper(
+        env,
+        sensor_key="observation.state.sensors_bota_ft_sensor",
+        sensor_data_shape=(6,),
+    )
+    is_eval = False if args is None else args.eval
+    env = InsertionWrapperSiemens(
+        env,
+        alg_config=alg_config,
+        env_config=env_config,
+        grasp_randomisation_x_range=(-0.00175, 0.00175)
+        if not is_eval
+        else (-0.0015, 0.0015),
+        grasp_randomisation_z_range=(-0.001, 0.001) if not is_eval else (-0.0, 0.0),
+        safety_box_radius=0.003,
+        safety_box_step_size=0.0004,
+        minimal_start_goal_distance=0.002,
+        step_limit=env_config.episode_length
+        if not is_eval
+        else 2 * env_config.episode_length,
+        is_eval=is_eval,
+        use_pose_estimation=True
+        if args is not None and args.use_pose_estimation
+        else False,
+    )
+
+    # obs["observation.state.cartesian"][2] < 0.049)
+    #  # functools.partial(observation_has_z_pressure_or_below, error_threshold=0.005, previous_error_threshold=0.003,
+    #  # min_z_height=0.055, terminate_z_height = 0.0475))
+    # maybe something with z velocity
+    env = CLIWrapper(env)
+    env = DinoImageEncoderWrapper(
+        env,
+        n_cameras=env_config.n_cameras,
+        image_keys=["observation.images.wrist_camera"],
+        image_size=(256, 256),
+        crops={"observation.images.wrist_camera": (175, 175 + 224, 346, 346 + 224)},
+    )
+
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
+    env = ObservationFormatterWrapper(
+        env,
+        "cuda",
+        keys_ranges_scales=[
+            ("observation.previous.action", (1, 3), 1000.0),
+            ("observation.previous.error.cartesian", (1, 3), 1000.0),
+            ("observation.velocity.cartesian", (1, 3), 1000.0),
+            ("observation.error.cartesian", (1, 3), 1000.0),
+            ("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1),
+            ("observation.features.wrist_camera", (0, 512), 1.0),
+        ],
+    )
+    return env
+
+
+def create_simulated_env(
+    mujid_config: dict,
+    sac_config: Config = Config(),
+    is_eval=False,
+    use_ft=True,
+    pe_accuracy=0.0015,
+) -> gym.Env:
+    """Create a new environment instance."""
+    mujid_config["n_cameras"] = sac_config.n_cameras
+    env = mujid_env.MujidEnv(
+        config=mujid_config,
+    )
+    env = ActionTimeStampWrapper(env)
+    env = LastObservationWrapper(env)
+    env = InsertionWrapperSim(
+        env,
+        config=sac_config,
+        grasp_randomisation_z_range=(-pe_accuracy / 3 + 0.001, pe_accuracy / 3 + 0.001)
+        if is_eval
+        else (-pe_accuracy / 3 + 0.001 - 0.00025, pe_accuracy / 3 + 0.001 + 0.00025),
+        grasp_randomisation_x_range=(-pe_accuracy, pe_accuracy)
+        if is_eval
+        else (-pe_accuracy - 0.00025, pe_accuracy + 0.00025),
+        safety_box_radius=2 * pe_accuracy + 0.001 if is_eval else 2 * pe_accuracy,
+        goal_position_randomisation_xy_range=(
+            -2 * pe_accuracy * 0.9,
+            2 * pe_accuracy * 0.9,
+        ),
+        minimal_start_goal_distance=2 * pe_accuracy,
+        step_limit=sac_config.episode_length
+        if not is_eval
+        else 2 * sac_config.episode_length,
+        is_eval=is_eval,
+        grasp_randomisation_mode="box",
+    )
+    env = CustomTerminationWrapper(env, termination_fn=custom_sim_termination)
+    image_keys = [
+        "observation.images.wrist_camera_1",
+    ]
+    if sac_config.n_cameras > 1:
+        image_keys.append("observation.images.wrist_camera_2")
+    env = DinoImageEncoderWrapper(
+        env,
+        n_cameras=sac_config.n_cameras,
+        image_size=(256, 256),
+        crops={k: (0, 256, 0, 256) for k in image_keys},
+        image_keys=image_keys,
+    )
+    # env = ImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
+    key_ranges_scales = (
+        [
+            ("observation.previous.action", (0, 2), 1000.0),
+            ("observation.previous.error.cartesian", (0, 2), 1000.0),
+            ("observation.velocity.cartesian", (0, 2), 1000.0),
+            ("observation.error.cartesian", (0, 2), 1000.0),
+        ]
+        + (
+            [("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1)]
+            if use_ft
+            else []
+        )
+        + [(k.replace("images", "features"), (0, 512), 1.0) for k in image_keys]
+    )
+    env = ObservationFormatterWrapper(
+        env,
+        "cuda",
+        keys_ranges_scales=key_ranges_scales,
+    )
+    env = NoRotationNoGripperNoZActionClippedWrapperSim(env, clip=0.001)
 
     return env
+
+
+def create_simulated_env_3dof(
+    mujid_config: dict,
+    sac_config: Config = Config(),
+    is_eval=False,
+    use_ft=True,
+    pe_accuracy=0.0015,
+) -> gym.Env:
+    """Create a new environment instance."""
+    mujid_config["n_cameras"] = sac_config.n_cameras
+    env = mujid_env.MujidEnv3D(
+        config=mujid_config,
+    )
+    env = ActionTimeStampWrapper(env)
+    env = LastObservationWrapper(env)
+    env = InsertionWrapperSim3D(
+        env,
+        config=sac_config,
+        grasp_randomisation_z_range=(-pe_accuracy / 3 + 0.001, pe_accuracy / 3 + 0.001)
+        if is_eval
+        else (-pe_accuracy / 3 + 0.001 - 0.00025, pe_accuracy / 3 + 0.001 + 0.00025),
+        grasp_randomisation_x_range=(-pe_accuracy, pe_accuracy)
+        if is_eval
+        else (-pe_accuracy - 0.00025, pe_accuracy + 0.00025),
+        safety_box_radius=2 * pe_accuracy + 0.001 if is_eval else 2 * pe_accuracy,
+        goal_position_randomisation_xyz_range=(
+            -2 * pe_accuracy * 0.9,
+            2 * pe_accuracy * 0.9,
+        ),
+        minimal_start_goal_distance=2 * pe_accuracy,
+        step_limit=sac_config.episode_length
+        if not is_eval
+        else 2 * sac_config.episode_length,
+        is_eval=is_eval,
+        grasp_randomisation_mode="box",
+    )
+    env = CustomTerminationWrapper(env, termination_fn=custom_sim_termination)
+    image_keys = [
+        "observation.images.wrist_camera_1",
+    ]
+    if sac_config.n_cameras > 1:
+        image_keys.append("observation.images.wrist_camera_2")
+    env = DinoImageEncoderWrapper(
+        env,
+        n_cameras=sac_config.n_cameras,
+        image_size=(256, 256),
+        crops={k: (0, 256, 0, 256) for k in image_keys},
+        image_keys=image_keys,
+    )
+    # env = ImageEncoderWrapper(env, n_cameras=1, image_size=(256, 256))
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
+    key_ranges_scales = (
+        [
+            ("observation.previous.action", (0, 3), 1000.0),
+            ("observation.previous.error.cartesian", (0, 3), 1000.0),
+            ("observation.velocity.cartesian", (0, 3), 1000.0),
+            ("observation.error.cartesian", (0, 3), 1000.0),
+        ]
+        + (
+            [("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1)]
+            if use_ft
+            else []
+        )
+        + [(k.replace("images", "features"), (0, 512), 1.0) for k in image_keys]
+    )
+    env = ObservationFormatterWrapper(
+        env,
+        "cuda",
+        keys_ranges_scales=key_ranges_scales,
+    )
+    env = NoRotationNoGripperWrapperSim(env)
+
+    return env
+
+
+def custom_sim_termination_3dof(obs):
+    fixed_box_pos = np.array([0.6, 0.0, 0.1198])
+    moving_box_pos = obs["observation.state.moving_brick"]
+    delta = np.abs(moving_box_pos - fixed_box_pos)
+    err = np.abs(obs["observation.error.cartesian"])
+    if delta[2] < 14e-3 and err[2] > 0.8e-3:
+        if delta[0] < 1e-3 and delta[1] < 1e-3:
+            # print("E_SUCCESS")
+            return "E_SUCCESS"
+        else:
+            print("E_FAIL (Stuck)")
+            return "E_FAIL"
 
 
 def custom_sim_termination(obs):

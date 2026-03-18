@@ -20,7 +20,7 @@ from crisp_drl.agents.shared.networks_cleanrl import (
     ActorFixedSigma,
     SharedEncoder,
 )
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 from crisp_drl.data.buffers_cleanrl import ReplayBufferGpuWithPerfectActions
 
 """Sample usage:

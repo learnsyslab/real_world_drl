@@ -27,7 +27,7 @@ from crisp_drl.agents.shared.env_wrappers import (
     observation_has_z_pressure,
 )
 from crisp_drl.agents.rlpd.learner import RLPDLearner
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 from crisp_drl.agents.shared.rewards import (
     sparse_place_reward,
     prune_after_async_termination,

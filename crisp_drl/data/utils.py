@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from torchvision.models import ResNet18_Weights
 from collections import defaultdict
 
-from crisp_drl.agents.shared.config import Config
+from crisp_drl.agents.shared.algorithm_config import Config
 
 
 RESNET18_TRANSFORM = ResNet18_Weights.DEFAULT.transforms(antialias=True)
