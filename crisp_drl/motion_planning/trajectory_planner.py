@@ -414,3 +414,162 @@ class TrajectoryFollower:
             final_distance = final_dist,
             timed_out_at   = None if reached else 0,
         )
+
+    def follow_sampled(
+        self,
+        env,
+        obs: dict,
+        waypoints: List[Waypoint],
+    ) -> Tuple[dict, FollowResult]:
+        """Follow pre-timed waypoints: one env.step() per waypoint.
+
+        Unlike follow(), this does NOT re-parameterise with a raised-cosine profile.
+        The velocity profile is encoded in the waypoint spacing (e.g. from Poly7Planner).
+        A short P-controller correction at the end closes any residual gap.
+        """
+        if not waypoints:
+            pos = obs["observation.state.cartesian"][:3].copy()
+            return obs, FollowResult(
+                reached_all=True, steps_taken=0,
+                final_position=pos, final_distance=0.0,
+            )
+
+        total_steps = 0
+
+        if self.verbose:
+            total_arc = sum(
+                np.linalg.norm(waypoints[i].position - waypoints[i - 1].position)
+                for i in range(1, len(waypoints))
+            )
+            print(
+                f"  [Follower/sampled] {len(waypoints)} waypoints  "
+                f"arc={total_arc * 1000:.1f}mm"
+            )
+
+        for wp in waypoints:
+            current = obs["observation.state.cartesian"][:3]
+            delta   = wp.position - current
+            dist    = np.linalg.norm(delta)
+            step    = delta / dist * min(dist, self.max_step) if dist > 1e-6 else np.zeros(3)
+            action  = np.zeros(6)
+            action[:3] = step
+            obs = self._step(env, obs, action)
+            total_steps += 1
+
+        # Final P-controller correction to reach last waypoint within tolerance
+        last_wp = waypoints[-1]
+        obs, reached, n_corr = self.go_to(env, obs, last_wp.position, last_wp.tolerance)
+        total_steps += n_corr
+
+        if not reached:
+            print(
+                f"  [Follower/sampled] WARNING: final correction timed out "
+                f"(target={last_wp.position.round(4)})"
+            )
+
+        final_pos  = obs["observation.state.cartesian"][:3].copy()
+        final_dist = float(np.linalg.norm(last_wp.position - final_pos))
+
+        return obs, FollowResult(
+            reached_all    = reached,
+            steps_taken    = total_steps,
+            final_position = final_pos,
+            final_distance = final_dist,
+            timed_out_at   = None if reached else 0,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7th-order polynomial planner
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Poly7Planner:
+    """7th-order polynomial trajectory planner.
+
+    Enforces zero position, velocity, acceleration **and jerk** at both endpoints:
+
+        p(0) = p0,  p(T) = pf
+        v(0) = v(T) = 0
+        a(0) = a(T) = 0
+        j(0) = j(T) = 0
+
+    The normalised position profile (independent of distance and duration):
+
+        s(τ) = 35τ⁴ − 84τ⁵ + 70τ⁶ − 20τ⁷,   τ ∈ [0, 1]
+
+    is evaluated at N+1 equally-spaced τ values to yield waypoints.  N is chosen
+    so that one waypoint ≈ one env.step() (dt = 66 ms at 15 Hz), matching the
+    natural rhythm of the impedance controller.
+
+    All three axes share the same T = T_min (bound by the axis with the largest
+    displacement), giving a straight-line 3D path.
+
+    Use with TrajectoryFollower.follow_sampled() — that method sends exactly one
+    env.step() per waypoint, preserving the poly's velocity profile.
+
+    Parameters
+    ----------
+    a_limit            : Cartesian acceleration limit [m/s²].  Used to compute the
+                         minimum feasible trajectory duration T_min.
+    env_dt             : Duration of one env.step() in seconds.  Default 0.066 s
+                         (198 MuJoCo sub-steps at 3 kHz = 66 ms).
+    waypoint_tolerance : Arrival threshold for every generated waypoint [m].
+    """
+
+    # Peak value of |s''(τ)| over τ ∈ [0,1], computed analytically.
+    # s''(τ) = 420τ² − 1680τ³ + 2100τ⁴ − 840τ⁵  →  max ≈ 10.9805 at τ ≈ 0.2163
+    _K: float = 10.9805
+
+    def __init__(
+        self,
+        a_limit:            float = 2.0,    # m/s²
+        env_dt:             float = 0.066,  # s per env.step()
+        waypoint_tolerance: float = 0.002,  # m
+    ):
+        self.a_limit            = a_limit
+        self.env_dt             = env_dt
+        self.waypoint_tolerance = waypoint_tolerance
+
+    def t_min(self, dist: float) -> float:
+        """Minimum feasible duration [s] for a straight-line move of given distance."""
+        return float(np.sqrt(self._K * dist / self.a_limit))
+
+    def plan(
+        self,
+        start_xyz,
+        goal_xyz,
+    ) -> List[Waypoint]:
+        """Generate a 7th-order polynomial trajectory from start to goal.
+
+        Parameters
+        ----------
+        start_xyz : array-like (3,), starting TCP position [m].
+        goal_xyz  : array-like (3,), target TCP position [m].
+
+        Returns
+        -------
+        List of Waypoint objects sampled at equal τ-steps.  Always ends exactly
+        at goal_xyz.  Intended to be followed with TrajectoryFollower.follow_sampled().
+        """
+        start = np.asarray(start_xyz, dtype=float)
+        goal  = np.asarray(goal_xyz,  dtype=float)
+        dist  = np.linalg.norm(goal - start)
+
+        if dist < 1e-6:
+            return [Waypoint(position=goal.copy(), tolerance=self.waypoint_tolerance)]
+
+        T         = self.t_min(dist)
+        N         = max(10, int(np.ceil(T / self.env_dt)))   # env steps
+        tau       = np.linspace(0.0, 1.0, N + 1)[1:]         # skip τ=0 (= start)
+        s         = 35*tau**4 - 84*tau**5 + 70*tau**6 - 20*tau**7  # normalised position
+
+        direction = (goal - start) / dist
+        waypoints = [
+            Waypoint(
+                position=(start + si * dist * direction).copy(),
+                tolerance=self.waypoint_tolerance,
+            )
+            for si in s
+        ]
+        waypoints[-1].position = goal.copy()   # floating-point safety
+        return waypoints
