@@ -196,24 +196,33 @@ class TrajectoryFollower:
     Requires only obs["observation.state.cartesian"][:3] (TCP XYZ), so it works
     directly with a raw MujidEnv — no wrappers needed.
 
-    The controller strategy is a P-controller with component-wise step clipping:
-      delta = target - current
-      action[:3] = clip(delta, -max_step, +max_step)  per axis
-      action[3:] = 0  (rotation unchanged)
-    This is the same strategy used in FreeSpaceMotionPlanner and InsertionWrapperSimLEGO.
+    Motion strategy
+    ───────────────
+    follow() treats the entire waypoint list as a single arc-length-parameterised
+    path and drives along it with a **raised-cosine velocity profile**:
+
+        speed ∝ sin(π · t)    (t = 0 → 1 over the full trajectory)
+
+    This gives smooth ease-in / ease-out with no jerk at waypoint boundaries.
+    Each env.step() sends a direction-normalised delta (not per-axis clipped),
+    so the robot tracks the straight-line path accurately even for diagonal moves.
+
+    After the timed arc-length pass, a short P-controller correction loop drives
+    to the final waypoint within its tolerance (handles impedance lag).
+
+    go_to() is kept for single-target use (e.g. hold corrections). It also uses
+    direction-normalised steps.
 
     Real-robot portability: subclass and override _step() to call the robot
     controller instead of env.step().
 
     Parameters
     ----------
-    max_step              : Maximum Cartesian delta per action per axis [m].
-                            1 mm is safe for the CartesianImpedanceController
-                            (error clipping is ±3 mm, so 1 mm stays well inside).
-    max_iter_per_waypoint : Safety cap on env.step() calls per waypoint.
-                            At 1 mm/step and 5000 steps = 5 m maximum travel,
-                            which is far more than any reachable workspace distance.
-    verbose               : Print per-waypoint progress.
+    max_step              : Maximum Cartesian step magnitude per env.step() [m].
+                            3 mm is the safe limit for the impedance controller
+                            (clips errors to ±3 mm per control cycle).
+    max_iter_per_waypoint : Safety cap for the final correction loop [steps].
+    verbose               : Print one summary line per follow() call.
     """
 
     def __init__(
@@ -226,12 +235,37 @@ class TrajectoryFollower:
         self.max_iter_per_waypoint = max_iter_per_waypoint
         self.verbose               = verbose
 
-    # ── low-level: single-step action ────────────────────────────────────────
+    # ── low-level: single env step ───────────────────────────────────────────
 
     def _step(self, env, obs, action: np.ndarray):
         """Send one action to the environment. Override for real-robot use."""
         obs, _, _, _, _ = env.step(action)
         return obs
+
+    # ── geometry helper ──────────────────────────────────────────────────────
+
+    def _interpolate_path(
+        self,
+        points: list,
+        arc_lengths: list,
+        s: float,
+    ) -> np.ndarray:
+        """Return the position on a polyline at arc-length s.
+
+        Parameters
+        ----------
+        points      : List of (3,) arrays — the polyline vertices.
+        arc_lengths : Cumulative arc lengths at each vertex (same length as points).
+        s           : Target arc-length value in [0, total_arc].
+        """
+        for i in range(len(arc_lengths) - 1):
+            if s <= arc_lengths[i + 1]:
+                seg_len = arc_lengths[i + 1] - arc_lengths[i]
+                if seg_len < 1e-9:
+                    return points[i + 1].copy()
+                t = (s - arc_lengths[i]) / seg_len
+                return points[i] + t * (points[i + 1] - points[i])
+        return points[-1].copy()
 
     # ── mid-level: move to a single target ───────────────────────────────────
 
@@ -242,7 +276,7 @@ class TrajectoryFollower:
         target_xyz,
         tolerance: float = 0.002,
     ) -> Tuple[dict, bool, int]:
-        """Move toward a single 3D target until within tolerance or timed out.
+        """P-controller toward a single 3D target (direction-normalised step).
 
         Parameters
         ----------
@@ -261,28 +295,21 @@ class TrajectoryFollower:
         n_steps = 0
 
         for _ in range(self.max_iter_per_waypoint):
-            # Read current TCP position (ground truth from MuJoCo)
             current = obs["observation.state.cartesian"][:3]
             delta   = target - current
             dist    = np.linalg.norm(delta)
 
-            # Check arrival
             if dist <= tolerance:
                 return obs, True, n_steps
 
-            # Clip each axis independently to max_step
-            # (component-wise clip, not norm-based, matches existing sim code)
-            step = np.clip(delta, -self.max_step, self.max_step)
+            # Direction-normalised step: moves in a straight line, never overshoots
+            step = delta / dist * min(dist, self.max_step)
 
-            # Build 6D action: XYZ delta + zero rotation (hold orientation fixed)
-            action        = np.zeros(6)
-            action[:3]    = step   # X, Y, Z position delta [m]
-            # action[3:6] = 0      # rotation axis-angle delta — zero = no rotation change
-
+            action     = np.zeros(6)
+            action[:3] = step
             obs = self._step(env, obs, action)
             n_steps += 1
 
-        # Timed out without reaching tolerance
         return obs, False, n_steps
 
     # ── high-level: follow a waypoint list ───────────────────────────────────
@@ -293,7 +320,13 @@ class TrajectoryFollower:
         obs: dict,
         waypoints: List[Waypoint],
     ) -> Tuple[dict, FollowResult]:
-        """Follow a list of Waypoints in order.
+        """Follow a waypoint list with smooth arc-length interpolation.
+
+        The entire path is treated as a single arc-length-parameterised polyline.
+        A raised-cosine velocity profile drives speed from 0 → max → 0 over the
+        trajectory, producing smooth ease-in / ease-out with no jerk at waypoint
+        boundaries.  After the interpolation pass, a short correction loop
+        closes any remaining gap to the final waypoint.
 
         Parameters
         ----------
@@ -306,46 +339,78 @@ class TrajectoryFollower:
         obs    : Updated observation after the final step.
         result : FollowResult with success flag, step count, final position, etc.
         """
-        total_steps  = 0
-        timed_out_at = None
-
-        for i, wp in enumerate(waypoints):
-            # Print progress before attempting the waypoint
-            if self.verbose:
-                current  = obs["observation.state.cartesian"][:3]
-                dist_now = np.linalg.norm(wp.position - current) * 1000
-                print(
-                    f"  [Follower] wp {i+1:3d}/{len(waypoints)}: "
-                    f"target={wp.position.round(4)}  "
-                    f"dist_to_wp={dist_now:.1f}mm"
-                )
-
-            obs, reached, n_steps = self.go_to(
-                env, obs, wp.position, wp.tolerance
+        if not waypoints:
+            pos = obs["observation.state.cartesian"][:3].copy()
+            return obs, FollowResult(
+                reached_all=True, steps_taken=0,
+                final_position=pos, final_distance=0.0,
             )
-            total_steps += n_steps
 
-            if not reached:
-                # Record the first timeout; continue to next waypoint rather
-                # than aborting — partial progress is still useful for debugging.
-                if timed_out_at is None:
-                    timed_out_at = i
+        # ── Build arc-length parameterised polyline ───────────────────────────
+        start   = obs["observation.state.cartesian"][:3].copy()
+        points  = [start] + [wp.position.copy() for wp in waypoints]
+        arc_lengths = [0.0]
+        for i in range(1, len(points)):
+            arc_lengths.append(
+                arc_lengths[-1] + np.linalg.norm(points[i] - points[i - 1])
+            )
+        total_arc = arc_lengths[-1]
+
+        total_steps = 0
+
+        if total_arc >= self.max_step:
+            # ── Raised-cosine interpolation pass ─────────────────────────────
+            # speed(t) ∝ sin(π·t) — zero at both ends, maximum at midpoint.
+            # Integrate to get position: pos(t) = 0.5·(1 − cos(π·t)) · total_arc
+            n_steps = max(1, int(total_arc / self.max_step))
+
+            if self.verbose:
                 print(
-                    f"  [Follower] WARNING: timed out at waypoint {i} "
-                    f"(target={wp.position.round(4)})"
+                    f"  [Follower] smooth arc={total_arc*1000:.1f}mm  "
+                    f"waypoints={len(waypoints)}  steps={n_steps}"
                 )
 
-        # Final position and distance to the last waypoint
-        final_pos  = obs["observation.state.cartesian"][:3].copy()
-        final_dist = (
-            float(np.linalg.norm(waypoints[-1].position - final_pos))
-            if waypoints else 0.0
+            for i in range(n_steps):
+                t_linear  = (i + 1) / n_steps               # 0 → 1 (exclusive of 0)
+                t_smooth  = 0.5 * (1.0 - np.cos(np.pi * t_linear))  # raised cosine
+                target_s  = t_smooth * total_arc
+
+                target_pos = self._interpolate_path(points, arc_lengths, target_s)
+                current    = obs["observation.state.cartesian"][:3]
+                delta      = target_pos - current
+                dist       = np.linalg.norm(delta)
+
+                if dist > 1e-6:
+                    step = delta / dist * min(dist, self.max_step)
+                else:
+                    step = np.zeros(3)
+
+                action     = np.zeros(6)
+                action[:3] = step
+                obs = self._step(env, obs, action)
+                total_steps += 1
+
+        # ── Final correction: P-controller to last waypoint ──────────────────
+        # Closes any residual gap from impedance lag or floating-point error.
+        last_wp = waypoints[-1]
+        obs, reached, n_corr = self.go_to(
+            env, obs, last_wp.position, last_wp.tolerance
         )
+        total_steps += n_corr
+
+        if not reached:
+            print(
+                f"  [Follower] WARNING: final correction timed out "
+                f"(target={last_wp.position.round(4)})"
+            )
+
+        final_pos  = obs["observation.state.cartesian"][:3].copy()
+        final_dist = float(np.linalg.norm(last_wp.position - final_pos))
 
         return obs, FollowResult(
-            reached_all    = (timed_out_at is None),
+            reached_all    = reached,
             steps_taken    = total_steps,
             final_position = final_pos,
             final_distance = final_dist,
-            timed_out_at   = timed_out_at,
+            timed_out_at   = None if reached else 0,
         )
