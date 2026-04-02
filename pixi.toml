@@ -39,16 +39,14 @@ debugpy = ">=1.8.14,<2"
 libgl-devel = "*"
 
 [environments]
-jazzy-only = { features = ["jazzy", "dev", "extra"] }
-jazzy-crisp = { features = ["jazzy", "dev", "extra", "crisp"] }
-jazzy = { features = [
-    "jazzy",
-    "dev",
-    "extra",
-    "crisp",
-    "lerobot",
-    "pose_estimation",
-] }
+# Simulation-only: no ROS, no crisp_gym/crisp_py required. Use this for
+# running motion-planner tests and training in MuJoCo.
+sim = { features = ["sim", "dev"] }
+# The environments below require crisp_gym and crisp_py at ../crisp_gym and
+# ../crisp_py. Uncomment once those repos are available.
+# jazzy-only = { features = ["jazzy", "dev", "extra"] }
+# jazzy-crisp = { features = ["jazzy", "dev", "extra", "crisp"] }
+# jazzy = { features = ["jazzy", "dev", "extra", "crisp", "lerobot", "pose_estimation"] }
 
 # jazzy
 [feature.jazzy]
@@ -116,6 +114,24 @@ pytest = "*"     # for testing
 [feature.extra.pypi-dependencies]
 rich = "*"       # For nice prints
 matplotlib = "*" # to do some plots
+
+# Simulation-only feature: MuJoCo + crisp_drl, no ROS, no crisp_gym/crisp_py.
+[feature.sim.dependencies]
+pinocchio    = ">=3.4.0,<4"   # required by mujid
+tsid         = ">=1.8.0,<2"   # required by mujid (CartesianImpedanceController)
+pytorch-cuda = ">=12.4,<13"   # CUDA runtime
+pytorch      = ">=2.0.0"      # Python torch module (pytorch conda channel)
+torchvision  = "*"
+
+[feature.sim.pypi-dependencies]
+crisp_drl     = { path = ".", editable = true }
+mujid         = { path = "../mujid", editable = true }
+gymnasium     = { version = ">=0.29.1, <2", extras = ["classic-control"] }
+opencv-python = "*"
+imageio       = "*"
+
+[feature.sim.system-requirements]
+cuda = "12.0"
 
 [feature.crisp.pypi-dependencies]
 crisp_drl = { path = ".", editable = true }

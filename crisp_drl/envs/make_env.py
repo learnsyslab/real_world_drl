@@ -37,6 +37,7 @@ from crisp_drl.agents.shared.env_wrappers import (
     InsertionResetWrapper,
     InsertionWrapperSim,
     InsertionWrapperSim3D,
+    InsertionWrapperSimGabor,
     NaiveToGoalPositionWrapper,
     NaiveZForceWrapper,
     NoRotationActionWrapper,
@@ -508,6 +509,91 @@ def create_simulated_env_3dof(
     return env
 
 
+def create_simulated_env_gabor(
+    mujid_config: dict,
+    alg_config: Config = Config(),
+    env_config: SiemensConfig = SiemensConfig(),
+    is_eval: bool = False,
+    use_ft: bool = True,
+    pe_accuracy: float = 0.0015,
+) -> gym.Env:
+    """Create a simulated analogue of the real-robot Siemens insertion task.
+
+    Axes are remapped relative to the real task (see InsertionWrapperSimGabor):
+        insertion axis  →  sim Z  (real X)
+        RL search plane →  sim XY (real YZ)
+
+    The observation tensor shape matches create_real_env_s1 so that a policy
+    trained here can be evaluated on the real robot by swapping the wrapper.
+
+    Motion-planning hooks can be passed via InsertionWrapperSimGabor's
+    insertion_controller and search_controller arguments if you instantiate
+    the wrapper manually instead of using this factory.
+    """
+    from crisp_drl.agents.shared.insertion_wrapper import SensorTareWrapper
+
+    mujid_config["n_cameras"] = alg_config.n_cameras
+    env = mujid_env.MujidEnv(config=mujid_config)
+    env = ActionTimeStampWrapper(env)
+    env = LastObservationWrapper(env)
+    env = SensorTareWrapper(
+        env,
+        sensor_key="observation.state.sensors_bota_ft_sensor",
+        sensor_data_shape=(6,),
+    )
+    env = InsertionWrapperSimGabor(
+        env,
+        alg_config=alg_config,
+        env_config=env_config,
+        grasp_randomisation_x_range=(-pe_accuracy, pe_accuracy)
+        if is_eval
+        else (-pe_accuracy - 0.00025, pe_accuracy + 0.00025),
+        grasp_randomisation_z_range=(-pe_accuracy / 3 + 0.001, pe_accuracy / 3 + 0.001)
+        if is_eval
+        else (-pe_accuracy / 3 + 0.001 - 0.00025, pe_accuracy / 3 + 0.001 + 0.00025),
+        safety_box_radius=2 * pe_accuracy + 0.001 if is_eval else 2 * pe_accuracy,
+        minimal_start_goal_distance=2 * pe_accuracy,
+        step_limit=env_config.episode_length
+        if not is_eval
+        else 2 * env_config.episode_length,
+        is_eval=is_eval,
+    )
+    env = CustomTerminationWrapper(env, termination_fn=custom_sim_termination_gabor)
+    image_keys = ["observation.images.wrist_camera_1"]
+    if alg_config.n_cameras > 1:
+        image_keys.append("observation.images.wrist_camera_2")
+    env = DinoImageEncoderWrapper(
+        env,
+        n_cameras=alg_config.n_cameras,
+        image_size=(256, 256),
+        crops={k: (0, 256, 0, 256) for k in image_keys},
+        image_keys=image_keys,
+    )
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
+    # Slices (0, 2) select the sim search plane (X+Y = indices 0,1).
+    # The real task uses (1, 3) for Y+Z; shape is identical so policies transfer.
+    key_ranges_scales = (
+        [
+            ("observation.previous.action", (0, 2), 1000.0),
+            ("observation.previous.error.cartesian", (0, 2), 1000.0),
+            ("observation.velocity.cartesian", (0, 2), 1000.0),
+            ("observation.error.cartesian", (0, 2), 1000.0),
+        ]
+        + ([("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1)] if use_ft else [])
+        + [(k.replace("images", "features"), (0, 512), 1.0) for k in image_keys]
+    )
+    env = ObservationFormatterWrapper(
+        env,
+        "cuda",
+        keys_ranges_scales=key_ranges_scales,
+    )
+    env = NoRotationNoGripperNoZActionClippedWrapperSim(env, clip=0.001)
+
+    return env
+
+
 def custom_sim_termination_3dof(obs):
     fixed_box_pos = np.array([0.6, 0.0, 0.1198])
     moving_box_pos = obs["observation.state.moving_brick"]
@@ -516,6 +602,28 @@ def custom_sim_termination_3dof(obs):
     if delta[2] < 14e-3 and err[2] > 0.8e-3:
         if delta[0] < 1e-3 and delta[1] < 1e-3:
             # print("E_SUCCESS")
+            return "E_SUCCESS"
+        else:
+            print("E_FAIL (Stuck)")
+            return "E_FAIL"
+
+
+def custom_sim_termination_gabor(obs):
+    """Termination function for create_simulated_env_gabor.
+
+    Identical geometry to custom_sim_termination (same MuJoCo scene).
+    Kept as a separate function so it can be swapped independently.
+    """
+    if obs["observation.state.target"][2] < 0.125:
+        print("E_FAIL (Z)")
+        return "E_FAIL"
+
+    fixed_box_pos = np.array([0.6, 0.0, 0.1198])
+    moving_box_pos = obs["observation.state.moving_brick"]
+    delta = np.abs(moving_box_pos - fixed_box_pos)
+    err = np.abs(obs["observation.error.cartesian"])
+    if delta[2] < 14e-3 and err[2] > 0.8e-3:
+        if delta[0] < 1e-3 and delta[1] < 1e-3:
             return "E_SUCCESS"
         else:
             print("E_FAIL (Stuck)")

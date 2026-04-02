@@ -15,7 +15,10 @@ from torchvision.models import resnet18, ResNet18_Weights
 from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
 import torch.multiprocessing as mp
 
-from crisp_drl.envs.pose_estimation_helper import PoseEstimationHelper
+try:
+    from crisp_drl.envs.pose_estimation_helper import PoseEstimationHelper
+except ImportError:
+    PoseEstimationHelper = None
 
 try:
     from pynput import keyboard
@@ -24,11 +27,16 @@ except ImportError:
 from gymnasium import spaces
 import imageio
 from crisp_drl.agents.shared.algorithm_config import Config
+from crisp_drl.agents.shared.insertion_env_config import SiemensConfig
 
 
 # Make cuDNN deterministic for consistent inference
-torch.backends.cudnn.benchmark = False
-torch.backends.cudnn.deterministic = True
+# Wrapped in try/except: cuDNN init bus-errors on WSL2 without GPU drivers
+try:
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+except Exception:
+    pass
 
 
 class MaximizeHeightRewardWrapper(RewardWrapper):
@@ -2158,5 +2166,223 @@ class InsertionWrapperSim3D(Wrapper):
     def add_perfect_action_to_obs(self, obs):
         obs["observation.perfect_action"] = (
             self.goal_position_ground_truth + self.grasp_position
+        ) - obs["observation.state.cartesian"][:3]
+        return obs
+
+
+class InsertionWrapperSimGabor(Wrapper):
+    """Simulated analogue of InsertionWrapperSiemens.
+
+    Axis remapping (sim vs real Siemens):
+        Real insertion axis X (index 0)  →  sim Z (self._ins_ax = 2)
+        Real RL search Y+Z (indices 1,2) →  sim X+Y (self._rl_axes = [0, 1])
+        F/T sensor indices sensor[3:5]   →  unchanged
+
+    The RL algorithm and observation tensor shape are identical to the real
+    task; only the wrapper is swapped when deploying to the real robot.
+
+    Motion-planning hooks:
+        insertion_controller: callable (obs) -> float
+            Overrides the built-in F/T torque controller for the insertion axis.
+        search_controller: callable (obs, action_2d) -> action_2d
+            Post-processes or replaces the RL action for the search plane.
+    """
+
+    # axis constants — change here if the sim scene changes
+    _ins_ax: int = 2       # sim Z = insertion
+    _rl_axes: list = [0, 1]  # sim X+Y = search plane
+
+    def __init__(
+        self,
+        env,
+        alg_config: Config,
+        env_config: SiemensConfig,
+        grasp_randomisation_x_range=(-0.00175, 0.00175),
+        grasp_randomisation_z_range=(-0.001, 0.001),
+        safety_box_radius=0.003,
+        safety_box_step_size=0.0004,
+        minimal_start_goal_distance=0.002,
+        step_limit=150,
+        is_eval=False,
+        insertion_controller=None,
+        search_controller=None,
+    ):
+        super().__init__(env)
+        self.action_space = spaces.Box(-np.inf, np.inf, (2,))
+        self.alg_config = alg_config
+        self.env_config = env_config
+
+        # F/T controller params (from SiemensConfig)
+        self.ft_wrench_target = env_config.insertion_forcetorque
+        self.ft_controller_k = env_config.ft_controller_k
+        self.ft_controller_lever_arm = env_config.ft_controller_lever_arm
+        self.x_force_clip = 0.003
+        self.i_term_clip = 0.0009
+
+        # episode / randomisation params
+        self.grasp_randomisation_x_range = grasp_randomisation_x_range
+        self.grasp_randomisation_z_range = grasp_randomisation_z_range
+        self.safety_box_radius = safety_box_radius
+        self.safety_box_step_size = safety_box_step_size
+        self.minimal_start_goal_distance = minimal_start_goal_distance
+        self.step_limit = step_limit
+        self.is_eval = is_eval
+        self.n_steps = 0
+
+        # sim goal reference (lego fixed socket in MuJoCo scene)
+        self.goal_position_ground_truth_sim = np.array([0.6, 0.0, 0.0])
+
+        # motion-planning hooks
+        self._insertion_controller_hook = insertion_controller
+        self._search_controller_hook = search_controller
+
+        # state populated in reset()
+        self.obs = None
+        self.grasp_position = np.zeros(3)
+        self.goal_position = self.goal_position_ground_truth_sim.copy()
+        self.start_position = self.goal_position_ground_truth_sim.copy()
+
+        print("[InsertionWrapperSimGabor] [__init__] Eval mode:", is_eval)
+
+    # ------------------------------------------------------------------
+    # F/T torque controller for the insertion axis
+    # ------------------------------------------------------------------
+
+    def _insertion_controller_dx(self) -> float:
+        """Rule-based insertion-axis controller using simulated F/T sensor.
+
+        Mirrors x_torque_controller_dx from InsertionWrapperSiemens, with
+        the insertion axis index replaced by self._ins_ax (sim Z = 2).
+        """
+        y_torque_sensed = np.sum(
+            self.obs["observation.state.sensors_bota_ft_sensor"][3:5]
+        ) / np.sqrt(2)
+        y_torque_error = self.ft_wrench_target - y_torque_sensed
+        x_force_error = y_torque_error / self.ft_controller_lever_arm
+        x_impedance_error = (
+            self.obs["observation.state.target"][self._ins_ax]
+            - self.obs["observation.state.cartesian"][self._ins_ax]
+        )
+        if x_force_error > 0 and x_impedance_error < self.x_force_clip:
+            dx = -min(
+                x_force_error / self.ft_controller_k,
+                self.x_force_clip - x_impedance_error,
+            )
+        elif x_force_error < 0 and x_impedance_error > -self.x_force_clip:
+            dx = -max(
+                x_force_error / self.ft_controller_k,
+                -self.x_force_clip - x_impedance_error,
+            )
+        else:
+            dx = 0.0
+        return dx
+
+    # ------------------------------------------------------------------
+    # Gym API
+    # ------------------------------------------------------------------
+
+    def reset(
+        self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None
+    ) -> tuple[Any, dict[str, Any]]:
+        # --- grasp randomisation (sim X = real Y, sim Z = real X insertion) ---
+        grasp_randomisation_x = np.random.uniform(*self.grasp_randomisation_x_range)
+        grasp_randomisation_z = np.random.uniform(*self.grasp_randomisation_z_range)
+        self.grasp_position = np.array([grasp_randomisation_x, 0.0, grasp_randomisation_z])
+
+        # --- goal position ---
+        self.goal_position = self.goal_position_ground_truth_sim.copy()
+        # goal randomisation in search plane (indices 0,1 = sim X+Y)
+        goal_rand_xy = np.zeros(2)
+        goal_rand_range = 2 * max(
+            abs(self.grasp_randomisation_x_range[0]),
+            abs(self.grasp_randomisation_x_range[1]),
+        ) * 0.9
+        while np.linalg.norm(goal_rand_xy) < 0.001:
+            goal_rand_xy = np.random.uniform(-goal_rand_range, goal_rand_range, size=2)
+        self.goal_position[self._rl_axes] += goal_rand_xy
+        # bake in grasp offset (insertion offset on sim Z, search offset on sim X)
+        self.goal_position[0] += self.grasp_position[0]
+        self.goal_position[self._ins_ax] += self.grasp_position[self._ins_ax]
+
+        # --- start position ---
+        if not self.is_eval:
+            self.start_position = self.goal_position.copy()
+            while (
+                np.linalg.norm(
+                    self.start_position[self._rl_axes]
+                    - self.goal_position[self._rl_axes]
+                )
+                < self.minimal_start_goal_distance
+            ):
+                self.start_position[self._rl_axes] = (
+                    self.goal_position[self._rl_axes]
+                    + np.random.uniform(
+                        -self.safety_box_radius, self.safety_box_radius, size=2
+                    )
+                )
+        else:
+            self.start_position = self.goal_position.copy()
+
+        # --- teleport via MuJoCo reset ---
+        self.obs, reset_info = self.env.reset(
+            seed=seed,
+            options={
+                "start_position": self.start_position,
+                "grasp_position": self.grasp_position,
+            },
+        )
+
+        reset_info["reset.grasped.delta"] = self.grasp_position
+        goal_position_offset = self.goal_position - (
+            self.goal_position_ground_truth_sim + self.grasp_position
+        )
+        reset_info["reset.goal_position.offset"] = goal_position_offset
+
+        self.obs = self.add_perfect_action_to_obs(self.obs)
+        self.n_steps = 0
+        return self.obs, reset_info
+
+    def step(self, action) -> tuple[Any, Any, bool, bool, dict[str, Any]]:
+        # insertion axis: hook or built-in F/T controller
+        dx_ins = (
+            self._insertion_controller_hook(self.obs)
+            if self._insertion_controller_hook is not None
+            else self._insertion_controller_dx()
+        )
+
+        # search plane: optional hook post-processes the RL action
+        if self._search_controller_hook is not None:
+            action = self._search_controller_hook(self.obs, action)
+
+        # build 6D action
+        full_action = np.zeros(6)
+        full_action[self._rl_axes[0]] = action[0]
+        full_action[self._rl_axes[1]] = action[1]
+        full_action[self._ins_ax] = dx_ins
+
+        # safety box in search plane
+        pos_rl = self.obs["observation.state.cartesian"][self._rl_axes]
+        delta = pos_rl - self.goal_position[self._rl_axes]
+        norm_delta = np.linalg.norm(delta)
+        if norm_delta > self.safety_box_radius:
+            full_action[self._rl_axes[0]] = (
+                -delta[0] * self.safety_box_step_size / norm_delta
+            )
+            full_action[self._rl_axes[1]] = (
+                -delta[1] * self.safety_box_step_size / norm_delta
+            )
+
+        self.obs, reward, terminated, truncated, info = self.env.step(full_action)
+        self.obs = self.add_perfect_action_to_obs(self.obs)
+
+        self.n_steps += 1
+        if self.n_steps >= self.step_limit:
+            truncated = True
+
+        return self.obs, reward, terminated, truncated, info
+
+    def add_perfect_action_to_obs(self, obs):
+        obs["observation.perfect_action"] = (
+            self.goal_position_ground_truth_sim + self.grasp_position
         ) - obs["observation.state.cartesian"][:3]
         return obs
