@@ -82,8 +82,8 @@ def make_env(live_view: bool) -> mujid_env.MujidEnv:
 
 def reset_env(env) -> dict:
     obs, _ = env.reset(options={
-        "start_position": np.zeros(3),
-        "grasp_position": np.zeros(3),
+        "start_position": np.array([0.6, 0.0, 0.0]),
+        "grasp_position": np.array([0.0, 0.0, 0.0]),
     })
     return obs
 
@@ -145,13 +145,6 @@ def run_planner(
     obs = reset_env(env)
 
     for label, start, goal in moves:
-        # Teleport to start of this move via reset (avoids accumulating errors)
-        obs = reset_env(env)
-        # Walk to start position first (not measured)
-        _silent_go_to(follower, env, obs, start)
-        obs = reset_env(env)
-        # Re-read actual TCP after reset
-        _, _, obs = _go_to_silent(follower, env, obs, start)
 
         dist = np.linalg.norm(goal - start)
         t_min = poly7.t_min(dist)
@@ -186,10 +179,6 @@ def _go_to_silent(follower, env, obs, target):
     obs, reached, n = follower.go_to(env, obs, target, tolerance=0.003)
     follower.verbose = old_v
     return obs, reached, n
-
-
-def _silent_go_to(follower, env, obs, target):
-    _go_to_silent(follower, env, obs, target)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
