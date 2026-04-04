@@ -569,3 +569,70 @@ class InsertionWrapperSimLEGO(Wrapper):
             self.goal_position_ground_truth + self.grasp_position
         )
         return obs
+
+
+# ---------------------------------------------------------------------------
+# Sim env factory (ROS-free — importable without real robot dependencies)
+# ---------------------------------------------------------------------------
+
+def create_simulated_env_lego(
+    mujid_config: dict,
+    sac_config=None,
+    is_eval: bool = False,
+    pe_accuracy: float = 0.0015,
+):
+    """Sim env factory for the LEGO insertion task.
+
+    Uses InsertionWrapperSimLEGO (Siemens-style: reset=approach+contact, step=RL+Z ctrl).
+    No cameras, no ObservationFormatterWrapper — raw obs dict for planner-based testing
+    and lightweight training without CUDA.
+
+    Stack:
+        MujidEnv → ActionTimeStampWrapper → LastObservationWrapper
+          → InsertionWrapperSimLEGO → CustomTerminationWrapper
+
+    Parameters
+    ----------
+    mujid_config  : MujidEnv config dict (initial_keyframe, live_view, etc.)
+    sac_config    : algorithm Config object (episode_length, etc.); uses defaults if None
+    is_eval       : tighter randomisation when True
+    pe_accuracy   : pose estimation accuracy [m] — sets randomisation ranges
+    """
+    import mujid.env.env as mujid_env
+    from crisp_drl.agents.shared.algorithm_config import Config
+
+    if sac_config is None:
+        sac_config = Config()
+
+    mujid_config = dict(mujid_config)
+    mujid_config["n_cameras"] = 0   # no cameras — no CUDA needed
+
+    env = mujid_env.MujidEnv(config=mujid_config)
+    env = ActionTimeStampWrapper(env)
+    env = LastObservationWrapper(env)
+    env = InsertionWrapperSimLEGO(
+        env,
+        config=sac_config,
+        grasp_randomisation_z_range=(
+            (-pe_accuracy / 3 + 0.001, pe_accuracy / 3 + 0.001)
+            if is_eval
+            else (-pe_accuracy / 3 + 0.001 - 0.00025, pe_accuracy / 3 + 0.001 + 0.00025)
+        ),
+        grasp_randomisation_x_range=(
+            (-pe_accuracy, pe_accuracy)
+            if is_eval
+            else (-pe_accuracy - 0.00025, pe_accuracy + 0.00025)
+        ),
+        safety_box_radius=2 * pe_accuracy + 0.001 if is_eval else 2 * pe_accuracy,
+        goal_position_randomisation_xy_range=(
+            -2 * pe_accuracy * 0.9,
+            2 * pe_accuracy * 0.9,
+        ),
+        minimal_start_goal_distance=2 * pe_accuracy,
+        step_limit=sac_config.episode_length if not is_eval else 2 * sac_config.episode_length,
+        is_eval=is_eval,
+        grasp_randomisation_mode="box",
+        approach_distance=2 * pe_accuracy,
+    )
+    env = CustomTerminationWrapper(env, termination_fn=custom_sim_termination)
+    return env

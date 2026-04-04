@@ -9,8 +9,9 @@ import time
 import random
 import numpy as np
 
-from crisp_drl.agents.shared.insertion_env_config import SiemensConfig
+from crisp_drl.agents.shared.insertion_env_config import SiemensConfig, LegoConfig
 from crisp_drl.agents.shared.insertion_wrapper_s import InsertionWrapperSiemens
+from crisp_drl.agents.shared.insertion_wrapper_lego import InsertionWrapperRealLEGO
 from crisp_gym.envs.manipulator_env_config import NoCamFrankaEnvConfig, FrankaEnvConfig
 from crisp_py.camera.camera_config import CameraConfig
 from crisp_py.gripper.gripper import GripperConfig
@@ -646,3 +647,84 @@ def custom_sim_termination(obs):
         else:
             print("E_FAIL (Stuck)")
             return "E_FAIL"
+
+
+def create_real_env_lego(
+    alg_config: Config, env_config: LegoConfig, args=None
+) -> gym.Env:
+    """Real-robot env factory for the LEGO insertion task.
+
+    Mirrors create_real_env_s1() for Siemens — same wrapper stack, same pattern.
+    Key difference: ObservationFormatterWrapper uses (0, 2) for XY indices
+    (not (1, 3) like Siemens YZ), since LEGO uses X=insertion-search, Y=search,
+    Z=insertion.
+
+    Stack:
+        make_env("my_env_v4")
+          → ActionTimeStampWrapper
+          → NoGripperActionWrapper
+          → LastObservationWrapper
+          → SensorTareWrapper
+          → InsertionWrapperRealLEGO   ← Poly7 free-space + Z force ctrl
+          → CLIWrapper
+          → DinoImageEncoderWrapper
+          → ObservationFormatterWrapper
+    """
+    env = make_env("my_env_v4")
+    print("Env created.")
+    env.wait_until_ready()
+    print("Env ready.")
+
+    env = ActionTimeStampWrapper(env)
+    env = NoGripperActionWrapper(env)
+    env = LastObservationWrapper(env)
+    env = SensorTareWrapper(
+        env,
+        sensor_key="observation.state.sensors_bota_ft_sensor",
+        sensor_data_shape=(6,),
+    )
+
+    is_eval = False if args is None else args.eval
+    env = InsertionWrapperRealLEGO(
+        env,
+        alg_config=alg_config,
+        env_config=env_config,
+        grasp_randomisation_x_range=(-0.00175, 0.00175) if not is_eval else (-0.0015, 0.0015),
+        grasp_randomisation_z_range=(-0.001, 0.001) if not is_eval else (-0.0, 0.0),
+        safety_box_radius=0.003,
+        safety_box_step_size=0.0004,
+        step_limit=env_config.episode_length if not is_eval else 2 * env_config.episode_length,
+        minimal_start_goal_distance=0.002,
+        is_eval=is_eval,
+    )
+
+    env = CLIWrapper(env)
+    env = DinoImageEncoderWrapper(
+        env,
+        n_cameras=env_config.n_cameras,
+        image_keys=["observation.images.wrist_camera"],
+        image_size=(256, 256),
+        crops={"observation.images.wrist_camera": (175, 175 + 224, 346, 346 + 224)},
+    )
+
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
+    env = ObservationFormatterWrapper(
+        env,
+        "cuda",
+        keys_ranges_scales=[
+            # XY indices (0, 2) — LEGO search plane is X and Y, not Y and Z like Siemens
+            ("observation.previous.action",              (0, 2), 1000.0),
+            ("observation.previous.error.cartesian",     (0, 2), 1000.0),
+            ("observation.velocity.cartesian",           (0, 2), 1000.0),
+            ("observation.error.cartesian",              (0, 2), 1000.0),
+            ("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1),
+            ("observation.features.wrist_camera",        (0, 512), 1.0),
+        ],
+    )
+    return env
+
+
+    # create_simulated_env_lego() lives in crisp_drl.motion_planning.sim_wrappers
+    # (ROS-free module) so it can be imported without a real robot environment.
