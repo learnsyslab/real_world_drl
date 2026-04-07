@@ -129,6 +129,7 @@ mujid         = { path = "../mujid", editable = true }
 gymnasium     = { version = ">=0.29.1, <2", extras = ["classic-control"] }
 opencv-python = "*"
 imageio       = "*"
+ruckig        = "*"
 
 [feature.sim.system-requirements]
 cuda = "12.0"

@@ -197,3 +197,30 @@ class LinearInterpolationPlanner(FreeSpaceMotionPlanner):
             action[:3] = step
             obs, _, _, _, _ = env.step(action)
         return obs
+
+
+class RuckigFreeSpacePlanner(FreeSpaceMotionPlanner):
+    """Drop-in replacement using RuckigFollower.follow_3d() for each waypoint.
+
+    Produces smooth, jerk-limited motions instead of the P-controller step loop.
+    Requires ruckig to be installed (pixi sim environment includes it).
+
+    Parameters match RuckigFollower: dt, max_vel, max_acc, max_jerk.
+    """
+
+    def __init__(
+        self,
+        dt:       float = 0.066,
+        max_step: float = _DEFAULT_MAX_STEP,
+        verbose:  bool  = True,
+        **ruckig_kwargs,
+    ):
+        super().__init__(max_step=max_step, verbose=verbose)
+        from crisp_drl.motion_planning.trajectory_planner import RuckigFollower
+        self._ruckig = RuckigFollower(dt=dt, verbose=False, **ruckig_kwargs)
+
+    def go_to_waypoint_3d(self, env, obs, target_xyz, distance_err: float = 0.002):
+        """Jerk-limited 3D move via RuckigFollower.follow_3d()."""
+        return self._ruckig.follow_3d(
+            env, obs, np.asarray(target_xyz, dtype=float), tol=distance_err
+        )

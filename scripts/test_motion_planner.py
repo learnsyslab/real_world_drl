@@ -47,6 +47,8 @@ def make_planner_env(
     sac_config: Config = None,
     approach_distance: float = None,
     wrapper: str = "sim",
+    use_ruckig: bool = False,
+    lego_waypoints=None,
 ) -> tuple:
     """Return (env, insertion_wrapper).
 
@@ -79,10 +81,11 @@ def make_planner_env(
         # NOTE: do NOT add a waypoint near Z≈0.12 — the LEGO brick collides with
         # the socket surface before the TCP can reach that Z, causing the planner
         # to loop forever. Let phase ⑧ handle all Z motion near contact.
-        lego_waypoints = [
-            CartesianWaypoint([0.6, 0.0, 0.25], distance_err=0.005),  # transit height
-            CartesianWaypoint([0.6, 0.0, 0.17], distance_err=0.003),  # above socket
-        ]
+        if lego_waypoints is None:
+            lego_waypoints = [
+                CartesianWaypoint([0.6, 0.0, 0.25], distance_err=0.005),  # transit height
+                CartesianWaypoint([0.6, 0.0, 0.17], distance_err=0.003),  # above socket
+            ]
 
         insertion_wrapper = InsertionWrapperSimLEGO(
             env,
@@ -108,6 +111,7 @@ def make_planner_env(
             grasp_randomisation_mode="box",
             approach_distance=approach_distance if approach_distance is not None else 2 * pe_accuracy,
             waypoints_before_insertion=lego_waypoints,
+            use_ruckig=use_ruckig,
         )
     else:
         insertion_wrapper = InsertionWrapperSim(
@@ -255,6 +259,10 @@ def main():
         "--wrapper", choices=["sim", "lego"], default="sim",
         help="sim=InsertionWrapperSim (original), lego=InsertionWrapperSimLEGO (Siemens-style)"
     )
+    parser.add_argument(
+        "--use_ruckig", action="store_true",
+        help="Use RuckigFollower for jerk-limited XY approach in InsertionWrapperSimLEGO reset()"
+    )
     parser.add_argument("--n_episodes", type=int, default=100)
     parser.add_argument("--pe_accuracy", type=float, default=0.0015,
                         help="Pose estimation accuracy [m], controls randomisation range")
@@ -317,6 +325,7 @@ def main():
         pe_accuracy=args.pe_accuracy,
         approach_distance=args.approach_distance,
         wrapper=args.wrapper,
+        use_ruckig=args.use_ruckig,
     )
 
     if args.start_xy or args.goal_xy:
