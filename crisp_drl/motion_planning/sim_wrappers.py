@@ -349,6 +349,7 @@ class InsertionWrapperSimLEGO(Wrapper):
         is_eval=False,
         waypoints_before_insertion: Optional[List[CartesianWaypoint]] = None,
         use_ruckig: bool = False,
+        use_poly7:  bool = False,
     ):
         super().__init__(env)
         self.config = config
@@ -384,9 +385,16 @@ class InsertionWrapperSimLEGO(Wrapper):
             from crisp_drl.motion_planning.free_space_planner import RuckigFreeSpacePlanner
             self._ruckig = RuckigFollower(dt=0.066, verbose=False)
             self._free_space_planner = RuckigFreeSpacePlanner(dt=0.066, verbose=True)
+        # Poly7 free-space (optional) — 7th-order polynomial, zero jerk at endpoints
+        if use_poly7:
+            from crisp_drl.motion_planning.free_space_planner import Poly7FreeSpacePlanner
+            from crisp_drl.motion_planning.trajectory_planner import Poly7Planner, TrajectoryFollower
+            self._free_space_planner = Poly7FreeSpacePlanner(a_limit=2.0, verbose=True)
+            self._poly7_planner  = Poly7Planner(a_limit=2.0)
+            self._poly7_follower = TrajectoryFollower(max_step=0.001, verbose=False)
         print("[InsertionWrapperSimLEGO] Eval mode:", is_eval)
         print(f"[InsertionWrapperSimLEGO] approach_distance: {approach_distance*1000:.1f} mm")
-        print(f"[InsertionWrapperSimLEGO] use_ruckig: {use_ruckig}")
+        print(f"[InsertionWrapperSimLEGO] use_ruckig: {use_ruckig}  use_poly7: {use_poly7}")
         if waypoints_before_insertion:
             print(f"[InsertionWrapperSimLEGO] Free-space waypoints: {len(waypoints_before_insertion)}")
 

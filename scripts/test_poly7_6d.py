@@ -1,9 +1,9 @@
 """Test harness for Poly7Planner6D on the raw MuJoCo environment.
 
-Runs N trials: reset to start pose → (optionally move to a random start) →
-plan 6D trajectory to goal → follow it → report position and orientation error.
-
-No insertion wrapper needed — tests pure free-space 6D motion.
+Three modes:
+  3d        Free-space 3D position move (Poly7Planner)
+  6d        Free-space 6D position+orientation move (Poly7Planner6D)
+  pipeline  Full 10-phase LEGO insertion cycle driven by Poly7Planner
 
 Usage
 -----
@@ -23,25 +23,31 @@ Usage
     MUJOCO_GL=egl pixi run -e sim python scripts/test_poly7_6d.py --randomize --mode 3d
     MUJOCO_GL=egl pixi run -e sim python scripts/test_poly7_6d.py --randomize --mode 6d
 
-    # Watch in the viewer:
-    MUJOCO_GL=egl pixi run -e sim python scripts/test_poly7_6d.py --randomize --live_view
+    # Full Poly7-driven pipeline (10 phases):
+    MUJOCO_GL=glfw pixi run -e sim python scripts/test_poly7_6d.py --mode pipeline --n_trials 3 --live_view
+    MUJOCO_GL=egl  pixi run -e sim python scripts/test_poly7_6d.py --mode pipeline --n_trials 20 --seed 42
 """
 
 import argparse
 import sys
 import os
+import time
 
 import numpy as np
 from scipy.spatial.transform import Rotation
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))   # for test_motion_planner import
 
 import mujid.env.env as mujid_env
+from crisp_drl.motion_planning.free_space_planner import CartesianWaypoint
+from crisp_drl.motion_planning.planners import GoToGoalPlanner
 from crisp_drl.motion_planning.trajectory_planner import (
     Poly7Planner,
     Poly7Planner6D,
     TrajectoryFollower,
 )
+from test_motion_planner import make_planner_env
 
 
 # ---------------------------------------------------------------------------
@@ -216,14 +222,128 @@ def print_stats(results: list, mode: str):
 # Main
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Mode: pipeline — full 10-phase LEGO insertion cycle via Poly7Planner
+# ---------------------------------------------------------------------------
+
+def mode_pipeline(args):
+    """Full 10-phase LEGO insertion pipeline driven by Poly7Planner.
+
+    Phases ①-⑥ (free-space) use Poly7FreeSpacePlanner via InsertionWrapperSimLEGO.
+    Phase ⑦ (XY align) uses the P-controller go_to_waypoint().
+    Phase ⑧ (Z contact) uses the impedance controller loop.
+    Phase ⑨ (RL insertion) uses GoToGoalPlanner.
+    Phase ⑩ (return home) uses Poly7Planner directly, no teleport.
+    """
+    grasp_xy = np.asarray(args.grasp_xy, dtype=float)
+
+    pipeline_waypoints = [
+        CartesianWaypoint([grasp_xy[0], grasp_xy[1], 0.28], distance_err=0.005),  # ② above A
+        CartesianWaypoint([grasp_xy[0], grasp_xy[1], 0.16], distance_err=0.003),  # ③ grasp
+        CartesianWaypoint([grasp_xy[0], grasp_xy[1], 0.28], distance_err=0.005),  # ④ lift
+        CartesianWaypoint([0.60, 0.00, 0.28],               distance_err=0.005),  # ⑤ transit
+        CartesianWaypoint([0.60, 0.00, 0.17],               distance_err=0.003),  # ⑥ above socket
+    ]
+
+    env, wrapper = make_planner_env(
+        live_view=args.live_view,
+        wrapper="lego",
+        use_poly7=True,
+        approach_distance=0.003,
+        lego_waypoints=pipeline_waypoints,
+    )
+
+    print(f"\nPipeline waypoints (Poly7Planner):")
+    print(f"  ① home: keyframe-1 (env.reset())")
+    labels = ["② above A", "③ grasp", "④ lift", "⑤ transit", "⑥ above socket"]
+    for i, wp in enumerate(pipeline_waypoints):
+        print(f"  {labels[i]}: {wp.position_xyz.round(4)}  (tol={wp.distance_err*1000:.1f}mm)")
+    print(f"  ⑦ XY align → goal  (go_to_waypoint P-ctrl, tol={wrapper.approach_distance*1000:.1f}mm)")
+    print(f"  ⑧ Z contact  (impedance ctrl)")
+    print(f"  ⑨ RL insertion  (GoToGoalPlanner, {wrapper.step_limit} steps max)")
+    print(f"  ⑩ Return home  (Poly7Planner, reverse path)")
+    print()
+
+    results = []
+    planner = GoToGoalPlanner()
+
+    for i in range(args.n_trials):
+        print(f"── Trial {i+1}/{args.n_trials} ──────────────────────")
+        t0 = time.time()
+        obs, _ = env.reset()          # phases ①-⑧
+        t_reset = time.time() - t0
+        print(f"  Reset (phases ①-⑧): {t_reset:.1f}s")
+
+        # Phase ⑨: GoToGoal insertion
+        true_goal = wrapper.goal_position_ground_truth + wrapper.grasp_position
+        planner.reset(true_goal)
+        t_rl = time.time()
+        done = False
+        while not done:
+            action = planner.plan(obs)
+            obs, _, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
+        t_rl = time.time() - t_rl
+
+        events = info.get("custom_events", [])
+        last_reason = events[-1][1] if events else None
+        success = last_reason == "E_SUCCESS"
+        status = "SUCCESS" if success else f"FAIL ({last_reason or '?'})"
+        print(f"  RL (phase ⑨): {t_rl:.1f}s  {wrapper.n_steps} steps  → {status}")
+
+        # Phase ⑩: return home via Poly7 (no teleport)
+        t_home = time.time()
+        return_waypoints_xyz = [
+            np.array([0.60, 0.00, 0.17]),
+            np.array([0.60, 0.00, 0.28]),
+            np.array([grasp_xy[0], grasp_xy[1], 0.28]),
+            wrapper.home_xyz,
+        ]
+        for wp_xyz in return_waypoints_xyz:
+            wps = wrapper._poly7_planner.plan(
+                obs["observation.state.cartesian"][:3], wp_xyz
+            )
+            obs, _ = wrapper._poly7_follower.follow_sampled(wrapper.env, obs, wps)
+        t_home = time.time() - t_home
+        home_err_mm = float(np.linalg.norm(
+            obs["observation.state.cartesian"][:3] - wrapper.home_xyz
+        )) * 1000
+        print(f"  Return home (⑩): {t_home:.1f}s  home_err={home_err_mm:.1f}mm")
+
+        results.append({
+            "success":    success,
+            "reset_time": t_reset,
+            "rl_time":    t_rl,
+            "home_time":  t_home,
+            "rl_steps":   wrapper.n_steps,
+        })
+
+    n = len(results)
+    sr = sum(r["success"] for r in results) / n
+    print(f"\n{'='*60}")
+    print(f"Mode: pipeline / Poly7Planner  ({n} trials)")
+    print(f"Success rate  : {sr:.0%}  ({sum(r['success'] for r in results)}/{n})")
+    print(f"Reset time    : mean={np.mean([r['reset_time'] for r in results]):.1f}s  (phases ①-⑧)")
+    print(f"RL steps      : mean={np.mean([r['rl_steps']   for r in results]):.0f}  "
+          f"time={np.mean([r['rl_time'] for r in results]):.1f}s  (phase ⑨)")
+    print(f"Return home   : mean={np.mean([r['home_time']  for r in results]):.1f}s  (phase ⑩)")
+    print(f"Total/episode : mean={np.mean([r['reset_time']+r['rl_time']+r['home_time'] for r in results]):.1f}s")
+    print(f"{'='*60}\n")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--n_trials",  type=int,  default=5)
     parser.add_argument("--live_view", action="store_true")
     parser.add_argument("--verbose",   action="store_true")
     parser.add_argument(
-        "--mode", choices=["3d", "6d"], default="6d",
-        help="3d=Poly7Planner (position only), 6d=Poly7Planner6D (pos+rot)"
+        "--mode", choices=["3d", "6d", "pipeline"], default="6d",
+        help="3d=Poly7Planner (position only), 6d=Poly7Planner6D (pos+rot), "
+             "pipeline=full 10-phase LEGO insertion cycle"
+    )
+    parser.add_argument(
+        "--grasp_xy", nargs=2, type=float, metavar=("X", "Y"), default=[0.50, -0.15],
+        help="Simulated LEGO pickup XY position [m] (pipeline mode). Default: 0.50 -0.15"
     )
 
     # ── Fixed-offset mode ──────────────────────────────────────────────────────
@@ -267,6 +387,10 @@ def main():
 
     if args.seed is not None:
         np.random.seed(args.seed)
+
+    if args.mode == "pipeline":
+        mode_pipeline(args)
+        return
 
     print(f"Mode             : {'Poly7Planner6D' if args.mode == '6d' else 'Poly7Planner (3D)'}")
     print(f"Trials           : {args.n_trials}")

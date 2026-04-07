@@ -224,3 +224,32 @@ class RuckigFreeSpacePlanner(FreeSpaceMotionPlanner):
         return self._ruckig.follow_3d(
             env, obs, np.asarray(target_xyz, dtype=float), tol=distance_err
         )
+
+
+class Poly7FreeSpacePlanner(FreeSpaceMotionPlanner):
+    """Drop-in replacement using Poly7Planner + TrajectoryFollower for each waypoint.
+
+    Produces 7th-order polynomial (zero jerk at endpoints) motions instead of
+    the constant-step P-controller. Comparable to RuckigFreeSpacePlanner but
+    uses pre-planned waypoints rather than online generation.
+    """
+
+    def __init__(
+        self,
+        a_limit:  float = 2.0,
+        max_step: float = _DEFAULT_MAX_STEP,
+        verbose:  bool  = True,
+    ):
+        super().__init__(max_step=max_step, verbose=verbose)
+        from crisp_drl.motion_planning.trajectory_planner import Poly7Planner, TrajectoryFollower
+        self._planner  = Poly7Planner(a_limit=a_limit)
+        self._follower = TrajectoryFollower(max_step=max_step, verbose=False)
+
+    def go_to_waypoint_3d(self, env, obs, target_xyz, distance_err: float = 0.002):
+        """7th-order polynomial 3D move via Poly7Planner + TrajectoryFollower."""
+        waypoints = self._planner.plan(
+            obs["observation.state.cartesian"][:3],
+            np.asarray(target_xyz, dtype=float),
+        )
+        obs, _ = self._follower.follow_sampled(env, obs, waypoints)
+        return obs
