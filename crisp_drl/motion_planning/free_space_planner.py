@@ -32,7 +32,7 @@ _DEFAULT_MAX_STEP = 0.001   # m — matches InsertionWrapperSimLEGO _APPROACH_MA
 
 @dataclass
 class CartesianWaypoint:
-    """A single 3D Cartesian target with approach tolerance.
+    """A single Cartesian target with approach tolerance.
 
     Parameters
     ----------
@@ -40,12 +40,19 @@ class CartesianWaypoint:
         Target TCP position in world frame [x, y, z] metres.
     distance_err : float
         Approach is considered reached when Euclidean distance ≤ this value [m].
+    orientation_aa : array-like (3,) or None
+        Target orientation as axis-angle [rad] (same encoding as
+        obs["observation.state.cartesian"][3:6]). None = 3D position only
+        (existing behaviour, all callers unaffected).
     """
-    position_xyz: np.ndarray
-    distance_err: float = 0.002
+    position_xyz:   np.ndarray
+    distance_err:   float = 0.002
+    orientation_aa: np.ndarray = None  # axis-angle [rad]; None = 3D only
 
     def __post_init__(self):
         self.position_xyz = np.asarray(self.position_xyz, dtype=float)
+        if self.orientation_aa is not None:
+            self.orientation_aa = np.asarray(self.orientation_aa, dtype=float)
 
 
 class FreeSpaceMotionPlanner:
@@ -224,6 +231,39 @@ class RuckigFreeSpacePlanner(FreeSpaceMotionPlanner):
         return self._ruckig.follow_3d(
             env, obs, np.asarray(target_xyz, dtype=float), tol=distance_err
         )
+
+
+class Ruckig6DFreeSpacePlanner(RuckigFreeSpacePlanner):
+    """Ruckig planner that handles mixed 3D / 6D (position + orientation) waypoints.
+
+    Overrides execute() to dispatch per-waypoint:
+      - orientation_aa is None  → RuckigFollower.follow_3d()  (position only)
+      - orientation_aa set      → RuckigFollower.follow_6d()  (position + orientation)
+
+    Inherits __init__ from RuckigFreeSpacePlanner (same dt/velocity/jerk params).
+    go_to_waypoint_3d() is inherited but unused — execute() is fully overridden.
+    """
+
+    def execute(self, env, obs, waypoints):
+        for i, wp in enumerate(waypoints):
+            if self.verbose:
+                mode = "6d" if wp.orientation_aa is not None else "3d"
+                print(
+                    f"[Ruckig6DFreeSpacePlanner] Waypoint {i+1}/{len(waypoints)} "
+                    f"({mode}): {wp.position_xyz} (err<{wp.distance_err*1000:.1f}mm)"
+                )
+            if wp.orientation_aa is not None:
+                obs = self._ruckig.follow_6d(
+                    env, obs,
+                    wp.position_xyz,
+                    wp.orientation_aa,
+                    tol=wp.distance_err,
+                )
+            else:
+                obs = self._ruckig.follow_3d(
+                    env, obs, wp.position_xyz, tol=wp.distance_err,
+                )
+        return obs
 
 
 class Poly7FreeSpacePlanner(FreeSpaceMotionPlanner):

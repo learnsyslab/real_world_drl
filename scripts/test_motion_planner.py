@@ -47,8 +47,9 @@ def make_planner_env(
     sac_config: Config = None,
     approach_distance: float = None,
     wrapper: str = "sim",
-    use_ruckig: bool = False,
-    use_poly7:  bool = False,
+    use_ruckig:    bool = False,
+    use_ruckig_6d: bool = False,
+    use_poly7:     bool = False,
     lego_waypoints=None,
 ) -> tuple:
     """Return (env, insertion_wrapper).
@@ -113,6 +114,7 @@ def make_planner_env(
             approach_distance=approach_distance if approach_distance is not None else 2 * pe_accuracy,
             waypoints_before_insertion=lego_waypoints,
             use_ruckig=use_ruckig,
+            use_ruckig_6d=use_ruckig_6d,
             use_poly7=use_poly7,
         )
     else:
@@ -266,6 +268,10 @@ def main():
         help="Use RuckigFollower for jerk-limited XY approach in InsertionWrapperSimLEGO reset()"
     )
     parser.add_argument(
+        "--use_ruckig_6d", action="store_true",
+        help="Use Ruckig6DFreeSpacePlanner (position+orientation) for free-space approach"
+    )
+    parser.add_argument(
         "--use_poly7", action="store_true",
         help="Use Poly7Planner for 7th-order polynomial free-space approach in InsertionWrapperSimLEGO reset()"
     )
@@ -332,6 +338,7 @@ def main():
         approach_distance=args.approach_distance,
         wrapper=args.wrapper,
         use_ruckig=args.use_ruckig,
+        use_ruckig_6d=args.use_ruckig_6d,
         use_poly7=args.use_poly7,
     )
 

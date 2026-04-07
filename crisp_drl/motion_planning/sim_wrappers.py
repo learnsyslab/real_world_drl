@@ -348,8 +348,9 @@ class InsertionWrapperSimLEGO(Wrapper):
         contact_max_steps=500,            # safety bound for contact establishment loop
         is_eval=False,
         waypoints_before_insertion: Optional[List[CartesianWaypoint]] = None,
-        use_ruckig: bool = False,
-        use_poly7:  bool = False,
+        use_ruckig:    bool = False,
+        use_ruckig_6d: bool = False,
+        use_poly7:     bool = False,
     ):
         super().__init__(env)
         self.config = config
@@ -377,14 +378,21 @@ class InsertionWrapperSimLEGO(Wrapper):
         self.grasp_position = np.zeros(3)
         self.goal_position  = np.zeros(3)
         self.start_position = np.zeros(3)
-        self.home_xyz       = np.zeros(3)  # TCP at keyframe home (set in reset)
-        # Ruckig XY approach + free-space (optional)
+        self.home_xyz       = np.zeros(3)  # TCP position at keyframe home (set in reset)
+        self.home_aa        = np.zeros(3)  # TCP orientation at keyframe home (set in reset)
+        # Ruckig 3D XY approach + free-space (optional)
         self._use_ruckig = use_ruckig
         if use_ruckig:
             from crisp_drl.motion_planning.trajectory_planner import RuckigFollower
             from crisp_drl.motion_planning.free_space_planner import RuckigFreeSpacePlanner
             self._ruckig = RuckigFollower(dt=0.066, verbose=False)
             self._free_space_planner = RuckigFreeSpacePlanner(dt=0.066, verbose=True)
+        # Ruckig 6D free-space — position + orientation per waypoint (optional)
+        if use_ruckig_6d:
+            from crisp_drl.motion_planning.trajectory_planner import RuckigFollower
+            from crisp_drl.motion_planning.free_space_planner import Ruckig6DFreeSpacePlanner
+            self._ruckig = RuckigFollower(dt=0.066, verbose=False)
+            self._free_space_planner = Ruckig6DFreeSpacePlanner(dt=0.066, verbose=True)
         # Poly7 free-space (optional) — 7th-order polynomial, zero jerk at endpoints
         if use_poly7:
             from crisp_drl.motion_planning.free_space_planner import Poly7FreeSpacePlanner
@@ -394,7 +402,7 @@ class InsertionWrapperSimLEGO(Wrapper):
             self._poly7_follower = TrajectoryFollower(max_step=0.001, verbose=False)
         print("[InsertionWrapperSimLEGO] Eval mode:", is_eval)
         print(f"[InsertionWrapperSimLEGO] approach_distance: {approach_distance*1000:.1f} mm")
-        print(f"[InsertionWrapperSimLEGO] use_ruckig: {use_ruckig}  use_poly7: {use_poly7}")
+        print(f"[InsertionWrapperSimLEGO] use_ruckig: {use_ruckig}  use_ruckig_6d: {use_ruckig_6d}  use_poly7: {use_poly7}")
         if waypoints_before_insertion:
             print(f"[InsertionWrapperSimLEGO] Free-space waypoints: {len(waypoints_before_insertion)}")
 
@@ -523,6 +531,7 @@ class InsertionWrapperSimLEGO(Wrapper):
         self.n_steps = 0
         # Store home TCP so callers can drive back here after insertion.
         self.home_xyz = self.obs["observation.state.cartesian"][:3].copy()
+        self.home_aa  = self.obs["observation.state.cartesian"][3:6].copy()
         tcp_xyz = self.home_xyz
         print(f"[InsertionWrapperSimLEGO] TCP after reset: xyz={tcp_xyz.round(4)}")
 

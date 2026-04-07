@@ -259,49 +259,65 @@ def mode_streaming(args):
 # ---------------------------------------------------------------------------
 
 def mode_pipeline(args):
-    """Run the complete 9-phase LEGO insertion pipeline.
+    """Run the complete 10-phase LEGO insertion pipeline.
 
-    Phases ①-⑥ (free-space motion) are driven by RuckigFreeSpacePlanner via
-    InsertionWrapperSimLEGO's waypoints_before_insertion.
+    Phases ①-⑥ (free-space motion) are driven by RuckigFreeSpacePlanner (3D) or
+    Ruckig6DFreeSpacePlanner (6D, --use_6d) via waypoints_before_insertion.
     Phase ⑦ (XY alignment) uses RuckigFollower.follow_xy.
     Phase ⑧ (Z contact) uses the impedance controller loop.
     Phase ⑨ (RL insertion) uses GoToGoalPlanner as a deterministic baseline.
+    Phase ⑩ (return home) uses follow_3d or follow_6d (--use_6d).
 
     Simulated LEGO pickup position (A): configurable via --grasp_xy.
+    When --use_6d: orientation is read from home pose after first reset and
+    propagated to all waypoints (constant orientation throughout).
     """
+    use_6d   = args.use_6d
     grasp_xy = np.asarray(args.grasp_xy, dtype=float)
 
-    # ── Step 2: define pipeline waypoints (phases ②-⑥) ─────────────────────
-    # Phase ① is initial_keyframe=1 in env.reset() — robot starts at true home joints.
-    # No waypoint needed for home; InsertionWrapperSimLEGO now uses keyframe directly.
-    pipeline_waypoints = [
-        CartesianWaypoint([grasp_xy[0], grasp_xy[1], 0.28], distance_err=0.005),  # ② above A
-        CartesianWaypoint([grasp_xy[0], grasp_xy[1], 0.12], distance_err=0.003),  # ③ grasp height
-        CartesianWaypoint([grasp_xy[0], grasp_xy[1], 0.28], distance_err=0.005),  # ④ lift
-        CartesianWaypoint([0.60, 0.00, 0.28],               distance_err=0.005),  # ⑤ transit
-        CartesianWaypoint([0.60, 0.00, 0.17],               distance_err=0.003),  # ⑥ above socket
-    ]
+    # Build initial 3D waypoints (orientation_aa=None); if --use_6d, these will
+    # be replaced with 6D versions after the first reset reads home_aa.
+    def _make_waypoints(orientation_aa=None):
+        return [
+            CartesianWaypoint([grasp_xy[0], grasp_xy[1], 0.28], distance_err=0.005, orientation_aa=orientation_aa),  # ② above A
+            CartesianWaypoint([grasp_xy[0], grasp_xy[1], 0.16], distance_err=0.003, orientation_aa=orientation_aa),  # ③ grasp height
+            CartesianWaypoint([grasp_xy[0], grasp_xy[1], 0.28], distance_err=0.005, orientation_aa=orientation_aa),  # ④ lift
+            CartesianWaypoint([0.60, 0.00, 0.28],               distance_err=0.005, orientation_aa=orientation_aa),  # ⑤ transit
+            CartesianWaypoint([0.60, 0.00, 0.17],               distance_err=0.003, orientation_aa=orientation_aa),  # ⑥ above socket
+        ]
 
-    # ── Step 3: build full env stack with use_ruckig=True ───────────────────
+    # Build env — use_ruckig_6d activates Ruckig6DFreeSpacePlanner
     env, wrapper = make_planner_env(
         live_view=args.live_view,
         wrapper="lego",
-        use_ruckig=True,
+        use_ruckig=(not use_6d),
+        use_ruckig_6d=use_6d,
         approach_distance=0.003,
-        lego_waypoints=pipeline_waypoints,
+        lego_waypoints=_make_waypoints(),   # 3D for now; patched below if --use_6d
     )
 
-    # ── Step 4: run N episodes ───────────────────────────────────────────────
-    print(f"\nPipeline waypoints:")
+    # One dry reset to read home_aa (needed only for --use_6d waypoint construction)
+    obs, _ = env.reset()
+    home_aa = wrapper.home_aa.copy()
+
+    if use_6d:
+        # Patch waypoints with home orientation so Ruckig6DFreeSpacePlanner
+        # tracks both position and orientation on every waypoint.
+        wrapper.waypoints_before_insertion = _make_waypoints(orientation_aa=home_aa)
+
+    mode_label = "Ruckig 6D (pos+ori)" if use_6d else "Ruckig 3D (pos only)"
+    return_label = "Ruckig.follow_6d" if use_6d else "Ruckig.follow_3d"
+
+    print(f"\nPipeline mode: {mode_label}")
     print(f"  ① home: keyframe-1 (env.reset() — true joint config)")
-    for i, wp in enumerate(pipeline_waypoints):
-        labels = ["② above A", "③ grasp", "④ lift", "⑤ transit", "⑥ above socket"]
-        print(f"  {labels[i]}: {wp.position_xyz.round(4)}  (tol={wp.distance_err*1000:.1f}mm)")
+    labels = ["② above A", "③ grasp", "④ lift", "⑤ transit", "⑥ above socket"]
+    for i, wp in enumerate(wrapper.waypoints_before_insertion):
+        ori_str = f"  ori={np.degrees(wp.orientation_aa).round(1)}°" if wp.orientation_aa is not None else ""
+        print(f"  {labels[i]}: {wp.position_xyz.round(4)}  (tol={wp.distance_err*1000:.1f}mm){ori_str}")
     print(f"  ⑦ XY align → goal  (Ruckig.follow_xy, tol={wrapper.approach_distance*1000:.1f}mm)")
     print(f"  ⑧ Z contact  (impedance ctrl)")
     print(f"  ⑨ RL insertion  (GoToGoalPlanner, {wrapper.step_limit} steps max)")
-    print(f"  ⑩ Return home  (Ruckig.follow_3d, reverse path)")
-    print()
+    print(f"  ⑩ Return home  ({return_label}, reverse path)")
     print()
 
     results = []
@@ -310,44 +326,47 @@ def mode_pipeline(args):
     for i in range(args.n_trials):
         print(f"── Trial {i+1}/{args.n_trials} ──────────────────────")
         t0 = time.time()
-        obs, _ = env.reset()        # drives phases ①-⑧
+        # From trial 2 onward, reset() picks up the (possibly patched) waypoints.
+        # Trial 1 already ran above as the dry reset; reuse its obs.
+        if i > 0:
+            obs, _ = env.reset()
         t_reset = time.time() - t0
         print(f"  Reset (phases ①-⑧): {t_reset:.1f}s")
 
         # Phase ⑨: GoToGoal insertion
-        # GoToGoalPlanner needs reset(goal) to set its internal goal_xy
         true_goal = wrapper.goal_position_ground_truth + wrapper.grasp_position
         planner.reset(true_goal)
         t_rl = time.time()
         done = False
         while not done:
             action = planner.plan(obs)
-            obs, _reward, terminated, truncated, info = env.step(action)
+            obs, _, terminated, truncated, info = env.step(action)
             done = terminated or truncated
-
         t_rl = time.time() - t_rl
-        # CustomTerminationWrapper stores events as info["custom_events"] = [(t, reason), ...]
+
         events = info.get("custom_events", [])
         last_reason = events[-1][1] if events else None
         success = last_reason == "E_SUCCESS"
         status = "SUCCESS" if success else f"FAIL ({last_reason or '?'})"
         print(f"  RL (phase ⑨): {t_rl:.1f}s  {wrapper.n_steps} steps  → {status}")
 
-        # Phase ⑩: return to home — reverse path via Ruckig, no teleport.
-        # Uses wrapper.env (LastObservationWrapper) to send 6D free-space actions,
-        # bypassing InsertionWrapperSimLEGO's 2-DOF step() interface.
+        # Phase ⑩: return to home — reverse path, no teleport
         t_home = time.time()
-        return_waypoints = [
-            np.array([0.60, 0.00, 0.17]),                # lift out of socket
-            np.array([0.60, 0.00, 0.28]),                # transit height
-            np.array([grasp_xy[0], grasp_xy[1], 0.28]),  # above A
-            wrapper.home_xyz,                            # keyframe-1 home
+        return_wps = [
+            (np.array([0.60, 0.00, 0.17]), home_aa),
+            (np.array([0.60, 0.00, 0.28]), home_aa),
+            (np.array([grasp_xy[0], grasp_xy[1], 0.28]), home_aa),
+            (wrapper.home_xyz, wrapper.home_aa),
         ]
-        for wp_xyz in return_waypoints:
-            obs = wrapper._ruckig.follow_3d(wrapper.env, obs, wp_xyz, tol=0.005)
+        for wp_xyz, wp_aa in return_wps:
+            if use_6d:
+                obs = wrapper._ruckig.follow_6d(wrapper.env, obs, wp_xyz, wp_aa, tol=0.005)
+            else:
+                obs = wrapper._ruckig.follow_3d(wrapper.env, obs, wp_xyz, tol=0.005)
         t_home = time.time() - t_home
-        final_xyz = obs["observation.state.cartesian"][:3]
-        home_err_mm = float(np.linalg.norm(final_xyz - wrapper.home_xyz)) * 1000
+        home_err_mm = float(np.linalg.norm(
+            obs["observation.state.cartesian"][:3] - wrapper.home_xyz
+        )) * 1000
         print(f"  Return home (⑩): {t_home:.1f}s  home_err={home_err_mm:.1f}mm")
 
         results.append({
@@ -367,7 +386,7 @@ def mode_pipeline(args):
     avg_home  = np.mean([r["home_time"]  for r in results])
 
     print(f"\n{'='*60}")
-    print(f"Mode: pipeline  ({n} trials)")
+    print(f"Mode: pipeline / {mode_label}  ({n} trials)")
     print(f"Success rate  : {sr:.0%}  ({sum(r['success'] for r in results)}/{n})")
     print(f"Reset time    : mean={avg_reset:.1f}s  (phases ①-⑧)")
     print(f"RL steps      : mean={avg_steps:.0f}  time={avg_rl:.1f}s  (phase ⑨)")
@@ -398,6 +417,12 @@ def main():
         "--grasp_xy", nargs=2, type=float, metavar=("X", "Y"), default=[0.50, -0.15],
         help="Simulated LEGO brick pickup XY position [m] (pipeline mode). Default: 0.50 -0.15"
     )
+    parser.add_argument(
+        "--use_6d", action="store_true",
+        help="Pipeline mode: use Ruckig6DFreeSpacePlanner so waypoints track both "
+             "position and orientation (follow_6d). Home orientation is propagated "
+             "to all waypoints. Default: 3D position only."
+    )
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -410,6 +435,7 @@ def main():
     elif args.mode == "pipeline":
         print(f"Trials   : {args.n_trials}")
         print(f"Grasp XY : {args.grasp_xy}")
+        print(f"6D mode  : {args.use_6d}")
     print()
 
     if args.mode in ("3d", "6d"):
