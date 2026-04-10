@@ -997,8 +997,12 @@ class RuckigFollower:
         for step_i in range(max_steps):
             res = self._otg3.update(self._inp3, self._out3)
 
-            actual_pos = obs["observation.state.cartesian"][:3]
-            delta_pos  = np.array(self._out3.new_position) - actual_pos
+            # Use impedance TARGET position (not actual) for delta so that
+            # new_impedance_target = old_target + (ruckig_next - old_target) = ruckig_next
+            # exactly, regardless of tracking error. Using actual_pos instead would
+            # accumulate drift on real hardware where the arm lags the target.
+            target_pos = obs["observation.state.target"][:3]
+            delta_pos  = np.array(self._out3.new_position) - target_pos
 
             action       = np.zeros(6)
             action[:3]   = delta_pos
@@ -1041,15 +1045,15 @@ class RuckigFollower:
         for step_i in range(max_steps):
             res = self._otg6.update(self._inp6, self._out6)
 
-            actual    = obs["observation.state.cartesian"]
-            actual_pos = actual[:3]
-            actual_aa  = actual[3:6]
+            # Use impedance TARGET (not actual) for position delta — same fix as follow_3d.
+            target_state = obs["observation.state.target"]
+            actual_aa    = obs["observation.state.cartesian"][3:6]
 
-            # Position delta
-            target_pos = np.array(self._out6.new_position[:3])
-            delta_pos  = target_pos - actual_pos
+            # Position delta: ruckig_next - impedance_target → sets target to ruckig_next exactly
+            ruckig_pos = np.array(self._out6.new_position[:3])
+            delta_pos  = ruckig_pos - target_state[:3]
 
-            # Orientation delta — SO(3), not additive
+            # Orientation delta — SO(3), not additive (actual orientation used here, correct)
             target_aa = np.array(self._out6.new_position[3:6])
             R_current = Rotation.from_rotvec(actual_aa)
             R_target  = Rotation.from_rotvec(target_aa)
@@ -1107,10 +1111,14 @@ class RuckigFollower:
 
             res = self._otg6.update(self._inp6, self._out6)
 
-            actual    = obs["observation.state.cartesian"]
-            delta_pos = np.array(self._out6.new_position[:3]) - actual[:3]
-            target_aa = np.array(self._out6.new_position[3:6])
-            R_current = Rotation.from_rotvec(actual[3:6])
+            # Use impedance TARGET (not actual) for position delta — prevents
+            # accumulating drift when the impedance controller lags behind actual.
+            target_state = obs["observation.state.target"]
+            actual_aa    = obs["observation.state.cartesian"][3:6]
+            ruckig_pos   = np.array(self._out6.new_position[:3])
+            delta_pos    = ruckig_pos - target_state[:3]
+            target_aa    = np.array(self._out6.new_position[3:6])
+            R_current = Rotation.from_rotvec(actual_aa)
             R_target  = Rotation.from_rotvec(target_aa)
             delta_rot = (R_current.inv() * R_target).as_rotvec()
 
