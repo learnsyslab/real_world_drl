@@ -411,19 +411,29 @@ class InsertionWrapperSimLEGO(Wrapper):
     # ------------------------------------------------------------------
 
     def go_to_waypoint(self, obs, target_xy, distance_err=0.002):
-        """GoToGoal approach to target_xy. Does not count toward n_steps.
+        """XY approach to target_xy. Does not count toward n_steps.
 
         Sim equivalent of go_to_waypoint() in InsertionWrapperSiemens.
-        Coarse phase only — no fine settling needed in MuJoCo.
         Z is held fixed throughout (no pressing during approach).
 
-        When use_ruckig=True, delegates to RuckigFollower.follow_xy() for
-        jerk-limited online trajectory generation instead of the constant-step loop.
+        Priority order:
+          1. use_ruckig / use_ruckig_6d → MujidEnv.plan_and_execute() (encapsulated,
+             no delta-conversion drift, supervisor-recommended approach)
+          2. Fallback P-controller step loop (no external deps, always works)
         """
         if self._use_ruckig:
-            obs = self._ruckig.follow_xy(
-                self.env, obs, target_xy, distance_err=distance_err
-            )
+            target_xy = np.asarray(target_xy, dtype=float)
+            current_z = obs["observation.state.cartesian"][2]
+            goal_xyz  = np.array([target_xy[0], target_xy[1], current_z])
+            # Unwrap to raw MujidEnv: InsertionWrapperSimLEGO.env = LastObservationWrapper
+            # LastObservationWrapper.env = ActionTimeStampWrapper
+            # ActionTimeStampWrapper.env = MujidEnv
+            raw_env = self.env.env.env
+            raw_env.plan_and_execute(goal_xyz, tol=distance_err)
+            # plan_and_execute returns raw MujidEnv obs (no derived keys).
+            # Take one zero-step through the full wrapper chain so that
+            # LastObservationWrapper adds observation.error.cartesian etc.
+            obs, _, _, _, _ = self.env.step(np.zeros(6))
             obs = self.add_perfect_action_to_obs(obs)
             return obs
 

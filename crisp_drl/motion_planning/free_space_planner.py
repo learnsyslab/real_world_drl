@@ -293,3 +293,36 @@ class Poly7FreeSpacePlanner(FreeSpaceMotionPlanner):
         )
         obs, _ = self._follower.follow_sampled(env, obs, waypoints)
         return obs
+
+
+class MujidPlanAndExecutePlanner(FreeSpaceMotionPlanner):
+    """Drop-in replacement that delegates to MujidEnv.plan_and_execute().
+
+    Uses the encapsulated Ruckig trajectory planner inside MujidEnv directly,
+    streaming absolute target poses (no delta conversion) to the controller.
+    This is the supervisor-recommended approach: trajectory planning and execution
+    are encapsulated inside the environment, not layered on top via step() deltas.
+
+    Parameters
+    ----------
+    raw_env : MujidEnv
+        The unwrapped MujidEnv instance (not wrapped).
+    use_id_ctrl : bool
+        If True, MujidEnv swaps to InverseDynamicsController for each move
+        (no error clipping, better for large free-space motions), then restores
+        CartesianImpedanceController on return.
+    """
+
+    def __init__(self, raw_env, use_id_ctrl: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self._raw_env     = raw_env
+        self._use_id_ctrl = use_id_ctrl
+
+    def go_to_waypoint_3d(self, env, obs, target_xyz, distance_err: float = 0.002):
+        """3D move via MujidEnv.plan_and_execute() — absolute pose streaming."""
+        obs = self._raw_env.plan_and_execute(
+            np.asarray(target_xyz, dtype=float),
+            tol=distance_err,
+            use_id_ctrl=self._use_id_ctrl,
+        )
+        return obs
