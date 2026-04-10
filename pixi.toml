@@ -39,6 +39,8 @@ debugpy = ">=1.8.14,<2"
 libgl-devel = "*"
 
 [environments]
+# Simulation-only: no ROS, no crisp_gym/crisp_py required.
+sim = { features = ["sim", "dev"] }
 jazzy-only = { features = ["jazzy", "dev", "extra"] }
 jazzy-crisp = { features = ["jazzy", "dev", "extra", "crisp"] }
 jazzy = { features = [
@@ -133,3 +135,22 @@ cuda = "12.0"
 pycocotools = "*"
 sam3 = { path = "./sam3", editable = true }
 pyvista = "*"
+
+# Simulation-only feature: MuJoCo + Ruckig, no ROS, no crisp_gym/crisp_py.
+[feature.sim.dependencies]
+pinocchio    = ">=3.4.0,<4"
+tsid         = ">=1.8.0,<2"
+pytorch-cuda = ">=12.4,<13"
+pytorch      = ">=2.0.0"
+torchvision  = "*"
+
+[feature.sim.pypi-dependencies]
+crisp_drl     = { path = ".", editable = true }
+mujid         = { path = "../mujid", editable = true }
+gymnasium     = { version = ">=0.29.1, <2", extras = ["classic-control"] }
+opencv-python = "*"
+imageio       = "*"
+ruckig        = "*"
+
+[feature.sim.system-requirements]
+cuda = "12.0"
