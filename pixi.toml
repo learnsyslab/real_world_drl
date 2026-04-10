@@ -41,16 +41,18 @@ libgl-devel = "*"
 [environments]
 # Simulation-only: no ROS, no crisp_gym/crisp_py required.
 sim = { features = ["sim", "dev"] }
-jazzy-only = { features = ["jazzy", "dev", "extra"] }
-jazzy-crisp = { features = ["jazzy", "dev", "extra", "crisp"] }
-jazzy = { features = [
-    "jazzy",
-    "dev",
-    "extra",
-    "crisp",
-    "lerobot",
-    "pose_estimation",
-] }
+# These require crisp_gym and crisp_py at ../crisp_gym and ../crisp_py.
+# Uncomment once those repos are available.
+# jazzy-only = { features = ["jazzy", "dev", "extra"] }
+# jazzy-crisp = { features = ["jazzy", "dev", "extra", "crisp"] }
+# jazzy = { features = [
+#     "jazzy",
+#     "dev",
+#     "extra",
+#     "crisp",
+#     "lerobot",
+#     "pose_estimation",
+# ] }
 
 # jazzy
 [feature.jazzy]
