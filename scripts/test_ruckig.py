@@ -2,11 +2,12 @@
 
 Five modes
 ----------
-A  3d        Free-space 3D position move (optionally compare vs Poly7Planner)
-B  6d        Free-space 6D position+orientation move (optionally compare vs Poly7Planner6D)
-C  xy        XY approach only — mirrors InsertionWrapperSimLEGO.go_to_waypoint()
-D  streaming Mid-motion goal shift demo (two-phase streaming)
-E  pipeline  Full 9-phase LEGO insertion: home→above A→grasp→lift→transit→socket→XY→Z→RL
+A  3d           Free-space 3D position move (optionally compare vs Poly7Planner)
+B  6d           Free-space 6D position+orientation move (optionally compare vs Poly7Planner6D)
+C  xy           XY approach only — mirrors InsertionWrapperSimLEGO.go_to_waypoint()
+D  streaming    Mid-motion goal shift demo (two-phase streaming)
+E  pipeline     Full 9-phase LEGO insertion: home→above A→grasp→lift→transit→socket→XY→Z→RL
+F  pipeline_6d  Same as pipeline but uses Ruckig6DFreeSpacePlanner (position + orientation)
 
 Usage
 -----
@@ -27,9 +28,12 @@ Usage
     # 5. Streaming mid-motion goal shift
     MUJOCO_GL=egl pixi run -e sim python scripts/test_ruckig.py --mode streaming --live_view
 
-    # 6. Full 9-phase LEGO insertion pipeline
+    # 6. Full 9-phase LEGO insertion pipeline (3D free-space)
     MUJOCO_GL=egl pixi run -e sim python scripts/test_ruckig.py --mode pipeline --n_trials 5 --live_view
     MUJOCO_GL=egl pixi run -e sim python scripts/test_ruckig.py --mode pipeline --n_trials 20 --seed 42
+
+    # 7. Full pipeline with 6D (position + orientation) free-space waypoints
+    MUJOCO_GL=egl pixi run -e sim python scripts/test_ruckig.py --mode pipeline_6d --n_trials 5
 """
 
 import argparse
@@ -306,7 +310,7 @@ def mode_pipeline(args):
         wrapper.waypoints_before_insertion = _make_waypoints(orientation_aa=home_aa)
 
     mode_label = "Ruckig 6D (pos+ori)" if use_6d else "Ruckig 3D (pos only)"
-    return_label = "Ruckig.follow_6d" if use_6d else "Ruckig.follow_3d"
+    return_label = "Ruckig.follow_3d"  # always 3D — see phase ⑩ comment
 
     print(f"\nPipeline mode: {mode_label}")
     print(f"  ① home: keyframe-1 (env.reset() — true joint config)")
@@ -358,11 +362,14 @@ def mode_pipeline(args):
             (np.array([grasp_xy[0], grasp_xy[1], 0.28]), home_aa),
             (wrapper.home_xyz, wrapper.home_aa),
         ]
-        for wp_xyz, wp_aa in return_wps:
-            if use_6d:
-                obs = wrapper._ruckig.follow_6d(wrapper.env, obs, wp_xyz, wp_aa, tol=0.005)
-            else:
-                obs = wrapper._ruckig.follow_3d(wrapper.env, obs, wp_xyz, tol=0.005)
+        for wp_xyz, _ in return_wps:
+            # Always use follow_3d for return: orientation target was never changed
+            # during insertion (action[3:6]=0 throughout), so the impedance target
+            # already holds the correct orientation. follow_6d would compute a
+            # non-zero delta_rot from any tiny contact-induced orientation drift and
+            # apply it as a Cartesian orientation command while the TCP is still at
+            # the socket — causing wrist rotation before the brick is extracted.
+            obs = wrapper._ruckig.follow_3d(wrapper.env, obs, wp_xyz, tol=0.005)
         t_home = time.time() - t_home
         home_err_mm = float(np.linalg.norm(
             obs["observation.state.cartesian"][:3] - wrapper.home_xyz
@@ -402,7 +409,7 @@ def mode_pipeline(args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--mode", choices=["3d", "6d", "xy", "streaming", "pipeline"], default="3d",
+        "--mode", choices=["3d", "6d", "xy", "streaming", "pipeline", "pipeline_6d"], default="3d",
     )
     parser.add_argument("--n_trials",       type=int,   default=5)
     parser.add_argument("--compare",        action="store_true",
@@ -432,10 +439,10 @@ def main():
     if args.mode in ("3d", "6d"):
         print(f"Trials : {args.n_trials}  compare={args.compare}")
         print(f"Ranges : pos ±{args.goal_range_mm:.0f}mm  rot ±{args.rot_range_deg:.0f}°")
-    elif args.mode == "pipeline":
+    elif args.mode in ("pipeline", "pipeline_6d"):
         print(f"Trials   : {args.n_trials}")
         print(f"Grasp XY : {args.grasp_xy}")
-        print(f"6D mode  : {args.use_6d}")
+        print(f"6D mode  : {args.mode == 'pipeline_6d' or args.use_6d}")
     print()
 
     if args.mode in ("3d", "6d"):
@@ -444,7 +451,9 @@ def main():
         mode_xy(args)
     elif args.mode == "streaming":
         mode_streaming(args)
-    elif args.mode == "pipeline":
+    elif args.mode in ("pipeline", "pipeline_6d"):
+        if args.mode == "pipeline_6d":
+            args.use_6d = True
         mode_pipeline(args)
 
 
