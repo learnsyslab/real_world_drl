@@ -219,31 +219,31 @@ def main():
         return float(np.arctan2(R_rel[1, 0], R_rel[0, 0]))
 
     def print_pose_stats(poses: dict[int, np.ndarray], label: str):
-        positions_tcp = []
-        rotations_tcp = []
+        positions_tcp_T_obj = []
+        rotations_tcp_R_obj = []
         for cam_D_cam_obj in poses.values():
             cam_T_cam_obj = cam_D_cam_obj[:3, 3]
-            tcp_t = TCP_T_TCP_CAM + TCP_R_CAM @ cam_T_cam_obj
-            tcp_R = TCP_R_CAM @ cam_D_cam_obj[:3, :3]
-            positions_tcp.append(tcp_t)
-            rotations_tcp.append(tcp_R)
-        positions = np.array(positions_tcp)  # (N, 3)
-        mean_pos = positions.mean(axis=0)
-        deltas = np.linalg.norm(positions - mean_pos, axis=1)
-        deltas_full = positions - mean_pos
+            tcp_T_obj = TCP_T_TCP_CAM + TCP_R_CAM @ cam_T_cam_obj
+            tcp_R_obj = TCP_R_CAM @ cam_D_cam_obj[:3, :3]
+            positions_tcp_T_obj.append(tcp_T_obj)
+            rotations_tcp_R_obj.append(tcp_R_obj)
+        positions_tcp_T_obj = np.array(positions_tcp_T_obj)  # (N, 3)
+        mean_pos_tcp_T_obj = positions_tcp_T_obj.mean(axis=0)
+        deltas = np.linalg.norm(positions_tcp_T_obj - mean_pos_tcp_T_obj, axis=1)
+        deltas_full = positions_tcp_T_obj - mean_pos_tcp_T_obj
 
         # Mean orientation in SO(3)
-        R_mean = mean_rotation(rotations_tcp)
+        tcp_R_obj_mean = mean_rotation(rotations_tcp_R_obj)
 
         # Relative z-rotation of each sample w.r.t. mean
         z_angles_deg = []
-        for R in rotations_tcp:
-            R_rel = R_mean.T @ R  # relative rotation
+        for R in rotations_tcp_R_obj:
+            R_rel = tcp_R_obj_mean.T @ R  # relative rotation
             z_angles_deg.append(np.degrees(rotation_angle_around_z(R_rel)))
         z_angles = np.array(z_angles_deg)
 
         print(f"\n--- {label} ---")
-        print(f"  Mean position (TCP): {mean_pos}")
+        print(f"  Mean position (TCP): {mean_pos_tcp_T_obj}")
         print(f"  Mean delta L2:       {deltas.mean():.6f} m")
         print(f"  Min dx:              {deltas_full[:, 0].min():.6f} m")
         print(f"  Min dy:              {deltas_full[:, 1].min():.6f} m")
@@ -253,7 +253,7 @@ def main():
         print(f"  Max dz:              {deltas_full[:, 2].max():.6f} m")
         print(f"  Std  delta L2:       {deltas.std():.6f} m")
         print(f"  Mean orientation (TCP):")
-        for row in R_mean:
+        for row in tcp_R_obj_mean:
             print(f"    [{row[0]:+.6f}  {row[1]:+.6f}  {row[2]:+.6f}]")
         print(f"  Relative z-rotation to mean (deg):")
         print(f"    Mean: {z_angles.mean():+.4f}°")

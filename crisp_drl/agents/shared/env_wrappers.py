@@ -1,6 +1,7 @@
 import copy
 import multiprocessing
 import os
+from pathlib import Path
 import time
 from typing import Any, Dict, Optional, SupportsFloat
 import cv2
@@ -17,6 +18,7 @@ import torch.multiprocessing as mp
 
 from crisp_drl.envs.pose_estimation_helper import PoseEstimationHelper
 
+
 try:
     from pynput import keyboard
 except ImportError:
@@ -24,6 +26,7 @@ except ImportError:
 from gymnasium import spaces
 import imageio
 from crisp_drl.agents.shared.algorithm_config import Config
+from crisp_drl.agents.shared.networks_cleanrl import Actor, SharedEncoder, SoftQNetwork
 
 
 # Make cuDNN deterministic for consistent inference
@@ -1601,6 +1604,102 @@ class CustomTerminationWrapper(Wrapper):
         return observation, reward, terminated, truncated, info
 
 
+class SuccessClassificationWrapper(Wrapper):
+    def __init__(self, env, args, sac_config: Config, threshold: float):
+        super().__init__(env)
+        classifier_dir = Path("checkpoints") / getattr(args, "load_policy", "")
+        if classifier_dir is None:
+            raise ValueError("SuccessClassificationWrapper requires args.load_policy.")
+
+        self.threshold = threshold
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() and sac_config.cuda else "cpu"
+        )
+        self.sac_config = sac_config
+        self.max_val = -float("inf")
+
+        self.shared_encoder = SharedEncoder(sac_config).to(self.device)
+        self.shared_encoder.load_state_dict(
+            torch.load(
+                os.path.join(classifier_dir, "shared_encoder_state_dict.pth"),
+                map_location=self.device,
+            )
+        )
+        self.shared_encoder.eval()
+
+        self.actor = Actor(sac_config).to(self.device)
+        self.actor.load_state_dict(
+            torch.load(
+                os.path.join(classifier_dir, "actor_state_dict.pth"),
+                map_location=self.device,
+            )
+        )
+        self.actor.eval()
+
+        self.q_functions = [
+            SoftQNetwork(sac_config).to(self.device)
+            for _ in range(self.sac_config.num_critics)
+        ]
+        for idx, qf in enumerate(self.q_functions):
+            qf.load_state_dict(
+                torch.load(
+                    os.path.join(classifier_dir, f"qf{idx + 1}_state_dict.pth"),
+                    map_location=self.device,
+                )
+            )
+            qf.eval()
+
+    def _actor_mean_action(self, encoded_obs: torch.Tensor) -> torch.Tensor:
+        h = self.actor.net(encoded_obs)
+        mean = self.actor.fc_mean(h)
+        squashed_mean = torch.tanh(mean)
+        return squashed_mean * self.actor.action_scale + self.actor.action_bias
+
+    def _success_score(self, observation: Any) -> float:
+        if isinstance(observation, dict):
+            if "observation.formatted" not in observation:
+                raise KeyError(
+                    "Observation dict must contain 'observation.formatted' for success classification."
+                )
+            obs_raw = observation["observation.formatted"]
+        else:
+            obs_raw = observation
+
+        if isinstance(obs_raw, torch.Tensor):
+            obs_tensor = obs_raw.to(self.device, dtype=torch.float32).view(1, -1)
+        else:
+            obs_tensor = torch.as_tensor(
+                obs_raw, dtype=torch.float32, device=self.device
+            ).view(1, -1)
+
+        with torch.no_grad():
+            encoded_obs = self.shared_encoder(obs_tensor)
+            action = self._actor_mean_action(encoded_obs)
+            q_values = torch.stack(
+                [qf(encoded_obs, action).squeeze(-1) for qf in self.q_functions], dim=0
+            )
+            return float(q_values.mean().item())
+
+    def step(self, action) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        observation, reward, terminated, truncated, info = self.env.step(action)
+
+        score = self._success_score(observation)
+        self.max_val = max(score, self.max_val)
+        print(f"[CLASSIFIER SCORE]: {score:.3f}")
+        if score >= self.threshold or self.max_val > 8 and score < 6:
+            t = time.time()
+            append_or_insert(info, "custom_events", (t, "E_SUCCESS"))
+            append_or_insert(info, "custom_events", (t, "E_SUCCESS_CLS"))
+            terminated = True
+
+        return observation, reward, terminated, truncated, info
+
+    def reset(self, options=None, seed=None):
+        v = self.env.reset(options=options, seed=seed)
+        self.max_val = -float("inf")
+        return v
+
+
 class StepLimitEnforcerWrapper(Wrapper):
     def __init__(self, env, max_steps):
         super().__init__(env)
@@ -1998,7 +2097,7 @@ class InsertionWrapperSim(Wrapper):
         return self.obs, reset_info
 
     def step(self, action) -> tuple[Any, Any, bool, bool, dict[str, Any]]:
-        action = np.array([action[0], action[1], 0.0, 1.0, 0.0, 0.0, 0.0])
+        action = np.array([action[0], action[1], 0.0, 0.0, 0.0, 0.0])
 
         z_error = self.obs["observation.error.cartesian"][2]
         if z_error > -self.target_z_error + self.max_z_error_deviation:
@@ -2028,19 +2127,29 @@ class InsertionWrapperSim(Wrapper):
         return obs
 
 
-class InsertionWrapperSim3D(Wrapper):
+class InsertionWrapperSim3DoFRotZ(Wrapper):
     def __init__(
         self,
         env,
         config: Config,
         grasp_randomisation_x_range=(-0.002, 0.002),
-        grasp_randomisation_z_range=(0.0005, 0.002),
+        grasp_randomisation_z_range=(
+            0.0005,
+            0.002,
+        ),  # ry is not needed as the object is assumed to lie on a flat surface initially
         grasp_randomisation_mode="box",
-        goal_position_randomisation_xyz_range=(-0.0028, 0.0028),
+        goal_position_randomisation_xy_range=(-0.0028, 0.0028),
+        goal_orientation_randomisation_angle=np.deg2rad(3),
         safety_box_radius=0.003,
         safety_box_step_size=0.0005,
+        safety_box_angular_radius=np.deg2rad(6),
+        safety_box_angular_step_size=np.deg2rad(1),
+        z_step_size=0.00025,
+        max_z_error_deviation=0.001,
+        target_z_error=0.0025,
         step_limit=150,
         minimal_start_goal_distance=0.003,
+        minimal_start_goal_angle=np.deg2rad(6),
         is_eval=False,
     ):
         super().__init__(env)
@@ -2051,10 +2160,409 @@ class InsertionWrapperSim3D(Wrapper):
         self.grasp_randomisation_x_range = grasp_randomisation_x_range
         self.grasp_randomisation_z_range = grasp_randomisation_z_range
         self.grasp_randomisation_mode = grasp_randomisation_mode
-        self.goal_position_randomisation_xyz_range = (
-            goal_position_randomisation_xyz_range
-        )
+        self.goal_position_randomisation_xy_range = goal_position_randomisation_xy_range
+        self.goal_orientation_randomisation_angle = goal_orientation_randomisation_angle
         self.safety_box_radius = safety_box_radius
+        self.safety_box_angular_radius = safety_box_angular_radius
+        self.safety_box_step_size = safety_box_step_size
+        self.safety_box_angular_step_size = safety_box_angular_step_size
+        self.z_step_size = z_step_size
+        self.max_z_error_deviation = max_z_error_deviation
+        self.target_z_error = target_z_error
+        self.step_limit = step_limit
+        self.action_space = spaces.Box(-np.inf, np.inf, (3,))
+        self.n_steps = 0
+        self.minimal_start_goal_distance = minimal_start_goal_distance
+        self.minimal_start_goal_angle = minimal_start_goal_angle
+        self.is_eval = is_eval
+        print("[InsertionWrapperSim] [__init__] Eval mode:", is_eval)
+
+    def reset(
+        self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None
+    ) -> tuple[Any, dict[str, Any]]:
+        if self.grasp_randomisation_mode == "box":
+            grasp_randomisation_x = np.random.uniform(
+                self.grasp_randomisation_x_range[0], self.grasp_randomisation_x_range[1]
+            )
+            grasp_randomisation_z = np.random.uniform(
+                self.grasp_randomisation_z_range[0], self.grasp_randomisation_z_range[1]
+            )
+        elif self.grasp_randomisation_mode == "ellipse":
+            grasp_randomisation_x, grasp_randomisation_z = random_point_in_ellipse(
+                self.grasp_randomisation_x_range,
+                self.grasp_randomisation_z_range,
+            )
+
+        self.grasp_position = np.array(
+            [grasp_randomisation_x, 0.0, grasp_randomisation_z]
+        )
+
+        self.goal_position = np.copy(self.goal_position_ground_truth)
+        goal_position_randomisation_xy = np.zeros(2)
+        while np.linalg.norm(goal_position_randomisation_xy) < 0.001:
+            goal_position_randomisation_xy = np.random.uniform(
+                self.goal_position_randomisation_xy_range[0],
+                self.goal_position_randomisation_xy_range[1],
+                size=2,
+            )
+
+        goal_position_randomisation_rz = 0.0
+        while (
+            np.abs(goal_position_randomisation_rz) < 0.1 * self.minimal_start_goal_angle
+        ):
+            goal_position_randomisation_rz = np.random.uniform(
+                -self.goal_orientation_randomisation_angle,
+                self.goal_orientation_randomisation_angle,
+            )
+
+        self.goal_position[:2] += goal_position_randomisation_xy
+        self.goal_position[0] += self.grasp_position[0]  # ground truth is at 0
+        self.goal_position[2] += self.grasp_position[2]  # ground truth is at 0
+        self.goal_rotation_z = goal_position_randomisation_rz
+
+        if not self.is_eval:
+            self.start_position = self.goal_position_ground_truth.copy()
+            self.start_rotation_z = 0.0
+            while (
+                np.linalg.norm(
+                    self.start_position[:2] - self.goal_position_ground_truth[:2]
+                )
+                < self.minimal_start_goal_distance
+            ):
+                self.start_position[:2] = self.goal_position[:2] + np.random.uniform(
+                    -self.safety_box_radius, self.safety_box_radius, size=2
+                )
+            while np.abs(self.start_rotation_z) < self.minimal_start_goal_angle:
+                self.start_rotation_z = self.goal_rotation_z + np.random.uniform(
+                    -self.safety_box_angular_radius, self.safety_box_angular_radius
+                )
+        else:
+            self.start_position = self.goal_position.copy()
+            self.start_rotation_z = self.goal_rotation_z
+
+        self.obs, reset_info = self.env.reset(
+            seed=seed,
+            options={
+                "start_position": self.start_position,
+                "start_so3": np.array([0.0, 0.0, self.start_rotation_z]),
+                "grasp_position": self.grasp_position,
+            },
+        )
+
+        reset_info["reset.grasped.delta"] = self.grasp_position
+        goal_position_offset = self.goal_position - (
+            self.goal_position_ground_truth + self.grasp_position
+        )
+        reset_info["reset.goal_position.offset"] = goal_position_offset
+        reset_info["reset.goal_orientation.rotation_z"] = self.goal_rotation_z
+        self.obs = self.add_perfect_action_to_obs(self.obs)
+        self.n_steps = 0
+        return self.obs, reset_info
+
+    def step(self, action) -> tuple[Any, Any, bool, bool, dict[str, Any]]:
+        action = np.array([action[0], action[1], 0.0, 0.0, 0.0, action[2]])
+        # print(f"z-error: {self.obs['observation.state.target'][2]}")
+
+        z_error = self.obs["observation.error.cartesian"][2]
+        if z_error > -self.target_z_error + self.max_z_error_deviation:
+            action[2] -= self.z_step_size
+        elif z_error < -self.target_z_error - self.max_z_error_deviation:
+            action[2] += self.z_step_size
+
+        current_pos_xy = self.obs["observation.state.cartesian"][:2]
+        delta_xy = self.goal_position[:2] - current_pos_xy
+        norm_xy = np.linalg.norm(delta_xy)
+        if norm_xy > self.safety_box_radius:
+            action[:2] = delta_xy * self.safety_box_step_size / norm_xy
+
+        # check for rotation: project current rotation error onto rotation axis; if angle is larger than safety_box_angular_radius, apply angular action towards goal orientation
+        current_rotation_z = self.obs["observation.state.cartesian"][5]
+        rotation_z_error = self.goal_rotation_z - current_rotation_z
+        rotation_z_error = (rotation_z_error + np.pi) % (
+            2 * np.pi
+        ) - np.pi  # wrap to [-pi, pi]
+        if abs(rotation_z_error) > self.safety_box_angular_radius:
+            action[5] = np.sign(rotation_z_error) * self.safety_box_angular_step_size
+
+        self.obs, reward, terminated, truncated, info = self.env.step(action)
+        self.obs = self.add_perfect_action_to_obs(self.obs)
+
+        self.n_steps += 1
+        if self.n_steps >= self.step_limit:
+            truncated = True
+
+        return self.obs, reward, terminated, truncated, info
+
+    def add_perfect_action_to_obs(self, obs):
+        obs["observation.perfect_action"] = obs["observation.state.cartesian"][:3] - (
+            self.goal_position_ground_truth + self.grasp_position
+        )
+        obs["observation.perfect_rotation"] = -obs["observation.state.cartesian"][3:]
+        return obs
+
+
+def random_axis():
+    v = np.random.normal(size=3)  # Sample from N(0,1)
+    v /= np.linalg.norm(v)  # Normalize to unit length
+    return v
+
+
+def axis_angle_from_rotation_matrix(mat: np.ndarray) -> np.ndarray:
+    cos_theta = (np.trace(mat) - 1.0) / 2.0
+    theta = float(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
+
+    if theta < 1e-8:
+        return np.zeros(3)
+
+    axis = np.array(
+        [
+            mat[2, 1] - mat[1, 2],
+            mat[0, 2] - mat[2, 0],
+            mat[1, 0] - mat[0, 1],
+        ]
+    )
+    denom = 2.0 * np.sin(theta)
+    if abs(denom) < 1e-8:
+        return np.zeros(3)
+
+    axis = axis / denom
+    return axis * theta
+
+
+def rotation_matrix_from_axis_angle(axis_angle: np.ndarray) -> np.ndarray:
+    theta = float(np.linalg.norm(axis_angle))
+    if theta < 1e-8:
+        return np.eye(3)
+
+    axis = axis_angle / theta
+    kx, ky, kz = axis
+    k = np.array(
+        [
+            [0.0, -kz, ky],
+            [kz, 0.0, -kx],
+            [-ky, kx, 0.0],
+        ]
+    )
+
+    identity = np.eye(3)
+    return identity + np.sin(theta) * k + (1.0 - np.cos(theta)) * (k @ k)
+
+
+class InsertionWrapperSim5DoF(Wrapper):
+    def __init__(
+        self,
+        env,
+        config: Config,
+        grasp_randomisation_x_range=(-0.002, 0.002),
+        grasp_randomisation_z_range=(
+            0.0005,
+            0.002,
+        ),  # ry is not needed as the object is assumed to lie on a flat surface initially
+        grasp_randomisation_mode="box",
+        goal_position_randomisation_xy_range=(-0.0028, 0.0028),
+        goal_orientation_randomisation_angle=np.deg2rad(3),
+        safety_box_radius=0.003,
+        safety_box_step_size=0.0005,
+        safety_box_angular_radius=np.deg2rad(6),
+        safety_box_angular_step_size=np.deg2rad(1),
+        z_step_size=0.00025,
+        max_z_error_deviation=0.001,
+        target_z_error=0.0025,
+        step_limit=150,
+        minimal_start_goal_distance=0.003,
+        minimal_start_goal_angle=np.deg2rad(6),
+        is_eval=False,
+    ):
+        super().__init__(env)
+        self.config = config
+        self.home_config = config.custom_home_position
+        self.grasp_position_ground_truth = config.grasp_position_ground_truth
+        self.goal_position_ground_truth = np.array([0.6, 0.0, 0.0])
+        self.grasp_randomisation_x_range = grasp_randomisation_x_range
+        self.grasp_randomisation_z_range = grasp_randomisation_z_range
+        self.grasp_randomisation_mode = grasp_randomisation_mode
+        self.goal_position_randomisation_xy_range = goal_position_randomisation_xy_range
+        self.goal_orientation_randomisation_angle = goal_orientation_randomisation_angle
+        self.safety_box_radius = safety_box_radius
+        self.safety_box_angular_radius = safety_box_angular_radius
+        self.safety_box_step_size = safety_box_step_size
+        self.safety_box_angular_step_size = safety_box_angular_step_size
+        self.z_step_size = z_step_size
+        self.max_z_error_deviation = max_z_error_deviation
+        self.target_z_error = target_z_error
+        self.step_limit = step_limit
+        self.action_space = spaces.Box(-np.inf, np.inf, (5,))
+        self.n_steps = 0
+        self.minimal_start_goal_distance = minimal_start_goal_distance
+        self.minimal_start_goal_angle = minimal_start_goal_angle
+        self.is_eval = is_eval
+        print("[InsertionWrapperSim] [__init__] Eval mode:", is_eval)
+
+    def reset(
+        self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None
+    ) -> tuple[Any, dict[str, Any]]:
+        if self.grasp_randomisation_mode == "box":
+            grasp_randomisation_x = np.random.uniform(
+                self.grasp_randomisation_x_range[0], self.grasp_randomisation_x_range[1]
+            )
+            grasp_randomisation_z = np.random.uniform(
+                self.grasp_randomisation_z_range[0], self.grasp_randomisation_z_range[1]
+            )
+        elif self.grasp_randomisation_mode == "ellipse":
+            grasp_randomisation_x, grasp_randomisation_z = random_point_in_ellipse(
+                self.grasp_randomisation_x_range,
+                self.grasp_randomisation_z_range,
+            )
+
+        self.grasp_position = np.array(
+            [grasp_randomisation_x, 0.0, grasp_randomisation_z]
+        )
+
+        self.goal_position = np.copy(self.goal_position_ground_truth)
+        goal_position_randomisation_xy = np.zeros(2)
+        while np.linalg.norm(goal_position_randomisation_xy) < 0.001:
+            goal_position_randomisation_xy = np.random.uniform(
+                self.goal_position_randomisation_xy_range[0],
+                self.goal_position_randomisation_xy_range[1],
+                size=2,
+            )
+        # -> gererate random axis, generate random angle > min angle
+        goal_orientation_randomisation_axis = random_axis()
+        goal_orientation_randomisation_angle = 0.0
+        while (
+            np.abs(goal_orientation_randomisation_angle)
+            < 0.1 * self.minimal_start_goal_angle
+        ):
+            goal_orientation_randomisation_angle = np.random.uniform(
+                -self.goal_orientation_randomisation_angle,
+                self.goal_orientation_randomisation_angle,
+            )
+
+        self.goal_position[:2] += goal_position_randomisation_xy
+        self.goal_position[0] += self.grasp_position[0]  # ground truth is at 0
+        self.goal_position[2] += self.grasp_position[2]  # ground truth is at 0
+        self.goal_orientation = (
+            goal_orientation_randomisation_angle * goal_orientation_randomisation_axis
+        )
+
+        if not self.is_eval:
+            self.start_position = self.goal_position_ground_truth.copy()
+            # start orientation: start from goal orientation -> add another random rotation on top -> until angle to gt_goal > min angle
+            self.start_orientation = np.zeros(3)
+            while (
+                np.linalg.norm(
+                    self.start_position[:2] - self.goal_position_ground_truth[:2]
+                )
+                < self.minimal_start_goal_distance
+            ):
+                self.start_position[:2] = self.goal_position[:2] + np.random.uniform(
+                    -self.safety_box_radius, self.safety_box_radius, size=2
+                )
+            while (
+                np.linalg.norm(self.start_orientation) < self.minimal_start_goal_angle
+            ):
+                # axis_angle_from_R(R_from_axis_angle(random_axis_angle) @ R_from_axis_angle(goal_orientation))
+                start_orientation_randomisation_angle = np.random.uniform(
+                    -self.safety_box_angular_radius, self.safety_box_angular_radius
+                )
+
+                self.start_orientation = axis_angle_from_rotation_matrix(
+                    rotation_matrix_from_axis_angle(
+                        random_axis() * start_orientation_randomisation_angle
+                    )
+                    @ rotation_matrix_from_axis_angle(self.goal_orientation)
+                )
+        else:
+            self.start_position = self.goal_position.copy()
+            self.start_orientation = self.goal_orientation.copy()
+
+        self.obs, reset_info = self.env.reset(
+            seed=seed,
+            options={
+                "start_position": self.start_position,
+                "start_so3": self.start_orientation,
+                "grasp_position": self.grasp_position,
+            },
+        )
+
+        reset_info["reset.grasped.delta"] = self.grasp_position
+        goal_position_offset = self.goal_position - (
+            self.goal_position_ground_truth + self.grasp_position
+        )
+        reset_info["reset.goal_position.offset"] = goal_position_offset
+        reset_info["reset.goal_orientation"] = self.goal_orientation
+        self.obs = self.add_perfect_action_to_obs(self.obs)
+        self.n_steps = 0
+        return self.obs, reset_info
+
+    def step(self, action) -> tuple[Any, Any, bool, bool, dict[str, Any]]:
+        action = np.array([action[0], action[1], 0.0, action[2], action[3], action[4]])
+        # print(f"z-error: {self.obs['observation.state.target'][2]}")
+
+        z_error = self.obs["observation.error.cartesian"][2]
+        if z_error > -self.target_z_error + self.max_z_error_deviation:
+            action[2] -= self.z_step_size
+        elif z_error < -self.target_z_error - self.max_z_error_deviation:
+            action[2] += self.z_step_size
+
+        current_pos_xy = self.obs["observation.state.cartesian"][:2]
+        delta_xy = self.goal_position[:2] - current_pos_xy
+        norm_xy = np.linalg.norm(delta_xy)
+        if norm_xy > self.safety_box_radius:
+            action[:2] = delta_xy * self.safety_box_step_size / norm_xy
+
+        # check for rotation: if angle is larger than safety_box_angular_radius, apply angular action towards goal orientation
+        current_orientation = self.obs["observation.state.cartesian"][3:6]
+        angle_error = np.linalg.norm(current_orientation)
+        if angle_error > self.safety_box_angular_radius:
+            action[3:6] = (
+                -current_orientation / angle_error * self.safety_box_angular_step_size
+            )
+
+        self.obs, reward, terminated, truncated, info = self.env.step(action)
+        self.obs = self.add_perfect_action_to_obs(self.obs)
+
+        self.n_steps += 1
+        if self.n_steps >= self.step_limit:
+            truncated = True
+
+        return self.obs, reward, terminated, truncated, info
+
+    def add_perfect_action_to_obs(self, obs):
+        obs["observation.perfect_action"] = obs["observation.state.cartesian"][:3] - (
+            self.goal_position_ground_truth + self.grasp_position
+        )
+        obs["observation.perfect_rotation"] = -obs["observation.state.cartesian"][3:]
+        return obs
+
+
+class InsertionWrapperSim3D(Wrapper):
+    def __init__(
+        self,
+        env,
+        config: Config,
+        grasp_randomisation_x_range=(-0.002, 0.002),
+        grasp_randomisation_z_range=(0.0005, 0.002),
+        grasp_randomisation_mode="box",
+        goal_position_randomisation_xyz_range=(-0.0028, 0.0028),
+        safety_box_radius=0.003,
+        safety_box_height=0.005,
+        safety_box_step_size=0.0005,
+        step_limit=150,
+        minimal_start_goal_distance=0.003,
+        is_eval=False,
+    ):
+        super().__init__(env)
+        self.config = config
+        self.home_config = config.custom_home_position
+        self.grasp_position_ground_truth = config.grasp_position_ground_truth
+        self.goal_position_ground_truth = np.array([0.6, 0.0, 0.134])
+        self.grasp_randomisation_x_range = grasp_randomisation_x_range
+        self.grasp_randomisation_z_range = grasp_randomisation_z_range
+        self.grasp_randomisation_mode = grasp_randomisation_mode
+        self.sbox_center_randomisation_xyz_range = goal_position_randomisation_xyz_range
+        self.sbox_radius_xy = safety_box_radius
+        self.sbox_height_z = safety_box_height
         self.safety_box_step_size = safety_box_step_size
         self.step_limit = step_limit
         self.action_space = spaces.Box(-np.inf, np.inf, (3,))
@@ -2080,21 +2588,23 @@ class InsertionWrapperSim3D(Wrapper):
             )
 
         self.grasp_position = np.array(
-            [grasp_randomisation_x, 0.0, grasp_randomisation_z]
+            [grasp_randomisation_x, 0.0, grasp_randomisation_z]  # pyright: ignore[reportPossiblyUnboundVariable]
         )
 
-        self.goal_position = np.copy(self.goal_position_ground_truth)
-        goal_position_randomisation_xyz = np.zeros(2)
-        while np.linalg.norm(goal_position_randomisation_xyz) < 0.001:
-            goal_position_randomisation_xyz = np.random.uniform(
-                self.goal_position_randomisation_xyz_range[0],
-                self.goal_position_randomisation_xyz_range[1],
+        self.sbox_center = np.copy(self.goal_position_ground_truth)
+        sbox_center_randomisation_xyz = np.zeros(2)
+        while np.linalg.norm(sbox_center_randomisation_xyz) < 0.001:
+            sbox_center_randomisation_xyz = np.random.uniform(
+                self.sbox_center_randomisation_xyz_range[0],
+                self.sbox_center_randomisation_xyz_range[1],
                 size=3,
             )
 
-        self.goal_position += goal_position_randomisation_xyz
-        self.goal_position[0] += self.grasp_position[0]  # ground truth is at 0
-        self.goal_position[2] += self.grasp_position[2]  # ground truth is at 0
+        self.sbox_center += sbox_center_randomisation_xyz
+        # self.sbox_center[2] += 0.002  # to compensate for stud height
+        self.sbox_center[0] += self.grasp_position[0]  # ground truth is at 0
+        self.sbox_center[2] += self.grasp_position[2]  # ground truth is at 0
+        print(f"[3D reset] sbox center at {self.sbox_center}")
 
         if not self.is_eval:
             self.start_position = self.goal_position_ground_truth.copy()
@@ -2104,11 +2614,15 @@ class InsertionWrapperSim3D(Wrapper):
                 )
                 < self.minimal_start_goal_distance
             ):
-                self.start_position[:3] = self.goal_position[:3] + np.random.uniform(
-                    -self.safety_box_radius, self.safety_box_radius, size=3
+                self.start_position[:2] = self.sbox_center[:2] + np.random.uniform(
+                    -self.sbox_radius_xy, self.sbox_radius_xy, size=2
+                )
+                self.start_position[2] = self.sbox_center[2] + np.random.uniform(
+                    0.0, self.sbox_height_z
                 )
         else:
-            self.start_position = self.goal_position.copy()
+            self.start_position = self.sbox_center.copy()
+        print(f"[3D reset] start position at {self.start_position}")
 
         self.obs, reset_info = self.env.reset(
             seed=seed,
@@ -2119,7 +2633,7 @@ class InsertionWrapperSim3D(Wrapper):
         )
 
         reset_info["reset.grasped.delta"] = self.grasp_position
-        goal_position_offset = self.goal_position - (
+        goal_position_offset = self.sbox_center - (
             self.goal_position_ground_truth + self.grasp_position
         )
         reset_info["reset.goal_position.offset"] = goal_position_offset
@@ -2138,9 +2652,11 @@ class InsertionWrapperSim3D(Wrapper):
 
         # apply safety box
         current_pos_xyz = self.obs["observation.state.cartesian"][:3]
-        delta_xyz = current_pos_xyz - self.goal_position[:3]
+        delta_xyz = current_pos_xyz - self.sbox_center[:3]
         delta_xyz_clipped = np.clip(
-            delta_xyz, -self.safety_box_radius, self.safety_box_radius
+            delta_xyz,
+            [-self.sbox_radius_xy, -self.sbox_radius_xy, -self.sbox_height_z],
+            [self.sbox_radius_xy, self.sbox_radius_xy, self.sbox_height_z],
         )
         if np.any(delta_xyz_clipped != delta_xyz):
             correcting_action = delta_xyz_clipped - delta_xyz

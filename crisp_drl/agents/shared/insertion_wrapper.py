@@ -350,7 +350,7 @@ class InsertionWrapper(Wrapper):
         self.reset_grasp_delta = (
             self.actual_grasp_position - self.grasp_position_ground_truth
         )
-        reset_info["reset.grasped.delta"] = self.reset_grasp_delta
+        reset_info["reset.grasped.delta_estimated"] = self.reset_grasp_delta
         goal_position_offset = self.goal_position - (
             self.goal_position_ground_truth + self.reset_grasp_delta
         )

@@ -18,8 +18,10 @@ print("Env reset.")
 
 i_demo_img = 0
 
-exp_name = "siemens"
+exp_name = "siemens_pe_g"
 rot_deg = 1
+rot_deg_z = 0.25
+rot_deg_x = 0.25
 
 save_to_file = len(sys.argv) > 1 and sys.argv[1] == "--save"
 
@@ -50,6 +52,18 @@ def on_press(key):
         if key.char == "x":
             env.step(np.array([0, 0, 0, 0, np.deg2rad(-rot_deg), 0, 0.0]))
             print_and_write(f"Executed: rotate -y {rot_deg}°")
+        if key.char == "k":
+            env.step(np.array([0, 0, 0, 0, 0, np.deg2rad(rot_deg_z), 0.0]))
+            print_and_write(f"Executed: rotate +z {rot_deg_z:.2f}°")
+        if key.char == "l":
+            env.step(np.array([0, 0, 0, 0, 0, np.deg2rad(-rot_deg_z), 0.0]))
+            print_and_write(f"Executed: rotate -z {rot_deg_z:.2f}°")
+        if key.char == "m":
+            env.step(np.array([0, 0, 0, np.deg2rad(rot_deg_x), 0, 0, 0.0]))
+            print_and_write(f"Executed: rotate +x {rot_deg_x:.2f}°")
+        if key.char == "n":
+            env.step(np.array([0, 0, 0, np.deg2rad(-rot_deg_x), 0, 0, 0.0]))
+            print_and_write(f"Executed: rotate -x {rot_deg_x:.2f}°")
         elif key.char == "c":
             env.step(np.array([0, 0, 0, 0, 0, 0, -0.2]))
             print_and_write("Executed: gripper close")

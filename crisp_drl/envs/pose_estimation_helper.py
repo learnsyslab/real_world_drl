@@ -123,11 +123,29 @@ class PoseEstimationHelper:
         )
         world_R_obj = world_R_tcp @ TCP_R_CAM @ cam_R_obj
 
-        world_pose_matrix = np.eye(4)
-        world_pose_matrix[:3, :3] = world_R_obj
-        world_pose_matrix[:3, 3] = world_T_world_obj
+        world_D_world_obj = np.eye(4)
+        world_D_world_obj[:3, :3] = world_R_obj
+        world_D_world_obj[:3, 3] = world_T_world_obj
 
-        return world_pose_matrix
+        return world_D_world_obj
+
+    def _compute_pose_in_tcp_frame(
+        self,
+        pose_in_cam_frame: np.ndarray,
+    ) -> np.ndarray:
+        """Compute translation from pose_from to pose_to in world frame."""
+
+        cam_T_cam_obj = pose_in_cam_frame[:3, 3]
+        cam_R_obj = pose_in_cam_frame[:3, :3]
+
+        tcp_T_tcp_obj = TCP_T_TCP_CAM + TCP_R_CAM @ cam_T_cam_obj
+        tcp_R_obj = TCP_R_CAM @ cam_R_obj
+
+        tcp_D_tcp_obj = np.eye(4)
+        tcp_D_tcp_obj[:3, :3] = tcp_R_obj
+        tcp_D_tcp_obj[:3, 3] = tcp_T_tcp_obj
+
+        return tcp_D_tcp_obj
 
     def _estimate_lego(self, image: np.ndarray, depth: np.ndarray):
         depth_f32 = depth.astype(np.float32) / 1000.0  # Convert to meters
@@ -180,10 +198,21 @@ class PoseEstimationHelper:
         pose[:3, :3] = self.assumed_orientation
         return self.pose_tracker.track_siemens(image, depth_f32, pose)
 
-    def estimate_siemens_ee_frame_coarse(
+    def estimate_siemens_tcp_frame_coarse(
         self, image: np.ndarray, depth: np.ndarray
     ) -> np.ndarray:
         depth_f32 = depth.astype(np.float32) / 1000.0  # Convert to meters
         mask = self.segmenter.segment_siemens(image)
         pose = self.pose_estimator.estimate_siemens(image, depth_f32, mask)
-        return pose
+        return self._compute_pose_in_tcp_frame(pose)
+
+    def estimate_siemens_world_frame_coarse(
+        self,
+        image: np.ndarray,
+        depth: np.ndarray,
+        estimation_position_euler: np.ndarray,
+    ) -> np.ndarray:
+        depth_f32 = depth.astype(np.float32) / 1000.0  # Convert to meters
+        mask = self.segmenter.segment_siemens(image)
+        pose = self.pose_estimator.estimate_siemens(image, depth_f32, mask)
+        return self._compute_pose_in_world_frame(pose, estimation_position_euler)

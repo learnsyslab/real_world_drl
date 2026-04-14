@@ -120,7 +120,13 @@ def launch_actor(
         #     }
         # )
         # env = make_env.create_real_env_v4(config, args)
-        env = make_env.create_real_env_s1(config, env_config=SiemensConfig(), args=args)
+        env = (
+            make_env.create_real_env_s1(config, env_config=SiemensConfig(), args=args)
+            if not args or not args.use_pose_estimation
+            else make_env.create_real_env_s1_pe(
+                alg_config=config, env_config=SiemensConfig(), args=args
+            )
+        )
         # rew_fn = make_rew.create_sim_reward_fn(  # noqa: F821
         #     self.config,
         #     ideal_goal_pos_xy=np.array([0.6, 0.0]),
@@ -148,7 +154,10 @@ def launch_actor(
         return
 
     try:
-        actor.run(data_queue)
+        if not args or not args.use_pose_estimation:
+            actor.run(data_queue)
+        else:
+            actor.run_pe(data_queue)
     finally:
         actor.close()
 
@@ -224,6 +233,12 @@ def main():
     )
     argparse.add_argument(
         "--load_encoder", type=str, help="Checkpoint name of encoder to be loaded."
+    )
+    argparse.add_argument(
+        "--success_threshold",
+        type=float,
+        default=9.3,
+        help="Threshold on mean Q(s, pi(s)) for appending E_SUCCESS and terminating.",
     )
     args = argparse.parse_args()
     config = Config()

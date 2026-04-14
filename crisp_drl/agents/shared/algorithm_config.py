@@ -47,6 +47,10 @@ class Config:
     """epochs between saving pre-training checkpoints"""
     pre_train_save_interval_pre_1: float = 0.1
     """epochs between saving pre-training checkpoints before utd=1"""
+    pre_train_gradient_steps: int = 250_000
+    """number of gradient steps for offline pre-training"""
+    pre_train_gradient_steps_save_interval: int = 5_000
+    """number of gradient steps between checkpoints for offline pre-training"""
     episode_length: int = 150
     """the maximum length of an episode"""
     buffer_size: int = 200_000
@@ -77,7 +81,14 @@ class Config:
     """Entropy regularization coefficient."""
     autotune: bool = False
     """automatic tuning of the entropy coefficient"""
-    max_action: np.ndarray = field(default_factory=lambda: np.array([0.00025, 0.00025]))
+    max_action: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [
+                0.00025,
+                0.00025,
+            ]  # , np.deg2rad(0.25), np.deg2rad(0.25), np.deg2rad(0.25)]
+        )
+    )
     """the maximum norm of an action value the policy can output"""
     control_frequency: int = 15
     """the frequency at which the control commands are sent to the robot"""
@@ -97,9 +108,9 @@ class Config:
     """the hidden dimension of the vision head"""
     vision_head_output_dim: int = 16
     """the output dimension of the vision head"""
-    actor_nonvision_input_dim: int = 14  #  14  # 8
+    actor_nonvision_input_dim: int = 14  # 26  # 18  #  14  # 8
     """the input dimension of the non-vision part of the actor network"""
-    actor_output_dim: int = 2
+    actor_output_dim: int = 2  # 5
     """the output dimension of the actor network"""
     actor_q_hidden_dim: int = 128
     """the hidden dimension of the actor and Q-function networks"""

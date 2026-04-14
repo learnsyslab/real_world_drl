@@ -49,7 +49,7 @@ GROUPS = {
     ],
 }
 YLIMS = {
-    "15": (0.9, 1.05),
+    "15": (0.95, 1.05),
     "20": (0.9, 1.05),
     "20_75": (0.9, 1.05),
     "25": (0.9, 1.05),
@@ -131,7 +131,7 @@ def plot(
     ax.set_ylim(*ylims)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(CHECKPOINTS_DIR.parent / "scripts" / filename, dpi=150)
+    fig.savefig(CHECKPOINTS_DIR.parent / "plots" / filename, dpi=150)
 
 
 def main():

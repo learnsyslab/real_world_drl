@@ -215,19 +215,21 @@ exp_folders_to_skip = {
     "20260301-140541_0.8_50",
 }
 
-exp_name = "v9_1cft_30_40"
+exp_name = "v9_1cft5d_halfrot"
 EXPECTED_MAX_LEN = 150
 N_SKIP = 0
+N_SEEDS = 3
+FIRST_SEED = 1
 parent_folder = "rollout_data/collect_data"
 rollouts = [
-    "20260301-124523_0.4_60",
-    "20260301-131113_0.4_57",
-    "20260301-121629_0.4_56",
+    "20260406-094652_0.8_81",
+    "20260406-102138_0.8_80",
+    "20260406-105605_0.8_81",
 ]
 
-for SEED in range(1, 4):
-    exp_path = Path(parent_folder) / rollouts[SEED - 1]
-    for SUBSET_SIZE in [500, 600, 700, 800]:
+for SEED in range(FIRST_SEED, FIRST_SEED + N_SEEDS):
+    exp_path = Path(parent_folder) / rollouts[SEED - FIRST_SEED]
+    for SUBSET_SIZE in [2000]:
         global_buffer_file_name = (
             f"replay_buffer_{SUBSET_SIZE}{exp_name}_s{SEED}.joblib"
         )
@@ -324,7 +326,9 @@ for SEED in range(1, 4):
         buffers = {}
         for exp_folder, size in buffer_sizes.items():
             buffers[exp_folder] = ReplayBufferGpuWithPerfectActions(
-                action_space=spaces.Box(low=-np.inf, high=np.inf, shape=(2,)),
+                action_space=spaces.Box(
+                    low=-np.inf, high=np.inf, shape=(config.actor_output_dim,)
+                ),
                 n_step_return=1,
                 gamma=config.gamma,
                 device="cuda",
@@ -332,7 +336,9 @@ for SEED in range(1, 4):
                 observation_dim=OBS_DIM,
             )
         global_buffer = ReplayBufferGpuWithPerfectActions(
-            action_space=spaces.Box(low=-np.inf, high=np.inf, shape=(2,)),
+            action_space=spaces.Box(
+                low=-np.inf, high=np.inf, shape=(config.actor_output_dim,)
+            ),
             n_step_return=1,
             gamma=config.gamma,
             device="cuda",

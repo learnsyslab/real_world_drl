@@ -22,7 +22,7 @@ import sys
 N_ROLLOUTS = 300
 max_random_action_magnitude = 0.00025
 perfect_action_magnitude = 0.00025
-ideal_goal_pos = np.array([0.6, 0.0, 0.132])
+ideal_goal_pos = np.array([0.6, 0.0, 0.134])
 ideal_grasp_pos = np.array([0.0, 0.0, 0.0])
 
 base_exp_name = ""
@@ -39,7 +39,7 @@ else:
 if len(sys.argv) > 3:
     p = float(sys.argv[3])
 else:
-    p = 0.8
+    p = 0.6
 
 if len(sys.argv) > 4:
     n = int(sys.argv[4])
@@ -48,7 +48,7 @@ else:
 
 ps = [p for _ in range(n)]
 config = Config(episode_length=episode_length)
-env = make_env.create_simulated_env(
+env = make_env.create_simulated_env_3dof(
     {
         "initial_keyframe": 2,
         "live_view": False,

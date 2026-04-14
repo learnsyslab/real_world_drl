@@ -180,11 +180,23 @@ class SiemensConfig:
             ]
         )
     )
+
+    custom_home_position_pe: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [
+                0.3726598,
+                0.19371478,
+                0.22794928,
+                -1.9073441,
+                -0.06185328,
+                2.0956953,
+                1.4201956,
+            ]
+        )
+    )
     """custom home position for the robot end-effector"""
     goal_position_ground_truth: np.ndarray = field(
-        default_factory=lambda: np.array(
-            [5.1037920e-01, 0.1997, 1.2374244e-01 + DELTA_Z_TEST]
-        )
+        default_factory=lambda: np.array([0.510, 0.1997, 1.2374244e-01 + DELTA_Z_TEST])
     )  # 0.54262590, -0.030810941, 0.051836114 # 0.5422, -0.03125
     """the ground truth goal position in the real world"""
     grasp_position_ground_truth: np.ndarray = field(
@@ -217,13 +229,16 @@ class SiemensConfig:
     relative_motion_after_grasp: list = field(
         default_factory=lambda: [-0.01, 0.0, 0.005, 0.0, 0.0, 0.0]
     )
+    relative_motion_after_grasp_pe: list = field(
+        default_factory=lambda: [0.0, 0.0, 0.05, 0.0, 0.0, 0.0]
+    )
     """motion after grasping"""
     waypoints_after_grasp: list = field(
         default_factory=lambda: [
-            ([0.5222315, 0.26139268, 0.1362928 + DELTA_Z_TEST, 0.0, 0.0, 0.0], 0.002),
+            ([0.505, 0.26139268, 0.1362928 + DELTA_Z_TEST, 0.0, 0.0, 0.0], 0.002),
             (
                 [
-                    0.5045748,
+                    0.505,
                     0.19800043,
                     0.1336346 + DELTA_Z_TEST,
                     0.0,
@@ -234,7 +249,7 @@ class SiemensConfig:
             ),
             (
                 [
-                    5.0743343e-01,
+                    5.05e-01,
                     1.9927530e-01,
                     0.1255438 + DELTA_Z_TEST,  # 1.245438e-01 + DELTA_Z_TEST,
                     0.0,
@@ -277,3 +292,23 @@ class SiemensConfig:
         5000 / 1.5
     )  # use value smaller than real k to overcome friction
     rl_axis_indices: list = field(default_factory=lambda: [1, 2])
+
+    demo_w_D_w_o: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [
+                [-0.0108812, -0.9968131, 0.07902758, 0.5531513],
+                [0.9999358, -0.0105985, 0.00399576, 0.27225485],
+                [-0.00314545, 0.07906599, 0.9968645, 0.049977],
+            ]
+        )
+    )
+
+    demo_t_D_t_o: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [
+                [-0.03220806, -0.98976707, 0.13900985, -0.01457414],
+                [-0.99935341, 0.02966688, -0.02031458, 0.00354214],
+                [0.0159827, -0.13957429, -0.9900825, 0.0273347],
+            ]
+        )
+    )

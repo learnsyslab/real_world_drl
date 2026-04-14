@@ -376,6 +376,267 @@ class SACActor:
         finally:
             self.close()
 
+    def run_pe(self, data_queue: mp.Queue):
+        """Main process loop for the SAC actor.
+        This method will execture actions in the environment"""
+
+        try:
+            # reset the episode variables
+            obs, reset_info = self.env.reset(seed=self.config.seed)
+            obs = obs["observation.formatted"]
+            actual_grasp_pos = reset_info["reset.grasped.position"]
+
+            all_actions = []
+            all_rewards = []
+            all_observations = [obs]
+            all_infos = [reset_info]
+            t3 = None
+            dts = {"enc": [], "actor": [], "step": [], "out": [], "loop": []}
+            last_episode_rewards = []
+            last_episode_successes = []
+            all_episode_successes = []
+
+            episode_length = 0
+            sum_of_returns = 0.0
+            sum_of_squared_returns = 0.0
+            self.episode_num = 0
+
+            while self.global_step < self.config.total_timesteps:
+                self.global_step += 1
+                t0 = time.perf_counter()
+                if t3 is not None:
+                    dts["out"].append(t0 - t3)
+                obs_input = utils.shared_encode(
+                    self.shared_encoder,
+                    obs.view(1, -1),
+                    self.config.shared_encoder_gradient,
+                )
+                t1 = time.perf_counter()
+                action, _ = self.actor(obs_input)
+                action = action.view(-1).detach()
+
+                t2 = time.perf_counter()
+                all_actions.append(action)
+                obs, reward, termination, truncation, info = self.env.step(
+                    action.cpu().numpy()
+                )
+                obs = obs["observation.formatted"]
+                all_observations.append(obs)
+                all_infos.append(info)
+                all_rewards.append(reward)
+                done = termination or truncation
+
+                t3_ = time.perf_counter()
+                if not done:
+                    if t3 is not None:
+                        dts["loop"].append(t3_ - t3)
+                    t3 = t3_
+                    dts["enc"].append(t1 - t0)
+                    dts["actor"].append(t2 - t1)
+                    dts["step"].append(t3 - t2)
+
+                episode_length += 1
+
+                if done:
+                    if "custom_events" in info and "E_ROLLOUT_UNUSABLE" in map(
+                        lambda entry: entry[1], info["custom_events"]
+                    ):
+                        self.global_step -= episode_length
+                        obs, reset_info = self.env.reset()
+                        obs = obs["observation.formatted"]
+                        all_actions = []
+                        all_rewards = []
+                        all_observations = [obs]
+                        all_infos = [reset_info]
+                        actual_grasp_pos = reset_info["reset.grasped.position"]
+                        t3 = None
+                        dts = {
+                            "enc": [],
+                            "actor": [],
+                            "step": [],
+                            "out": [],
+                            "loop": [],
+                        }
+                        continue
+
+                    all_actions, all_observations, all_rewards, all_infos = (
+                        self.reward_fn(
+                            all_actions,
+                            all_observations,
+                            all_rewards,
+                            all_infos,
+                            actual_grasp_pos_xy=actual_grasp_pos[:2],
+                        )
+                    )
+
+                    episode_successful = "custom_events" in all_infos[
+                        -1
+                    ] and "E_SUCCESS" in map(
+                        lambda x: x[1], all_infos[-1]["custom_events"]
+                    )
+
+                    if self.args.eval:
+                        # save "reset.grasped.delta", "reset.goal_position.offset", "observation.perfect_action"
+                        # in a thread-safe way
+                        fd = os.open(
+                            os.path.join(self.checkpoint_path, "eval_infos.jsonl"),
+                            os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+                            0o644,
+                        )
+                        line = json.dumps(
+                            {
+                                "reset.grasped.delta_estimated": all_infos[0][
+                                    "reset.grasped.delta_estimated"
+                                ].tolist(),
+                                # "reset.goal_position.offset": all_infos[0][
+                                #     "reset.goal_position.offset"
+                                # ].tolist(),
+                                "episode_successful": episode_successful,
+                                "length": episode_length,
+                                "datetime": time.strftime(
+                                    "%Y-%m-%d %H:%M:%S", time.localtime()
+                                ),
+                            }
+                        )
+                        os.write(fd, (line + "\n").encode())
+                        os.close(fd)
+                    if episode_successful:
+                        last_episode_successes.append(1)
+                        all_episode_successes.append(1)
+                    else:
+                        last_episode_successes.append(0)
+                        all_episode_successes.append(0)
+                    if len(last_episode_successes) > 20:
+                        last_episode_successes.pop(0)
+
+                    data_queue.put(
+                        (all_actions, all_observations, all_rewards, termination)
+                    )
+                    if termination:
+                        print(f"Episode {self.episode_num} terminated.")
+                    elif truncation:
+                        print(f"Episode {self.episode_num} truncated.")
+                    self.episode_num += 1
+                    if self.episode_num >= self.args.max_episodes > 0:
+                        print("Reached maximum number of episodes. Stopping actor.")
+                        print(
+                            f"Mean success rate: {np.mean(all_episode_successes) * 100:.2f} %"
+                        )
+                        break
+                    episode_return = sum(all_rewards)
+
+                    last_episode_rewards.append(episode_return)
+                    if len(last_episode_rewards) > 10:
+                        last_episode_rewards.pop(0)
+                    # print(all_infos)
+
+                    sum_of_returns = sum(last_episode_rewards)
+                    sum_of_squared_returns = sum(
+                        map(lambda x: x**2, last_episode_rewards)
+                    )
+                    reward_window_size = len(last_episode_rewards)
+                    eps_return_std = (
+                        sum_of_squared_returns / reward_window_size
+                        - (sum_of_returns / reward_window_size) ** 2
+                        + 1e-10
+                    ) ** 0.5
+
+                    if not self.args.eval:
+                        self.writer.add_scalar(
+                            "charts/episodic_return", episode_return, self.global_step
+                        )
+                        self.writer.add_scalar(
+                            "charts/episodic_length", episode_length, self.global_step
+                        )
+
+                        self.writer.add_scalar(
+                            "charts/avg_return",
+                            sum_of_returns / reward_window_size,
+                            self.global_step,
+                        )
+                        self.writer.add_scalar(
+                            "charts/eps_return_std", eps_return_std, self.global_step
+                        )
+                        self.writer.add_scalar(
+                            "charts/rollout_success",
+                            sum(last_episode_successes) / len(last_episode_successes),
+                            self.episode_num,
+                        )
+
+                        self.writer.add_scalar(
+                            "charts/t_encoding", np.mean(dts["enc"]), self.global_step
+                        )
+                        self.writer.add_scalar(
+                            "charts/t_encoding_std",
+                            np.std(dts["enc"]),
+                            self.global_step,
+                        )
+                        self.writer.add_scalar(
+                            "charts/t_actor", np.mean(dts["actor"]), self.global_step
+                        )
+                        self.writer.add_scalar(
+                            "charts/t_actor_std",
+                            np.std(dts["actor"]),
+                            self.global_step,
+                        )
+                        self.writer.add_scalar(
+                            "charts/t_stepping", np.mean(dts["step"]), self.global_step
+                        )
+                        self.writer.add_scalar(
+                            "charts/t_stepping_std",
+                            np.std(dts["step"]),
+                            self.global_step,
+                        )
+                        self.writer.add_scalar(
+                            "charts/t_outside", np.mean(dts["out"]), self.global_step
+                        )
+                        self.writer.add_scalar(
+                            "charts/t_outside_std",
+                            np.std(dts["out"]),
+                            self.global_step,
+                        )
+                        self.writer.add_scalar(
+                            "charts/t_loop", np.mean(dts["loop"]), self.global_step
+                        )
+                        self.writer.add_scalar(
+                            "charts/t_loop_std", np.std(dts["loop"]), self.global_step
+                        )
+
+                    # reset the episode variables
+                    logging.info(f"Episode length: {episode_length}")
+                    episode_length = 0
+
+                    obs, reset_info = self.env.reset()
+                    obs = obs["observation.formatted"]
+                    actual_grasp_pos = reset_info["reset.grasped.position"]
+
+                    all_actions = []
+                    all_rewards = []
+                    all_observations = [obs]
+                    all_infos = [reset_info]
+                    t3 = None
+                    dts = {"enc": [], "actor": [], "step": [], "out": [], "loop": []}
+
+                    if not self.args.eval:
+                        logging.info(
+                            "Waiting for the learner to finish gradient updates..."
+                        )
+                        self.save_tb_additional_info()
+                        self._sync_nodes()
+                        logging.info("Learner fininshed gradient updates.")
+                    logging.info(
+                        f"success? {last_episode_successes[-1] == 1}; n_rollouts: {len(last_episode_successes)}; last success rate: {np.mean(last_episode_successes)}; all success rate: {np.mean(all_episode_successes)}"
+                    )
+
+        except SystemExit:
+            logging.info("Quit Training request received. Terminating actor process...")
+        except KeyboardInterrupt:
+            logging.info("Keyboard interrupt received. Terminating actor process...")
+        except Exception as e:
+            logging.error(f"An error occurred in the SAC Actor: {e}", exc_info=True)
+        finally:
+            self.close()
+
     def save_tb_additional_info(self):
         with open(os.path.join(self.checkpoint_path, "global_step"), "w") as f:
             f.write(f"{self.global_step} {self.episode_num}")
