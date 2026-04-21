@@ -368,11 +368,11 @@ class SACActor:
                     )
 
         except SystemExit:
-            logging.info("Quit Training request received. Terminating actor process...")
+            logging.info("[run fnc] Quit Training request received. Terminating actor process...")
         except KeyboardInterrupt:
-            logging.info("Keyboard interrupt received. Terminating actor process...")
+            logging.info("[run fnc] Keyboard interrupt received. Terminating actor process...")
         except Exception as e:
-            logging.error(f"An error occurred in the SAC Actor: {e}", exc_info=True)
+            logging.error(f"[run fnc] An error occurred in the SAC Actor: {e}", exc_info=True)
         finally:
             self.close()
 
@@ -629,11 +629,11 @@ class SACActor:
                     )
 
         except SystemExit:
-            logging.info("Quit Training request received. Terminating actor process...")
+            logging.info("[run_pe fnc]Quit Training request received. Terminating actor process...")
         except KeyboardInterrupt:
-            logging.info("Keyboard interrupt received. Terminating actor process...")
+            logging.info("[run_pe fnc] Keyboard interrupt received. Terminating actor process...")
         except Exception as e:
-            logging.error(f"An error occurred in the SAC Actor: {e}", exc_info=True)
+            logging.error(f"[run_pe fnc] An error occurred in the SAC Actor: {e}", exc_info=True)
         finally:
             self.close()
 

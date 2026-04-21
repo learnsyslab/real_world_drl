@@ -601,7 +601,7 @@ class DinoImageEncoderWrapper(ObservationWrapper):
                 return (x - self.mean) / self.std
 
         dino_backbone = torch.hub.load(
-            "/home/linusschwarz/.cache/torch/hub/facebookresearch_dinov2_main",
+            "/home/gabor/.cache/torch/hub/facebookresearch_dinov2_main",
             dino_model_name,
             trust_repo=True,
             source="local",

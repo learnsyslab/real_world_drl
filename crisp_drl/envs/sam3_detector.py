@@ -7,7 +7,7 @@ from PIL import Image
 class Sam3Detector:
     def __init__(self):
         model = build_sam3_image_model(
-            # checkpoint_path="/home/linus/.cache/huggingface/hub/models--facebook--sam3/snapshots/3c879f39826c281e95690f02c7821c4de09afae7/sam3.pt",
+            #checkpoint_path="/home/gabor/.cache/huggingface/hub/models--facebook--sam3/snapshots/3c879f39826c281e95690f02c7821c4de09afae7/sam3.pt",
         )
         processor = Sam3Processor(model, confidence_threshold=0.01)
         self.processor = processor
