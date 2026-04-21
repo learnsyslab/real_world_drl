@@ -776,6 +776,47 @@ class ZeroFTInjectorWrapper(ObservationWrapper):
         return observation
 
 
+class MotionPlannerWrapper(Wrapper):
+    """Exposes a `plan_and_execute` method on the env that streams a quintic
+    + Slerp EE-space trajectory directly to the CRISP cartesian impedance
+    controller via env.unwrapped.robot.set_target.
+
+    All kwargs passed to plan_and_execute override the defaults configured
+    here on the wrapper.
+    """
+
+    def __init__(
+        self,
+        env,
+        *,
+        max_linear_vel: float = 0.05,
+        max_angular_vel: float = 0.3,
+        workspace_box=None,
+        pos_tol: float = 1e-3,
+        rot_tol: float = 0.02,
+    ):
+        super().__init__(env)
+        self._mp_defaults = dict(
+            max_linear_vel=max_linear_vel,
+            max_angular_vel=max_angular_vel,
+            workspace_box=workspace_box,
+            pos_tol=pos_tol,
+            rot_tol=rot_tol,
+        )
+
+    def plan_and_execute(self, target_pose, **overrides):
+        from crisp_drl.envs.motion_planner import plan_and_execute
+
+        kwargs = {**self._mp_defaults, **overrides}
+        return plan_and_execute(self, target_pose, **kwargs)
+
+    def plan_and_execute_position(self, target_position, **overrides):
+        from crisp_drl.envs.motion_planner import plan_and_execute_position
+
+        kwargs = {**self._mp_defaults, **overrides}
+        return plan_and_execute_position(self, target_position, **kwargs)
+
+
 class ObservationFormatterWrapper(ObservationWrapper):
     def __init__(
         self, env, device, keys_ranges_scales: list[tuple[str, tuple[int, int], float]]

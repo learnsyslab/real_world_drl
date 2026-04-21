@@ -42,6 +42,7 @@ from crisp_drl.agents.shared.env_wrappers import (
     InsertionWrapperSim3D,
     InsertionWrapperSim3DoFRotZ,
     InsertionWrapperSim5DoF,
+    MotionPlannerWrapper,
     NaiveToGoalPositionWrapper,
     NaiveZForceWrapper,
     NoRotationActionWrapper,
@@ -296,6 +297,8 @@ def create_real_env_v4(config: Config, args=None) -> gym.Env:
             ("observation.features.wrist_camera", (0, 512), 1.0),
         ],
     )
+    if no_ft:
+        env = MotionPlannerWrapper(env)
     return env
 
 
@@ -447,6 +450,8 @@ def create_real_env_s1_pe(
         threshold=success_threshold,
     )
     env = CLIWrapper(env)
+    if no_ft:
+        env = MotionPlannerWrapper(env)
     return env
 
 
