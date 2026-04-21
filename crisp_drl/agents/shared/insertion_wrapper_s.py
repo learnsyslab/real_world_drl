@@ -37,6 +37,7 @@ class InsertionWrapperSiemens(Wrapper):
         minimal_start_goal_distance=0.0015,
         is_eval=False,
         use_pose_estimation=False,
+        use_ft_controller: bool = True,
     ):
         super().__init__(env)
         self.action_space = spaces.Box(-np.inf, np.inf, (2,))
@@ -58,6 +59,7 @@ class InsertionWrapperSiemens(Wrapper):
         self.minimal_start_goal_distance = minimal_start_goal_distance
         self.is_eval = is_eval
         self.use_pose_estimation = use_pose_estimation
+        self.use_ft_controller = use_ft_controller
         self.pose_estimation_helper = (
             PoseEstimationHelper(
                 assumed_orientation=alg_config.pose_estimation_assumed_orientation
@@ -411,27 +413,30 @@ class InsertionWrapperSiemens(Wrapper):
             )
 
         # lower down slowly until z-force is established in steps of 3mm
-        print("Establishing contact...")
-        self.obs, *_ = self.env.step(np.zeros(6))
-        self.env.tare_ft_sensor(self.obs)  # pyright: ignore[reportAttributeAccessIssue]
-        # [s.reset() for s in self.env.unwrapped.sensors]  # pyright: ignore[reportAttributeAccessIssue] # tare ft sensor
-        x_step, x_force_error = self.x_torque_controller_dx(self.obs)
-        while abs(x_force_error) > 0.1:  # wait until some contact
-            # delta_yz = self.yz_i_controller_dyz(self.obs, self.start_position[1:3])
-            delta_yz = (
-                np.clip(
-                    self.start_position[1:3]
-                    - self.obs["observation.state.cartesian"][1:3],
-                    -self.i_term_clip,
-                    self.i_term_clip,
-                )
-                if np.linalg.norm(self.obs["observation.velocity.cartesian"]) < 0.001
-                else np.zeros(2)
-            )
-            self.obs, *_ = self.env.step(
-                np.array([x_step, delta_yz[0], delta_yz[1], 0, 0, 0])
-            )
+        if self.use_ft_controller:
+            print("Establishing contact...")
+            self.obs, *_ = self.env.step(np.zeros(6))
+            self.env.tare_ft_sensor(self.obs)  # pyright: ignore[reportAttributeAccessIssue]
+            # [s.reset() for s in self.env.unwrapped.sensors]  # pyright: ignore[reportAttributeAccessIssue] # tare ft sensor
             x_step, x_force_error = self.x_torque_controller_dx(self.obs)
+            while abs(x_force_error) > 0.1:  # wait until some contact
+                # delta_yz = self.yz_i_controller_dyz(self.obs, self.start_position[1:3])
+                delta_yz = (
+                    np.clip(
+                        self.start_position[1:3]
+                        - self.obs["observation.state.cartesian"][1:3],
+                        -self.i_term_clip,
+                        self.i_term_clip,
+                    )
+                    if np.linalg.norm(self.obs["observation.velocity.cartesian"]) < 0.001
+                    else np.zeros(2)
+                )
+                self.obs, *_ = self.env.step(
+                    np.array([x_step, delta_yz[0], delta_yz[1], 0, 0, 0])
+                )
+                x_step, x_force_error = self.x_torque_controller_dx(self.obs)
+        else:
+            print("Skipping contact establishment (FT controller disabled).")
 
         self.n_steps = 0
         self.obs, reset_info = self.env.reset()
@@ -460,9 +465,10 @@ class InsertionWrapperSiemens(Wrapper):
 
     def step(self, action) -> tuple[Any, Any, bool, bool, dict[str, Any]]:
         # action_input = np.copy(action)
-        action = np.array(
-            [self.x_torque_controller_dx(self.obs)[0], action[0], action[1], 0, 0, 0]
+        x_action = (
+            self.x_torque_controller_dx(self.obs)[0] if self.use_ft_controller else 0.0
         )
+        action = np.array([x_action, action[0], action[1], 0, 0, 0])
 
         # apply safety box
         current_pos_yz = self.obs["observation.state.cartesian"][1:3]
@@ -500,8 +506,10 @@ class InsertionWrapperSiemensPE(Wrapper):
         safety_box_radius=0.002,
         safety_box_step_size=0.0004,
         step_limit=150,
+        use_ft_controller: bool = True,
     ):
         super().__init__(env)
+        self.use_ft_controller = use_ft_controller
         self.action_space = spaces.Box(-np.inf, np.inf, (2,))
         self.alg_config = alg_config
         self.env_config = env_config
@@ -753,18 +761,21 @@ class InsertionWrapperSiemensPE(Wrapper):
             self.env.unwrapped.gripper.set_target(0.4)  # type: ignore
             time.sleep(2.0)
 
-            # push with constant force (5N)
-            self.obs, *_ = self.env.step(np.zeros(6))
-            while self.obs["observation.state.sensors_bota_ft_sensor"][2] > -6:
-                if np.linalg.norm(self.obs["observation.velocity.cartesian"]) > 0.0015:
-                    self.obs, *_ = self.env.step(np.zeros(6))
-                else:
-                    dz, _ = self.z_force_controller_dz(self.obs)
-                    self.obs, *_ = self.env.step(
-                        np.array([0.0, 0.0, dz, 0.0, 0.0, 0.0])
-                    )
-            self.env.step(np.array([0.0, 0.0, -0.02, 0.0, 0.0, 0.0]))
-            time.sleep(2.0)
+            if self.use_ft_controller:
+                # push with constant force (5N)
+                self.obs, *_ = self.env.step(np.zeros(6))
+                while self.obs["observation.state.sensors_bota_ft_sensor"][2] > -6:
+                    if np.linalg.norm(self.obs["observation.velocity.cartesian"]) > 0.0015:
+                        self.obs, *_ = self.env.step(np.zeros(6))
+                    else:
+                        dz, _ = self.z_force_controller_dz(self.obs)
+                        self.obs, *_ = self.env.step(
+                            np.array([0.0, 0.0, dz, 0.0, 0.0, 0.0])
+                        )
+                self.env.step(np.array([0.0, 0.0, -0.02, 0.0, 0.0, 0.0]))
+                time.sleep(2.0)
+            else:
+                print("Skipping constant-force push (FT controller disabled).")
 
         print("homing...")
         self.env.unwrapped.home(home_config=self.home_config)  # type: ignore
@@ -905,27 +916,30 @@ class InsertionWrapperSiemensPE(Wrapper):
             )
 
         # lower down slowly until z-force is established in steps of 3mm
-        print("Establishing contact...")
-        self.obs, *_ = self.env.step(np.zeros(6))
-        self.env.tare_ft_sensor(self.obs)  # pyright: ignore[reportAttributeAccessIssue]
-        # [s.reset() for s in self.env.unwrapped.sensors]  # pyright: ignore[reportAttributeAccessIssue] # tare ft sensor
-        x_step, x_force_error = self.x_torque_controller_dx(self.obs)
-        while abs(x_force_error) > 0.1:  # wait until some contact
-            # delta_yz = self.yz_i_controller_dyz(self.obs, self.start_position[1:3])
-            delta_yz = (
-                np.clip(
-                    self.start_position[1:3]
-                    - self.obs["observation.state.cartesian"][1:3],
-                    -self.i_term_clip,
-                    self.i_term_clip,
-                )
-                if np.linalg.norm(self.obs["observation.velocity.cartesian"]) < 0.001
-                else np.zeros(2)
-            )
-            self.obs, *_ = self.env.step(
-                np.array([x_step, delta_yz[0], delta_yz[1], 0, 0, 0])
-            )
+        if self.use_ft_controller:
+            print("Establishing contact...")
+            self.obs, *_ = self.env.step(np.zeros(6))
+            self.env.tare_ft_sensor(self.obs)  # pyright: ignore[reportAttributeAccessIssue]
+            # [s.reset() for s in self.env.unwrapped.sensors]  # pyright: ignore[reportAttributeAccessIssue] # tare ft sensor
             x_step, x_force_error = self.x_torque_controller_dx(self.obs)
+            while abs(x_force_error) > 0.1:  # wait until some contact
+                # delta_yz = self.yz_i_controller_dyz(self.obs, self.start_position[1:3])
+                delta_yz = (
+                    np.clip(
+                        self.start_position[1:3]
+                        - self.obs["observation.state.cartesian"][1:3],
+                        -self.i_term_clip,
+                        self.i_term_clip,
+                    )
+                    if np.linalg.norm(self.obs["observation.velocity.cartesian"]) < 0.001
+                    else np.zeros(2)
+                )
+                self.obs, *_ = self.env.step(
+                    np.array([x_step, delta_yz[0], delta_yz[1], 0, 0, 0])
+                )
+                x_step, x_force_error = self.x_torque_controller_dx(self.obs)
+        else:
+            print("Skipping contact establishment (FT controller disabled).")
 
         self.n_steps = 0
         self.obs, reset_info = self.env.reset()
@@ -938,9 +952,10 @@ class InsertionWrapperSiemensPE(Wrapper):
 
     def step(self, action) -> tuple[Any, Any, bool, bool, dict[str, Any]]:
         # action_input = np.copy(action)
-        action = np.array(
-            [self.x_torque_controller_dx(self.obs)[0], action[0], action[1], 0, 0, 0]
+        x_action = (
+            self.x_torque_controller_dx(self.obs)[0] if self.use_ft_controller else 0.0
         )
+        action = np.array([x_action, action[0], action[1], 0, 0, 0])
 
         # apply safety box
         current_pos_yz = self.obs["observation.state.cartesian"][1:3]

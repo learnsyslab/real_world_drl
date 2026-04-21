@@ -257,9 +257,9 @@ def main():
         action="store_true",
         help="Run without the BOTA force-torque sensor. Uses my_env_v4_no_ft.yaml "
         "(empty sensor_configs), injects zero FT features so the trained policy's "
-        "obs shape is preserved, and disables InsertionWrapper's z-force controller "
-        "(z-action fixed at 0; no contact-establishing phase). Safe for testing "
-        "motion-planning algs without the physical sensor. Only applies to --task lego.",
+        "obs shape is preserved, and disables the FT-driven axis controller in "
+        "the active InsertionWrapper (no contact-establishing phase; substituted "
+        "axis action fixed at 0). Works with both --task lego and --task siemens.",
     )
     args = argparse.parse_args()
     config = Config()

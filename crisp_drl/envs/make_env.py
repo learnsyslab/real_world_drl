@@ -302,7 +302,8 @@ def create_real_env_v4(config: Config, args=None) -> gym.Env:
 def create_real_env_s1(
     alg_config: Config, env_config: SiemensConfig, args=None
 ) -> gym.Env:
-    env = make_env("my_env_v4")
+    no_ft = bool(args is not None and getattr(args, "no_ft_sensor", False))
+    env = make_env("my_env_v4_no_ft" if no_ft else "my_env_v4")
     print("Env created.")
     env.wait_until_ready()
     print("Env ready.")
@@ -311,11 +312,14 @@ def create_real_env_s1(
     env = NoGripperActionWrapper(env)
     env = LastObservationWrapper(env)
     # env = ContainerWatcherWrapper(env, ctx=multiprocessing.get_context("spawn"))
-    env = SensorTareWrapper(
-        env,
-        sensor_key="observation.state.sensors_bota_ft_sensor",
-        sensor_data_shape=(6,),
-    )
+    if no_ft:
+        env = ZeroFTInjectorWrapper(env)
+    else:
+        env = SensorTareWrapper(
+            env,
+            sensor_key="observation.state.sensors_bota_ft_sensor",
+            sensor_data_shape=(6,),
+        )
     is_eval = False if args is None else args.eval
     env = InsertionWrapperSiemens(
         env,
@@ -335,6 +339,7 @@ def create_real_env_s1(
         use_pose_estimation=True
         if args is not None and args.use_pose_estimation
         else False,
+        use_ft_controller=not no_ft,
     )
 
     # obs["observation.state.cartesian"][2] < 0.049)
@@ -371,7 +376,8 @@ def create_real_env_s1(
 def create_real_env_s1_pe(
     alg_config: Config, env_config: SiemensConfig, args=None
 ) -> gym.Env:
-    env = make_env("my_env_v4")
+    no_ft = bool(args is not None and getattr(args, "no_ft_sensor", False))
+    env = make_env("my_env_v4_no_ft" if no_ft else "my_env_v4")
     print("Env created.")
     env.wait_until_ready()
     print("Env ready.")
@@ -380,11 +386,14 @@ def create_real_env_s1_pe(
     env = NoGripperActionWrapper(env)
     env = LastObservationWrapper(env)
     # env = ContainerWatcherWrapper(env, ctx=multiprocessing.get_context("spawn"))
-    env = SensorTareWrapper(
-        env,
-        sensor_key="observation.state.sensors_bota_ft_sensor",
-        sensor_data_shape=(6,),
-    )
+    if no_ft:
+        env = ZeroFTInjectorWrapper(env)
+    else:
+        env = SensorTareWrapper(
+            env,
+            sensor_key="observation.state.sensors_bota_ft_sensor",
+            sensor_data_shape=(6,),
+        )
     is_eval = False if args is None else args.eval
     env = InsertionWrapperSiemensPE(
         env,
@@ -395,6 +404,7 @@ def create_real_env_s1_pe(
         step_limit=env_config.episode_length
         if not is_eval
         else 2 * env_config.episode_length,
+        use_ft_controller=not no_ft,
     )
 
     # obs["observation.state.cartesian"][2] < 0.049)
