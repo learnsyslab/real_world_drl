@@ -261,6 +261,15 @@ def main():
         "the active InsertionWrapper (no contact-establishing phase; substituted "
         "axis action fixed at 0). Works with both --task lego and --task siemens.",
     )
+    argparse.add_argument(
+        "--no_ft_success_threshold",
+        type=float,
+        default=4.0,
+        help="Classifier success threshold used when --no_ft_sensor is active "
+        "(siemens PE path only). Lower than --success_threshold because zero "
+        "FT features push Q(s, pi(s)) estimates out of the trained distribution. "
+        "Ignored unless --no_ft_sensor is set.",
+    )
     args = argparse.parse_args()
     config = Config()
     launch_processes(args, config)

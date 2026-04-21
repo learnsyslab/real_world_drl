@@ -435,11 +435,16 @@ def create_real_env_s1_pe(
             ("observation.features.wrist_camera", (0, 384), 1.0),
         ],
     )
+    success_threshold = (
+        getattr(args, "no_ft_success_threshold", 4.0)
+        if no_ft
+        else getattr(args, "success_threshold", 8.0)
+    )
     env = SuccessClassificationWrapper(
         env,
         args=args,
         sac_config=alg_config,
-        threshold=getattr(args, "success_threshold", 8.0),
+        threshold=success_threshold,
     )
     env = CLIWrapper(env)
     return env
