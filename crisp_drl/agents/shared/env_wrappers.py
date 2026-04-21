@@ -760,6 +760,22 @@ class LastObservationWrapper(Wrapper):
         return observation, reward, terminated, truncated, info
 
 
+class ZeroFTInjectorWrapper(ObservationWrapper):
+    def __init__(
+        self,
+        env,
+        key: str = "observation.state.sensors_bota_ft_sensor",
+        shape: tuple[int, ...] = (6,),
+    ):
+        super().__init__(env)
+        self.key = key
+        self.zeros = np.zeros(shape, dtype=np.float32)
+
+    def observation(self, observation):
+        observation[self.key] = self.zeros.copy()
+        return observation
+
+
 class ObservationFormatterWrapper(ObservationWrapper):
     def __init__(
         self, env, device, keys_ranges_scales: list[tuple[str, tuple[int, int], float]]

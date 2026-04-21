@@ -50,6 +50,7 @@ from crisp_drl.agents.shared.env_wrappers import (
     NoGripperActionWrapper,
     NoRotationNoGripperWrapperSim,
     ObservationFormatterWrapper,
+    ZeroFTInjectorWrapper,
     SafetyBoxWrapperXY,
     StepLimitEnforcerWrapper,
     SuccessClassificationWrapper,
@@ -230,7 +231,8 @@ def create_real_env_v3_timo(config: Config) -> gym.Env:
 
 
 def create_real_env_v4(config: Config, args=None) -> gym.Env:
-    env = make_env("my_env_v4")
+    no_ft = bool(args is not None and getattr(args, "no_ft_sensor", False))
+    env = make_env("my_env_v4_no_ft" if no_ft else "my_env_v4")
     print("Env created.")
     env.wait_until_ready()
     print("Env ready.")
@@ -239,11 +241,14 @@ def create_real_env_v4(config: Config, args=None) -> gym.Env:
     env = NoRotationNoGripperActionWrapper(env)
     env = LastObservationWrapper(env)
     # env = ContainerWatcherWrapper(env, ctx=multiprocessing.get_context("spawn"))
-    env = SensorTareWrapper(
-        env,
-        sensor_key="observation.state.sensors_bota_ft_sensor",
-        sensor_data_shape=(6,),
-    )
+    if no_ft:
+        env = ZeroFTInjectorWrapper(env)
+    else:
+        env = SensorTareWrapper(
+            env,
+            sensor_key="observation.state.sensors_bota_ft_sensor",
+            sensor_data_shape=(6,),
+        )
     is_eval = False if args is None else args.eval
     env = InsertionWrapper(
         env,
@@ -256,6 +261,7 @@ def create_real_env_v4(config: Config, args=None) -> gym.Env:
         use_pose_estimation=True
         if args is not None and args.use_pose_estimation
         else False,
+        use_ft_controller=not no_ft,
     )
 
     # obs["observation.state.cartesian"][2] < 0.049)

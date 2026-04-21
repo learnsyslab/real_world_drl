@@ -119,14 +119,18 @@ def launch_actor(
         #         "live_view": False,
         #     }
         # )
-        # env = make_env.create_real_env_v4(config, args)
-        env = (
-            make_env.create_real_env_s1(config, env_config=SiemensConfig(), args=args)
-            if not args or not args.use_pose_estimation
-            else make_env.create_real_env_s1_pe(
-                alg_config=config, env_config=SiemensConfig(), args=args
+        if args is not None and getattr(args, "task", "siemens") == "lego":
+            env = make_env.create_real_env_v4(config, args=args)
+        else:
+            env = (
+                make_env.create_real_env_s1(
+                    config, env_config=SiemensConfig(), args=args
+                )
+                if not args or not args.use_pose_estimation
+                else make_env.create_real_env_s1_pe(
+                    alg_config=config, env_config=SiemensConfig(), args=args
+                )
             )
-        )
         # rew_fn = make_rew.create_sim_reward_fn(  # noqa: F821
         #     self.config,
         #     ideal_goal_pos_xy=np.array([0.6, 0.0]),
@@ -239,6 +243,23 @@ def main():
         type=float,
         default=9.3,
         help="Threshold on mean Q(s, pi(s)) for appending E_SUCCESS and terminating.",
+    )
+    argparse.add_argument(
+        "--task",
+        type=str,
+        choices=["siemens", "lego"],
+        default="siemens",
+        help="Which task/env builder to use. 'siemens' keeps the current default "
+        "(create_real_env_s1[_pe]). 'lego' switches to create_real_env_v4.",
+    )
+    argparse.add_argument(
+        "--no_ft_sensor",
+        action="store_true",
+        help="Run without the BOTA force-torque sensor. Uses my_env_v4_no_ft.yaml "
+        "(empty sensor_configs), injects zero FT features so the trained policy's "
+        "obs shape is preserved, and disables InsertionWrapper's z-force controller "
+        "(z-action fixed at 0; no contact-establishing phase). Safe for testing "
+        "motion-planning algs without the physical sensor. Only applies to --task lego.",
     )
     args = argparse.parse_args()
     config = Config()

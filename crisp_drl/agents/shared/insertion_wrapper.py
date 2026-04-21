@@ -52,6 +52,7 @@ class InsertionWrapper(Wrapper):
         minimal_start_goal_distance=0.003,
         is_eval=False,
         use_pose_estimation=False,
+        use_ft_controller: bool = True,
     ):
         super().__init__(env)
         self.config = config
@@ -72,6 +73,7 @@ class InsertionWrapper(Wrapper):
         self.minimal_start_goal_distance = minimal_start_goal_distance
         self.is_eval = is_eval
         self.use_pose_estimation = use_pose_estimation
+        self.use_ft_controller = use_ft_controller
         self.pose_estimation_helper = (
             PoseEstimationHelper(
                 assumed_orientation=config.pose_estimation_assumed_orientation
@@ -333,16 +335,19 @@ class InsertionWrapper(Wrapper):
             np.zeros(3)
         )  # wait one step to come to a stop before zeroing ft data
         # lower down slowly until z-force is established in steps of 3mm
-        print("Establishing contact...")
-        self.env.tare_ft_sensor(self.obs)  # pyright: ignore[reportAttributeAccessIssue]
-        # [s.reset() for s in self.env.unwrapped.sensors]  # pyright: ignore[reportAttributeAccessIssue] # tare ft sensor
-        z_step, z_force_error = self.z_force_controller_dz(self.obs)
-        while abs(z_force_error) > 0.1:  # wait until some contact
-            delta_xy = (
-                self.start_position[0:2] - self.obs["observation.state.cartesian"][0:2]
-            )
-            self.obs, *_ = self.env.step(np.array([delta_xy[0], delta_xy[1], z_step]))
+        if self.use_ft_controller:
+            print("Establishing contact...")
+            self.env.tare_ft_sensor(self.obs)  # pyright: ignore[reportAttributeAccessIssue]
+            # [s.reset() for s in self.env.unwrapped.sensors]  # pyright: ignore[reportAttributeAccessIssue] # tare ft sensor
             z_step, z_force_error = self.z_force_controller_dz(self.obs)
+            while abs(z_force_error) > 0.1:  # wait until some contact
+                delta_xy = (
+                    self.start_position[0:2] - self.obs["observation.state.cartesian"][0:2]
+                )
+                self.obs, *_ = self.env.step(np.array([delta_xy[0], delta_xy[1], z_step]))
+                z_step, z_force_error = self.z_force_controller_dz(self.obs)
+        else:
+            print("Skipping contact establishment (FT controller disabled).")
 
         self.n_steps = 0
         self.obs, reset_info = self.env.reset()
@@ -369,9 +374,10 @@ class InsertionWrapper(Wrapper):
         return self.obs, reset_info
 
     def step(self, action) -> tuple[Any, Any, bool, bool, dict[str, Any]]:
-        action = np.array(
-            [action[0], action[1], self.z_force_controller_dz(self.obs)[0]]
+        z_action = (
+            self.z_force_controller_dz(self.obs)[0] if self.use_ft_controller else 0.0
         )
+        action = np.array([action[0], action[1], z_action])
 
         # apply safety box
         current_pos_xy = self.obs["observation.state.cartesian"][:2]
