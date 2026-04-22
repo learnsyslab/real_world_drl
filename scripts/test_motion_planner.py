@@ -30,6 +30,7 @@ from crisp_drl.envs.motion_planner import (
     PlanAndExecuteResult,
     plan_and_execute,
     plan_and_execute_position,
+    plan_and_execute_ruckig,
 )
 from crisp_py.utils.geometry import Pose
 
@@ -61,9 +62,7 @@ class _FakeEnv:
         self.unwrapped.robot = robot
 
 
-def run_math_only(args: argparse.Namespace) -> int:
-    """Exercise the planner math without any ROS or robot client."""
-
+def _make_fake_env():
     class _FakeConfig:
         publish_frequency = 50.0
 
@@ -83,8 +82,11 @@ def run_math_only(args: argparse.Namespace) -> int:
                 self._pose = pose.copy()
 
     robot = _FakeRobot()
-    env = _FakeEnv(robot)
+    return _FakeEnv(robot), robot
 
+
+def _run_math_quintic(args: argparse.Namespace) -> int:
+    env, robot = _make_fake_env()
     start = robot.end_effector_pose
     target = Pose(start.position + np.array([0.05, 0.02, -0.01]), start.orientation)
 
@@ -95,12 +97,10 @@ def run_math_only(args: argparse.Namespace) -> int:
         workspace_box=DEFAULT_WORKSPACE_BOX,
         dry_run=True,
     )
-    _print_result("math dry_run", res)
+    _print_result("quintic dry_run", res)
     assert res.waypoints is not None and len(res.waypoints) >= 2
-    wp0 = res.waypoints[0]
-    wpN = res.waypoints[-1]
-    assert np.allclose(wp0.position, start.position, atol=1e-9)
-    assert np.allclose(wpN.position, target.position, atol=1e-9)
+    assert np.allclose(res.waypoints[0].position, start.position, atol=1e-9)
+    assert np.allclose(res.waypoints[-1].position, target.position, atol=1e-9)
 
     res2 = plan_and_execute(
         env,
@@ -108,7 +108,7 @@ def run_math_only(args: argparse.Namespace) -> int:
         max_linear_vel=args.max_linear_vel,
         workspace_box=DEFAULT_WORKSPACE_BOX,
     )
-    _print_result("math execute (fake robot)", res2)
+    _print_result("quintic execute (fake robot)", res2)
     measured = robot.end_effector_pose
     assert np.allclose(measured.position, target.position, atol=1e-6), (
         f"fake robot did not track target: {measured.position} vs {target.position}"
@@ -116,10 +116,125 @@ def run_math_only(args: argparse.Namespace) -> int:
 
     bad_box = ((10.0, 11.0), (-1.0, 1.0), (-1.0, 1.0))
     res_bad = plan_and_execute(env, target, workspace_box=bad_box)
-    _print_result("math outside-box (expect abort)", res_bad)
+    _print_result("quintic outside-box (expect abort)", res_bad)
     assert res_bad.aborted and "outside_box" in res_bad.reason
 
-    print("[math_only] all assertions passed.")
+    print("[math_only quintic] all assertions passed.")
+    return 0
+
+
+def _run_math_ruckig(args: argparse.Namespace) -> int:
+    env, robot = _make_fake_env()
+    start = robot.end_effector_pose
+    target = Pose(start.position + np.array([0.05, 0.02, -0.01]), start.orientation)
+
+    # Dry-run: trajectory duration populated, waypoints present, final pos matches target.
+    res = plan_and_execute_ruckig(
+        env,
+        target,
+        max_linear_vel=args.max_linear_vel,
+        max_linear_acc=args.max_linear_acc,
+        max_linear_jerk=args.max_linear_jerk,
+        workspace_box=DEFAULT_WORKSPACE_BOX,
+        dry_run=True,
+    )
+    _print_result("ruckig dry_run", res)
+    assert res.trajectory_duration is not None and res.trajectory_duration > 0.0
+    assert res.waypoints is not None and len(res.waypoints) >= 2
+    assert np.allclose(res.waypoints[0].position, start.position, atol=1e-3)
+    assert np.linalg.norm(res.waypoints[-1].position - target.position) < 5e-3
+
+    # Full execute: fake robot snaps to set_target; final position must match target.
+    res2 = plan_and_execute_ruckig(
+        env,
+        target,
+        max_linear_vel=args.max_linear_vel,
+        max_linear_acc=args.max_linear_acc,
+        max_linear_jerk=args.max_linear_jerk,
+        workspace_box=DEFAULT_WORKSPACE_BOX,
+    )
+    _print_result("ruckig execute (fake robot)", res2)
+    measured = robot.end_effector_pose
+    assert np.linalg.norm(measured.position - target.position) < 1e-3, (
+        f"fake robot did not track target: {measured.position} vs {target.position}"
+    )
+    assert res2.final_velocity is not None
+
+    # Chained segments: call twice, feeding final_velocity into the next call's
+    # initial_velocity. On a colinear continuation, Ruckig should accelerate
+    # PAST v=0 into the second segment instead of decelerating to a full stop.
+    env2, robot2 = _make_fake_env()
+    start2 = robot2.end_effector_pose
+    mid = Pose(start2.position + np.array([0.05, 0.0, 0.0]), start2.orientation)
+    end = Pose(start2.position + np.array([0.10, 0.0, 0.0]), start2.orientation)
+
+    through_vel = np.array([args.max_linear_vel, 0.0, 0.0])
+    resA = plan_and_execute_ruckig(
+        env2,
+        mid,
+        max_linear_vel=args.max_linear_vel,
+        max_linear_acc=args.max_linear_acc,
+        max_linear_jerk=args.max_linear_jerk,
+        workspace_box=DEFAULT_WORKSPACE_BOX,
+        hold_after=False,
+        target_velocity=through_vel,
+    )
+    _print_result("ruckig chained seg 1", resA)
+
+    resB = plan_and_execute_ruckig(
+        env2,
+        end,
+        max_linear_vel=args.max_linear_vel,
+        max_linear_acc=args.max_linear_acc,
+        max_linear_jerk=args.max_linear_jerk,
+        workspace_box=DEFAULT_WORKSPACE_BOX,
+        initial_velocity=resA.final_velocity,
+        initial_acceleration=resA.final_acceleration,
+        hold_after=False,
+    )
+    _print_result("ruckig chained seg 2", resB)
+
+    # Sanity: segment 2 should be strictly shorter in time than a v=0 start
+    # of identical geometry if chaining actually carried momentum. We cannot
+    # assert sign because on a fake robot there is no controller lag, but
+    # Ruckig's internal duration should be smaller.
+    resB_cold = plan_and_execute_ruckig(
+        _make_fake_env()[0],
+        Pose(start2.position + np.array([0.05, 0.0, 0.0]), start2.orientation),
+        max_linear_vel=args.max_linear_vel,
+        max_linear_acc=args.max_linear_acc,
+        max_linear_jerk=args.max_linear_jerk,
+        workspace_box=DEFAULT_WORKSPACE_BOX,
+        hold_after=False,
+    )
+    print(
+        f"[ruckig chaining] hot-start T={resB.trajectory_duration:.3f}s "
+        f"vs cold-start T={resB_cold.trajectory_duration:.3f}s"
+    )
+    assert resB.trajectory_duration < resB_cold.trajectory_duration, (
+        "hot-start chained segment should complete faster than v=0 cold start"
+    )
+
+    # Workspace-box safety.
+    bad_box = ((10.0, 11.0), (-1.0, 1.0), (-1.0, 1.0))
+    res_bad = plan_and_execute_ruckig(env, target, workspace_box=bad_box)
+    _print_result("ruckig outside-box (expect abort)", res_bad)
+    assert res_bad.aborted and "outside_box" in res_bad.reason
+
+    print("[math_only ruckig] all assertions passed.")
+    return 0
+
+
+def run_math_only(args: argparse.Namespace) -> int:
+    """Exercise the planner math without any ROS or robot client."""
+    if args.backend in ("quintic", "both"):
+        rc = _run_math_quintic(args)
+        if rc != 0:
+            return rc
+    if args.backend in ("ruckig", "both"):
+        rc = _run_math_ruckig(args)
+        if rc != 0:
+            return rc
     return 0
 
 
@@ -186,23 +301,40 @@ def run_hardware(args: argparse.Namespace) -> int:
         rot_tol=args.rot_tol,
         timeout=args.timeout,
     )
+    ruckig_extra = dict(
+        max_linear_acc=args.max_linear_acc,
+        max_linear_jerk=args.max_linear_jerk,
+    )
+
+    def _go(target, chain_from=None):
+        if args.backend == "ruckig":
+            kw = {**common, **ruckig_extra}
+            if chain_from is not None:
+                kw["initial_velocity"] = chain_from.final_velocity
+                kw["initial_acceleration"] = chain_from.final_acceleration
+                kw["hold_after"] = False
+            return plan_and_execute_ruckig(env, target, **kw)
+        return plan_and_execute(env, target, **common)
 
     ok = True
+    last_res = None
     for i, offset in enumerate(HOPS[: args.n_hops]):
         target = Pose(start.position + offset, start.orientation)
-        print(f"\n--- hop {i+1}/{args.n_hops} offset={offset} ---")
-        res = plan_and_execute(env, target, **common)
+        print(f"\n--- hop {i+1}/{args.n_hops} offset={offset} backend={args.backend} ---")
+        res = _go(target, chain_from=last_res if args.chained else None)
         _print_result(f"hop {i+1}", res)
-        if not res.reached:
+        if not res.reached and not args.chained:
             ok = False
             if args.abort_on_fail:
                 print("[test] aborting further hops (reached=False).")
                 break
-        time.sleep(0.5)
+        last_res = res if args.chained else None
+        if not args.chained:
+            time.sleep(0.5)
 
     target_back = Pose(start.position.copy(), start.orientation)
     print("\n--- return to start ---")
-    res = plan_and_execute(env, target_back, **common)
+    res = _go(target_back, chain_from=last_res if args.chained else None)
     _print_result("return", res)
     ok = ok and res.reached
 
@@ -229,7 +361,22 @@ def main() -> int:
         help="Build the full gym env stack (like run_sac.py), then stream poses.",
     )
 
+    p.add_argument(
+        "--backend",
+        type=str,
+        choices=["quintic", "ruckig", "both"],
+        default="ruckig",
+        help="Which planner to exercise. 'both' runs both in math_only mode.",
+    )
+    p.add_argument(
+        "--chained",
+        action="store_true",
+        help="Ruckig only: feed previous hop's final velocity into the next "
+        "call (no v=0 pitstop between hops).",
+    )
     p.add_argument("--max_linear_vel", type=float, default=0.03)
+    p.add_argument("--max_linear_acc", type=float, default=0.5)
+    p.add_argument("--max_linear_jerk", type=float, default=5.0)
     p.add_argument("--max_angular_vel", type=float, default=0.3)
     p.add_argument(
         "--pos_tol",

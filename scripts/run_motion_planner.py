@@ -138,6 +138,13 @@ def main() -> int:
     p.add_argument("--eval", action="store_true", default=True)
     p.add_argument("--max_episodes", type=int, default=3)
 
+    p.add_argument(
+        "--mp_backend",
+        type=str,
+        choices=["quintic", "ruckig"],
+        default="ruckig",
+        help="Motion-planner backend inside MotionPlannerWrapper.",
+    )
     p.add_argument("--max_linear_vel", type=float, default=0.02)
     p.add_argument("--max_angular_vel", type=float, default=0.3)
     p.add_argument("--pos_tol", type=float, default=0.0035)

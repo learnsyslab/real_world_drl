@@ -298,7 +298,8 @@ def create_real_env_v4(config: Config, args=None) -> gym.Env:
         ],
     )
     if no_ft:
-        env = MotionPlannerWrapper(env)
+        mp_backend = getattr(args, "mp_backend", "quintic") if args is not None else "quintic"
+        env = MotionPlannerWrapper(env, backend=mp_backend)
     return env
 
 
@@ -451,7 +452,8 @@ def create_real_env_s1_pe(
     )
     env = CLIWrapper(env)
     if no_ft:
-        env = MotionPlannerWrapper(env)
+        mp_backend = getattr(args, "mp_backend", "quintic") if args is not None else "quintic"
+        env = MotionPlannerWrapper(env, backend=mp_backend)
     return env
 
 

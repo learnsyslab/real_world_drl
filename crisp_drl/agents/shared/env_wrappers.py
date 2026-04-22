@@ -777,25 +777,34 @@ class ZeroFTInjectorWrapper(ObservationWrapper):
 
 
 class MotionPlannerWrapper(Wrapper):
-    """Exposes a `plan_and_execute` method on the env that streams a quintic
-    + Slerp EE-space trajectory directly to the CRISP cartesian impedance
-    controller via env.unwrapped.robot.set_target.
+    """Exposes `plan_and_execute` on the env. Two backends:
+      - "quintic": closed-form quintic position + Slerp orientation, v=0 at both ends.
+      - "ruckig":  online 3D Cartesian OTG with explicit vel/acc/jerk caps and
+        chainable non-zero initial velocity.
 
-    All kwargs passed to plan_and_execute override the defaults configured
-    here on the wrapper.
+    Pass `backend="ruckig"` to select Ruckig. With Ruckig, successive
+    plan_and_execute calls within `chain_gap_s` automatically feed the previous
+    call's final velocity/acceleration into the next (continuous chaining).
     """
 
     def __init__(
         self,
         env,
         *,
+        backend: str = "quintic",
         max_linear_vel: float = 0.05,
         max_angular_vel: float = 0.3,
         workspace_box=None,
         pos_tol: float = 1e-3,
         rot_tol: float = 0.02,
+        max_linear_acc: float = 0.5,
+        max_linear_jerk: float = 5.0,
+        chain_gap_s: float = 0.1,
     ):
         super().__init__(env)
+        if backend not in ("quintic", "ruckig"):
+            raise ValueError(f"unknown MP backend {backend!r}")
+        self._backend = backend
         self._mp_defaults = dict(
             max_linear_vel=max_linear_vel,
             max_angular_vel=max_angular_vel,
@@ -803,8 +812,35 @@ class MotionPlannerWrapper(Wrapper):
             pos_tol=pos_tol,
             rot_tol=rot_tol,
         )
+        self._ruckig_defaults = dict(
+            max_linear_acc=max_linear_acc,
+            max_linear_jerk=max_linear_jerk,
+        )
+        self._chain_gap_s = chain_gap_s
+        self._last_exit_time: float | None = None
+        self._last_vel: np.ndarray | None = None
+        self._last_acc: np.ndarray | None = None
 
     def plan_and_execute(self, target_pose, **overrides):
+        if self._backend == "ruckig":
+            from crisp_drl.envs.motion_planner import plan_and_execute_ruckig
+
+            kwargs = {**self._mp_defaults, **self._ruckig_defaults, **overrides}
+            # Chain non-zero initial vel/acc if last call exited recently.
+            if (
+                "initial_velocity" not in kwargs
+                and self._last_exit_time is not None
+                and (time.monotonic() - self._last_exit_time) < self._chain_gap_s
+                and self._last_vel is not None
+            ):
+                kwargs["initial_velocity"] = self._last_vel
+                kwargs["initial_acceleration"] = self._last_acc
+            res = plan_and_execute_ruckig(self, target_pose, **kwargs)
+            self._last_exit_time = time.monotonic()
+            self._last_vel = res.final_velocity
+            self._last_acc = res.final_acceleration
+            return res
+
         from crisp_drl.envs.motion_planner import plan_and_execute
 
         kwargs = {**self._mp_defaults, **overrides}
@@ -812,8 +848,17 @@ class MotionPlannerWrapper(Wrapper):
 
     def plan_and_execute_position(self, target_position, **overrides):
         from crisp_drl.envs.motion_planner import plan_and_execute_position
+        from crisp_py.utils.geometry import Pose
 
         kwargs = {**self._mp_defaults, **overrides}
+        if self._backend == "ruckig":
+            # Use the pose-level chaining path for consistency.
+            robot = self.unwrapped.robot
+            goal = Pose(
+                np.asarray(target_position, dtype=np.float64),
+                robot.end_effector_pose.orientation,
+            )
+            return self.plan_and_execute(goal, **overrides)
         return plan_and_execute_position(self, target_position, **kwargs)
 
 

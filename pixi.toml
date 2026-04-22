@@ -124,6 +124,7 @@ crisp_python = { path = "../crisp_py", editable = true }
 tensorboard = ">=2.20.0, <3"
 gymnasium = { version = ">=0.29.1, <2", extras = ["classic-control"] }
 mujid = { path = "../mujid_realWorldDRL", editable = true }
+ruckig = "*"
 
 [feature.crisp.system-requirements]
 cuda = "12.0"
