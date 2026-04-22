@@ -36,10 +36,13 @@ from crisp_py.utils.geometry import Pose
 
 
 DEFAULT_WORKSPACE_BOX = ((0.2, 0.85), (-0.4, 0.4), (-0.1, 0.7))
+# Each hop = (position offset, unit rpy about tool-frame axes).
+# rpy is scaled by --rot_delta_deg at runtime; yaw-only here so roll/pitch
+# don't crash the tool into table/camera. Yaw sum = 0 → net no orientation drift.
 HOPS = [
-    np.array([0.02, 0.0, 0.0]),
-    np.array([-0.02, 0.02, 0.0]),
-    np.array([0.0, -0.02, 0.0]),
+    (np.array([0.02, 0.0, 0.0]),   np.array([0.0, 0.0,  1.0])),
+    (np.array([-0.02, 0.02, 0.0]), np.array([0.0, 0.0, -2.0])),
+    (np.array([0.0, -0.02, 0.0]),  np.array([0.0, 0.0,  1.0])),
 ]
 
 
@@ -318,9 +321,15 @@ def run_hardware(args: argparse.Namespace) -> int:
 
     ok = True
     last_res = None
-    for i, offset in enumerate(HOPS[: args.n_hops]):
-        target = Pose(start.position + offset, start.orientation)
-        print(f"\n--- hop {i+1}/{args.n_hops} offset={offset} backend={args.backend} ---")
+    for i, (offset, rpy_unit) in enumerate(HOPS[: args.n_hops]):
+        rpy_rad = np.radians(rpy_unit * args.rot_delta_deg)
+        delta_rot = Rotation.from_euler("xyz", rpy_rad)
+        target_rot = start.orientation * delta_rot  # body-frame rotation
+        target = Pose(start.position + offset, target_rot)
+        print(
+            f"\n--- hop {i+1}/{args.n_hops} offset={offset} "
+            f"rpy_deg={rpy_unit * args.rot_delta_deg} backend={args.backend} ---"
+        )
         res = _go(target, chain_from=last_res if args.chained else None)
         _print_result(f"hop {i+1}", res)
         if not res.reached and not args.chained:
@@ -393,6 +402,13 @@ def main() -> int:
     )
     p.add_argument("--timeout", type=float, default=15.0)
     p.add_argument("--n_hops", type=int, default=len(HOPS))
+    p.add_argument(
+        "--rot_delta_deg",
+        type=float,
+        default=10.0,
+        help="Per-hop yaw amplitude (tool-z) in deg. HOPS yaw pattern is scaled by "
+        "this. Use 0.0 for position-only hops.",
+    )
     p.add_argument("--abort_on_fail", action="store_true")
 
     p.add_argument(

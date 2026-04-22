@@ -60,6 +60,19 @@ def _quintic_s(u: float) -> float:
     return 10.0 * u**3 - 15.0 * u**4 + 6.0 * u**5
 
 
+def _slerp_probe(t_sim: float, slerp_start_t: float, slerp_end_t: float) -> float:
+    """Map sim-time to slerp probe with quintic ease so angular vel → 0 at endpoints."""
+    window = slerp_end_t - slerp_start_t
+    if window <= 0.0:
+        return slerp_end_t
+    u = (t_sim - slerp_start_t) / window
+    if u <= 0.0:
+        return slerp_start_t
+    if u >= 1.0:
+        return slerp_end_t
+    return slerp_start_t + _quintic_s(u) * window
+
+
 def _interpolate(
     start: Pose, goal: Pose, slerp: Slerp, u: float
 ) -> Pose:
@@ -482,7 +495,9 @@ def plan_and_execute_ruckig(
             ang,
         )
         # Build full waypoint list (position-only; orientation from slerp at same t).
-        waypoints: list[Pose] = [Pose(np.asarray(out.new_position), slerp([0.0])[0])]
+        waypoints: list[Pose] = [
+            Pose(np.asarray(out.new_position), slerp([_slerp_probe(0.0, slerp_start_t, slerp_end_t)])[0])
+        ]
         t_sim = 0.0
         while res != ruckig.Result.Finished:
             inp.current_position = out.new_position
@@ -490,7 +505,7 @@ def plan_and_execute_ruckig(
             inp.current_acceleration = out.new_acceleration
             res = otg.update(inp, out)
             t_sim += dt
-            probe = min(t_sim, slerp_end_t)
+            probe = _slerp_probe(t_sim, slerp_start_t, slerp_end_t)
             waypoints.append(Pose(np.asarray(out.new_position), slerp([probe])[0]))
             if t_sim > timeout:
                 break
@@ -513,6 +528,10 @@ def plan_and_execute_ruckig(
 
     previous_sigint, _freeze = _install_sigint_freeze(robot)
     t0 = time.monotonic()
+    # Sim-time tracker for slerp probe (advances by dt per Ruckig step).
+    # Decoupled from wall-clock to avoid loop-jitter stutter. The pre-loop
+    # otg.update() already advanced out.new_* to t=dt.
+    t_sim = dt
     aborted = False
     abort_reason = ""
     k = 0
@@ -552,15 +571,15 @@ def plan_and_execute_ruckig(
                     goal_pose = new_goal.copy()
                     inp.target_position = list(goal_pose.position)
                     # Re-key slerp from the current probed rotation to new goal
-                    # over a fresh (t_elapsed, t_elapsed + remaining_T) window.
-                    probe = min(t_elapsed, slerp_end_t)
-                    cur_rot = slerp([probe])[0]
+                    # over a fresh (t_sim, t_sim + T_rot_new) window. Using
+                    # sim-time, not wall-clock, keeps orientation in lockstep
+                    # with Ruckig position samples.
+                    cur_probe = _slerp_probe(t_sim, slerp_start_t, slerp_end_t)
+                    cur_rot = slerp([cur_probe])[0]
                     ang_remain = _angle_between(cur_rot, goal_pose.orientation)
                     T_rot_new = ang_remain / max(max_angular_vel, 1e-6)
-                    # Ruckig's new trajectory.duration will be set on the next update()
-                    # below; we temporarily use whatever Ruckig last reported.
-                    slerp_start_t = t_elapsed
-                    slerp_end_t = t_elapsed + max(T_rot_new, dt)
+                    slerp_start_t = t_sim
+                    slerp_end_t = t_sim + max(T_rot_new, dt)
                     slerp = Slerp(
                         [slerp_start_t, slerp_end_t],
                         Rotation.concatenate([cur_rot, goal_pose.orientation]),
@@ -571,10 +590,9 @@ def plan_and_execute_ruckig(
             inp.current_velocity = out.new_velocity
             inp.current_acceleration = out.new_acceleration
             res = otg.update(inp, out)
+            t_sim += dt
 
-            probe = min(time.monotonic() - t0, slerp_end_t)
-            if probe < slerp_start_t:
-                probe = slerp_start_t
+            probe = _slerp_probe(t_sim, slerp_start_t, slerp_end_t)
             rot = slerp([probe])[0]
             wp = Pose(np.asarray(out.new_position, dtype=np.float64), rot)
 
