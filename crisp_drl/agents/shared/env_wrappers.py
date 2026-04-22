@@ -777,10 +777,11 @@ class ZeroFTInjectorWrapper(ObservationWrapper):
 
 
 class MotionPlannerWrapper(Wrapper):
-    """Exposes `plan_and_execute` on the env. Two backends:
-      - "quintic": closed-form quintic position + Slerp orientation, v=0 at both ends.
-      - "ruckig":  online 3D Cartesian OTG with explicit vel/acc/jerk caps and
-        chainable non-zero initial velocity.
+    """Exposes `plan_and_execute` on the env. Three backends:
+    - "quintic": closed-form quintic position + Slerp orientation, v=0 at both ends.
+    - "ruckig": online 3D Cartesian OTG with explicit vel/acc/jerk caps and
+      chainable non-zero initial velocity.
+    - "spline": global C^2 Cartesian spline retimed by 1-DOF Ruckig.
 
     Pass `backend="ruckig"` to select Ruckig. With Ruckig, successive
     plan_and_execute calls within `chain_gap_s` automatically feed the previous
@@ -802,7 +803,7 @@ class MotionPlannerWrapper(Wrapper):
         chain_gap_s: float = 0.1,
     ):
         super().__init__(env)
-        if backend not in ("quintic", "ruckig"):
+        if backend not in ("quintic", "ruckig", "spline"):
             raise ValueError(f"unknown MP backend {backend!r}")
         self._backend = backend
         self._mp_defaults = dict(
@@ -841,6 +842,16 @@ class MotionPlannerWrapper(Wrapper):
             self._last_acc = res.final_acceleration
             return res
 
+        if self._backend == "spline":
+            from crisp_drl.envs.motion_planner import plan_and_execute_spline
+
+            kwargs = {**self._mp_defaults, **self._ruckig_defaults, **overrides}
+            res = plan_and_execute_spline(self, [target_pose], **kwargs)
+            self._last_exit_time = None
+            self._last_vel = None
+            self._last_acc = None
+            return res
+
         from crisp_drl.envs.motion_planner import plan_and_execute
 
         kwargs = {**self._mp_defaults, **overrides}
@@ -860,6 +871,18 @@ class MotionPlannerWrapper(Wrapper):
             )
             return self.plan_and_execute(goal, **overrides)
         return plan_and_execute_position(self, target_position, **kwargs)
+
+    def plan_and_execute_spline(self, waypoints, **overrides):
+        from crisp_drl.envs.motion_planner import plan_and_execute_spline
+
+        kwargs = {**self._mp_defaults, **self._ruckig_defaults, **overrides}
+        res = plan_and_execute_spline(self, waypoints, **kwargs)
+
+        # Prevent stale Ruckig chain state from affecting subsequent calls.
+        self._last_exit_time = None
+        self._last_vel = None
+        self._last_acc = None
+        return res
 
 
 class ObservationFormatterWrapper(ObservationWrapper):

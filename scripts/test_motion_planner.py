@@ -19,6 +19,7 @@ Two modes:
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import logging
 import sys
 import time
@@ -31,6 +32,7 @@ from crisp_drl.envs.motion_planner import (
     plan_and_execute,
     plan_and_execute_position,
     plan_and_execute_ruckig,
+    plan_and_execute_spline,
 )
 from crisp_py.utils.geometry import Pose
 
@@ -46,12 +48,108 @@ HOPS = [
 ]
 
 
+@dataclass
+class HardwareCaseResult:
+    name: str
+    backend: str
+    reached: bool
+    aborted: bool
+    reason: str
+    elapsed: float
+    pos_err_m: float
+    rot_err_rad: float
+    passed: bool
+    required: bool
+
+
 def _print_result(tag: str, res: PlanAndExecuteResult) -> None:
     print(
         f"[{tag}] reached={res.reached} aborted={res.aborted} reason={res.reason} "
         f"elapsed={res.elapsed:.3f}s pos_err={res.final_pose_error_m*1e3:.2f}mm "
         f"rot_err={np.degrees(res.final_orient_error_rad):.2f}deg"
     )
+
+
+def _inside_workspace_box(pos: np.ndarray, box=DEFAULT_WORKSPACE_BOX) -> bool:
+    return all(lo <= v <= hi for v, (lo, hi) in zip(pos, box))
+
+
+def _pose_is_finite(pose: Pose) -> bool:
+    return bool(np.all(np.isfinite(pose.position)))
+
+
+def _is_hard_failure(reason: str) -> bool:
+    hard_tokens = (
+        "safety_violation",
+        "outside_box",
+        "retarget_outside_box",
+        "callback_abort",
+        "ruckig_init_error",
+    )
+    return any(tok in reason for tok in hard_tokens)
+
+
+def _record_case(
+    reports: list[HardwareCaseResult],
+    *,
+    name: str,
+    backend: str,
+    res: PlanAndExecuteResult,
+    require_reached: bool,
+    required: bool = True,
+) -> bool:
+    passed = (not res.aborted) and (res.reached if require_reached else True)
+    reports.append(
+        HardwareCaseResult(
+            name=name,
+            backend=backend,
+            reached=res.reached,
+            aborted=res.aborted,
+            reason=res.reason,
+            elapsed=res.elapsed,
+            pos_err_m=res.final_pose_error_m,
+            rot_err_rad=res.final_orient_error_rad,
+            passed=passed,
+            required=required,
+        )
+    )
+    return passed
+
+
+def _print_hardware_summary(mode: str, reports: list[HardwareCaseResult]) -> None:
+    print(f"\n=== Hardware summary ({mode}) ===")
+    if not reports:
+        print("No cases executed.")
+        return
+    for r in reports:
+        req = "REQ" if r.required else "OPT"
+        status = "PASS" if r.passed else "FAIL"
+        print(
+            f"[{status}|{req}] {r.name} backend={r.backend} "
+            f"reached={r.reached} aborted={r.aborted} reason={r.reason} "
+            f"elapsed={r.elapsed:.3f}s pos_err={r.pos_err_m*1e3:.2f}mm "
+            f"rot_err={np.degrees(r.rot_err_rad):.2f}deg"
+        )
+
+    required = [r for r in reports if r.required]
+    failed_required = [r for r in required if not r.passed]
+    print(
+        f"Required pass rate: {len(required) - len(failed_required)}/{len(required)}"
+    )
+
+
+def _build_hops_targets(
+    start: Pose,
+    *,
+    n_hops: int,
+    rot_delta_deg: float,
+) -> list[Pose]:
+    targets: list[Pose] = []
+    for offset, rpy_unit in HOPS[:n_hops]:
+        rpy_rad = np.radians(rpy_unit * rot_delta_deg)
+        delta_rot = Rotation.from_euler("xyz", rpy_rad)
+        targets.append(Pose(start.position + offset, start.orientation * delta_rot))
+    return targets
 
 
 class _FakeEnv:
@@ -228,6 +326,57 @@ def _run_math_ruckig(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_math_spline(args: argparse.Namespace) -> int:
+    env, robot = _make_fake_env()
+    start = robot.end_effector_pose
+
+    wp1 = Pose(
+        start.position + np.array([0.03, 0.01, 0.00]),
+        start.orientation * Rotation.from_euler("z", np.radians(8.0)),
+    )
+    wp2 = Pose(
+        start.position + np.array([0.05, 0.02, -0.01]),
+        start.orientation * Rotation.from_euler("z", np.radians(-5.0)),
+    )
+    waypoints = [wp1, wp2]
+
+    res = plan_and_execute_spline(
+        env,
+        waypoints,
+        max_linear_vel=args.max_linear_vel,
+        max_linear_acc=args.max_linear_acc,
+        max_linear_jerk=args.max_linear_jerk,
+        workspace_box=DEFAULT_WORKSPACE_BOX,
+        dry_run=True,
+    )
+    _print_result("spline dry_run", res)
+    assert res.trajectory_duration is not None and res.trajectory_duration > 0.0
+    assert res.waypoints is not None and len(res.waypoints) >= 2
+    assert np.linalg.norm(res.waypoints[-1].position - wp2.position) < 5e-3
+
+    res2 = plan_and_execute_spline(
+        env,
+        waypoints,
+        max_linear_vel=args.max_linear_vel,
+        max_linear_acc=args.max_linear_acc,
+        max_linear_jerk=args.max_linear_jerk,
+        workspace_box=DEFAULT_WORKSPACE_BOX,
+    )
+    _print_result("spline execute (fake robot)", res2)
+    measured = robot.end_effector_pose
+    assert np.linalg.norm(measured.position - wp2.position) < 1e-3, (
+        f"fake robot did not track target: {measured.position} vs {wp2.position}"
+    )
+
+    bad_box = ((10.0, 11.0), (-1.0, 1.0), (-1.0, 1.0))
+    res_bad = plan_and_execute_spline(env, waypoints, workspace_box=bad_box)
+    _print_result("spline outside-box (expect abort)", res_bad)
+    assert res_bad.aborted and "outside_box" in res_bad.reason
+
+    print("[math_only spline] all assertions passed.")
+    return 0
+
+
 def run_math_only(args: argparse.Namespace) -> int:
     """Exercise the planner math without any ROS or robot client."""
     if args.backend in ("quintic", "both"):
@@ -236,6 +385,10 @@ def run_math_only(args: argparse.Namespace) -> int:
             return rc
     if args.backend in ("ruckig", "both"):
         rc = _run_math_ruckig(args)
+        if rc != 0:
+            return rc
+    if args.backend in ("spline", "both"):
+        rc = _run_math_spline(args)
         if rc != 0:
             return rc
     return 0
@@ -252,6 +405,12 @@ def _build_full_env(args: argparse.Namespace):
         rclpy.init()
 
     cfg = Config()
+    if not getattr(args, "load_policy", None):
+        args.load_policy = (
+            "lego/lego_weights" if args.task == "lego" else "siemens/siemens_weights"
+        )
+        print(f"[preflight] load_policy not provided, using default: {args.load_policy}")
+
     if args.task == "lego":
         return make_env.create_real_env_v4(cfg, args=args)
     return make_env.create_real_env_s1_pe(
@@ -287,6 +446,13 @@ def _build_standalone_env(cartesian_param_config: str | None = None):
 
 
 def run_hardware(args: argparse.Namespace) -> int:
+    if args.backend == "both":
+        print(
+            "[preflight] --backend=both is only supported with --math_only. "
+            "Choose one hardware backend: quintic, ruckig, or spline."
+        )
+        return 1
+
     if args.full_env:
         env = _build_full_env(args)
     else:
@@ -295,6 +461,34 @@ def run_hardware(args: argparse.Namespace) -> int:
     robot = env.unwrapped.robot
     start = robot.end_effector_pose
     print(f"Starting EE position: {start.position}")
+
+    mode_name = "full_env" if args.full_env else "standalone"
+    if not _pose_is_finite(start):
+        print("[preflight] start pose contains NaN/Inf; aborting.")
+        return 1
+    if not _inside_workspace_box(start.position, DEFAULT_WORKSPACE_BOX):
+        print(
+            "[preflight] start pose outside DEFAULT_WORKSPACE_BOX; aborting for safety."
+        )
+        return 1
+
+    if args.full_env:
+        if not hasattr(env, "plan_and_execute"):
+            print(
+                "[preflight] full_env is missing plan_and_execute. "
+                "Ensure MotionPlannerWrapper is attached (typically via --no_ft_sensor)."
+            )
+            return 1
+        if args.backend == "spline" and not hasattr(env, "plan_and_execute_spline"):
+            print(
+                "[preflight] backend=spline requested but env has no plan_and_execute_spline."
+            )
+            return 1
+
+    print(
+        f"[preflight] profile={args.hw_profile} backend={args.backend} "
+        f"workspace={DEFAULT_WORKSPACE_BOX}"
+    )
 
     common = dict(
         max_linear_vel=args.max_linear_vel,
@@ -309,45 +503,212 @@ def run_hardware(args: argparse.Namespace) -> int:
         max_linear_jerk=args.max_linear_jerk,
     )
 
-    def _go(target, chain_from=None):
-        if args.backend == "ruckig":
+    def _go(target, chain_from=None, force_hold_after: bool | None = None, backend=None):
+        used_backend = backend or args.backend
+
+        if used_backend == "ruckig":
             kw = {**common, **ruckig_extra}
             if chain_from is not None:
                 kw["initial_velocity"] = chain_from.final_velocity
                 kw["initial_acceleration"] = chain_from.final_acceleration
-                kw["hold_after"] = False
+                kw["hold_after"] = False if force_hold_after is None else force_hold_after
+            elif force_hold_after is not None:
+                kw["hold_after"] = force_hold_after
             return plan_and_execute_ruckig(env, target, **kw)
-        return plan_and_execute(env, target, **common)
 
-    ok = True
-    last_res = None
-    for i, (offset, rpy_unit) in enumerate(HOPS[: args.n_hops]):
-        rpy_rad = np.radians(rpy_unit * args.rot_delta_deg)
-        delta_rot = Rotation.from_euler("xyz", rpy_rad)
-        target_rot = start.orientation * delta_rot  # body-frame rotation
-        target = Pose(start.position + offset, target_rot)
-        print(
-            f"\n--- hop {i+1}/{args.n_hops} offset={offset} "
-            f"rpy_deg={rpy_unit * args.rot_delta_deg} backend={args.backend} ---"
+        if used_backend == "spline":
+            if args.full_env and hasattr(env, "plan_and_execute_spline"):
+                kw = {**common, **ruckig_extra}
+                if force_hold_after is not None:
+                    kw["hold_after"] = force_hold_after
+                return env.plan_and_execute_spline([target], **kw)
+
+            kw = {**common, **ruckig_extra}
+            if force_hold_after is not None:
+                kw["hold_after"] = force_hold_after
+            return plan_and_execute_spline(env, [target], **kw)
+
+        kw = dict(common)
+        if force_hold_after is not None:
+            kw["hold_after"] = force_hold_after
+        return plan_and_execute(env, target, **kw)
+
+    def _run_smoke_path() -> int:
+        ok = True
+        last_res = None
+        targets = _build_hops_targets(
+            start, n_hops=args.n_hops, rot_delta_deg=args.rot_delta_deg
         )
-        res = _go(target, chain_from=last_res if args.chained else None)
-        _print_result(f"hop {i+1}", res)
-        if not res.reached and not args.chained:
-            ok = False
-            if args.abort_on_fail:
-                print("[test] aborting further hops (reached=False).")
-                break
-        last_res = res if args.chained else None
-        if not args.chained:
-            time.sleep(0.5)
+        for i, target in enumerate(targets):
+            print(
+                f"\n--- hop {i+1}/{args.n_hops} backend={args.backend} "
+                f"profile={args.hw_profile} ---"
+            )
+            res = _go(target, chain_from=last_res if args.chained else None)
+            _print_result(f"hop {i+1}", res)
+            if not res.reached and not args.chained:
+                ok = False
+                if args.abort_on_fail:
+                    print("[test] aborting further hops (reached=False).")
+                    break
+            last_res = res if args.chained else None
+            if not args.chained:
+                time.sleep(0.5)
 
-    target_back = Pose(start.position.copy(), start.orientation)
-    print("\n--- return to start ---")
-    res = _go(target_back, chain_from=last_res if args.chained else None)
-    _print_result("return", res)
-    ok = ok and res.reached
+        target_back = Pose(start.position.copy(), start.orientation)
+        print("\n--- return to start ---")
+        res = _go(
+            target_back,
+            chain_from=last_res if args.chained else None,
+            force_hold_after=True,
+        )
+        _print_result("return", res)
+        ok = ok and res.reached and not res.aborted
+        return 0 if ok else 1
 
-    return 0 if ok else 1
+    def _run_robust_path() -> int:
+        reports: list[HardwareCaseResult] = []
+
+        # Case A: conservative translation baseline (no yaw).
+        baseline_targets = _build_hops_targets(start, n_hops=args.n_hops, rot_delta_deg=0.0)
+        for i, target in enumerate(baseline_targets):
+            res = _go(target, force_hold_after=True)
+            _print_result(f"robust baseline hop {i+1}", res)
+            _record_case(
+                reports,
+                name=f"baseline_hop_{i+1}",
+                backend=args.backend,
+                res=res,
+                require_reached=True,
+            )
+            if _is_hard_failure(res.reason):
+                _print_hardware_summary(mode_name, reports)
+                return 1
+
+        # Case B: requested smoke-level amplitude (20 mm XY, 10 deg yaw).
+        stress_targets = _build_hops_targets(
+            start, n_hops=args.n_hops, rot_delta_deg=args.rot_delta_deg
+        )
+        for i, target in enumerate(stress_targets):
+            res = _go(target, force_hold_after=True)
+            _print_result(f"robust stress hop {i+1}", res)
+            _record_case(
+                reports,
+                name=f"stress_hop_{i+1}",
+                backend=args.backend,
+                res=res,
+                require_reached=True,
+            )
+            if _is_hard_failure(res.reason):
+                _print_hardware_summary(mode_name, reports)
+                return 1
+
+        # Case C: chained Ruckig continuity in two colinear segments.
+        if args.backend == "ruckig":
+            mid = Pose(start.position + np.array([0.05, 0.0, 0.0]), start.orientation)
+            end = Pose(start.position + np.array([0.10, 0.0, 0.0]), start.orientation)
+            through_vel = np.array([args.max_linear_vel, 0.0, 0.0])
+            res1 = plan_and_execute_ruckig(
+                env,
+                mid,
+                **common,
+                **ruckig_extra,
+                hold_after=False,
+                target_velocity=through_vel,
+            )
+            _print_result("robust ruckig chain seg1", res1)
+            _record_case(
+                reports,
+                name="ruckig_chain_seg1",
+                backend="ruckig",
+                res=res1,
+                require_reached=False,
+            )
+
+            res2 = plan_and_execute_ruckig(
+                env,
+                end,
+                **common,
+                **ruckig_extra,
+                hold_after=False,
+                initial_velocity=res1.final_velocity,
+                initial_acceleration=res1.final_acceleration,
+            )
+            _print_result("robust ruckig chain seg2", res2)
+            _record_case(
+                reports,
+                name="ruckig_chain_seg2",
+                backend="ruckig",
+                res=res2,
+                require_reached=False,
+            )
+            if _is_hard_failure(res1.reason) or _is_hard_failure(res2.reason):
+                _print_hardware_summary(mode_name, reports)
+                return 1
+
+        # Case D: spline waypoint run (optional in full env if missing capability).
+        spline_supported = (not args.full_env) or hasattr(env, "plan_and_execute_spline")
+        if spline_supported:
+            wp1 = Pose(
+                start.position + np.array([0.03, 0.01, 0.00]),
+                start.orientation * Rotation.from_euler("z", np.radians(8.0)),
+            )
+            wp2 = Pose(
+                start.position + np.array([0.05, 0.02, -0.01]),
+                start.orientation * Rotation.from_euler("z", np.radians(-5.0)),
+            )
+            spline_kwargs = {**common, **ruckig_extra}
+
+            if args.full_env and hasattr(env, "plan_and_execute_spline"):
+                dry = env.plan_and_execute_spline([wp1, wp2], dry_run=True, **spline_kwargs)
+                run = env.plan_and_execute_spline([wp1, wp2], **spline_kwargs)
+            else:
+                dry = plan_and_execute_spline(env, [wp1, wp2], dry_run=True, **spline_kwargs)
+                run = plan_and_execute_spline(env, [wp1, wp2], **spline_kwargs)
+
+            _print_result("robust spline dry_run", dry)
+            _record_case(
+                reports,
+                name="spline_dry_run",
+                backend="spline",
+                res=dry,
+                require_reached=False,
+            )
+
+            _print_result("robust spline execute", run)
+            _record_case(
+                reports,
+                name="spline_execute",
+                backend="spline",
+                res=run,
+                require_reached=True,
+            )
+            if _is_hard_failure(run.reason):
+                _print_hardware_summary(mode_name, reports)
+                return 1
+        else:
+            print("[robust] skipping spline case: full_env does not expose plan_and_execute_spline")
+
+        # Final return-to-start settle.
+        ret = _go(Pose(start.position.copy(), start.orientation), force_hold_after=True)
+        _print_result("robust return", ret)
+        _record_case(
+            reports,
+            name="return_to_start",
+            backend=args.backend,
+            res=ret,
+            require_reached=True,
+        )
+
+        _print_hardware_summary(mode_name, reports)
+
+        required_failures = [r for r in reports if r.required and not r.passed]
+        return 1 if required_failures else 0
+
+    if args.hw_profile == "robust":
+        return _run_robust_path()
+
+    return _run_smoke_path()
 
 
 def main() -> int:
@@ -373,9 +734,16 @@ def main() -> int:
     p.add_argument(
         "--backend",
         type=str,
-        choices=["quintic", "ruckig", "both"],
+        choices=["quintic", "ruckig", "spline", "both"],
         default="ruckig",
-        help="Which planner to exercise. 'both' runs both in math_only mode.",
+        help="Which planner to exercise. 'both' runs all backends in math_only mode.",
+    )
+    p.add_argument(
+        "--hw_profile",
+        type=str,
+        choices=["smoke", "robust"],
+        default="smoke",
+        help="Hardware test profile. 'smoke' keeps quick checks; 'robust' runs staged safety-first suite.",
     )
     p.add_argument(
         "--chained",
@@ -419,6 +787,13 @@ def main() -> int:
         "Pass '' to skip loading (uses whatever is currently on the controller).",
     )
     p.add_argument("--task", type=str, choices=["siemens", "lego"], default="siemens")
+    p.add_argument(
+        "--load_policy",
+        type=str,
+        default="",
+        help="Checkpoint subdir under checkpoints/ used by SuccessClassificationWrapper. "
+        "If empty in full_env mode, defaults to task-specific weights.",
+    )
     p.add_argument("--use_pose_estimation", action="store_true")
     p.add_argument("--no_ft_sensor", action="store_true")
     p.add_argument("--eval", action="store_true", default=True)

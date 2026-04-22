@@ -451,9 +451,8 @@ def create_real_env_s1_pe(
         threshold=success_threshold,
     )
     env = CLIWrapper(env)
-    if no_ft:
-        mp_backend = getattr(args, "mp_backend", "quintic") if args is not None else "quintic"
-        env = MotionPlannerWrapper(env, backend=mp_backend)
+    mp_backend = getattr(args, "mp_backend", "quintic") if args is not None else "quintic"
+    env = MotionPlannerWrapper(env, backend=mp_backend)
     return env
 
 
