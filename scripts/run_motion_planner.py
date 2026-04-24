@@ -278,6 +278,12 @@ def main() -> int:
         "--task", type=str, choices=["siemens", "lego"], default="siemens"
     )
     p.add_argument("--use_pose_estimation", action="store_true", default=True)
+    p.add_argument(
+        "--use_6dof_grasp",
+        action="store_true",
+        default=False,
+        help="Enable the Siemens 6DoF grasp/action path (5D policy action + FT-controlled x).",
+    )
     p.add_argument("--no_ft_sensor", action="store_true", default=False)
     p.add_argument("--eval", action="store_true", default=True)
     p.add_argument("--max_episodes", type=int, default=3)
@@ -332,6 +338,13 @@ def main() -> int:
     )
     p.add_argument("--no_ft_success_threshold", type=float, default=4.0)
 
+    p.add_argument(
+        "--pose_viz_dir",
+        type=str,
+        default=None,
+        help="If set, save per-reset pose-estimation overlays (PNG) + raw NPZ "
+        "artifacts into this directory for offline inspection.",
+    )
     p.add_argument("--run_name", type=str, default=None)
     p.add_argument("--pre_train", type=str, default=None)
     p.add_argument("--expert_buffer_path", type=str, default=None)
@@ -360,6 +373,25 @@ def main() -> int:
         rclpy.init()
 
     cfg = Config()
+    force_zero_settle = False
+    if args.use_6dof_grasp:
+        if args.task != "siemens":
+            raise ValueError("--use_6dof_grasp is currently only supported for --task siemens.")
+        if not args.no_ft_sensor:
+            logger.warning(
+                "6DoF grasp mode with legacy 2D checkpoints cannot run post-MP RL policy rollout. "
+                "Keeping FT enabled, but forcing zero-action settle path."
+            )
+            force_zero_settle = True
+
+    logger.info(
+        "Config: task=%s use_pose_estimation=%s use_6dof_grasp=%s mp_backend=%s",
+        args.task,
+        args.use_pose_estimation,
+        args.use_6dof_grasp,
+        args.mp_backend,
+    )
+
     if args.task == "lego":
         env = make_env.create_real_env_v4(cfg, args=args)
     else:
@@ -379,12 +411,18 @@ def main() -> int:
         return 1
 
     policy_bundle = None
-    if not args.no_ft_sensor:
+    if not args.no_ft_sensor and not force_zero_settle:
         actor, shared_encoder, _device = _load_policy(args.load_policy, cfg, logger)
         policy_bundle = (actor, shared_encoder, cfg)
         logger.info(
             "FT sensor path: post-MP rollout uses RL policy (max_policy_steps=%d).",
             args.max_policy_steps,
+        )
+    elif force_zero_settle:
+        logger.info(
+            "FT sensor path: using zero-action settle (max_settle_steps=%d) "
+            "because checkpoint action dim is incompatible with 6DoF policy rollout.",
+            args.max_settle_steps,
         )
     else:
         logger.info(

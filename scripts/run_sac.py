@@ -270,8 +270,29 @@ def main():
         "FT features push Q(s, pi(s)) estimates out of the trained distribution. "
         "Ignored unless --no_ft_sensor is set.",
     )
+    argparse.add_argument(
+        "--use_6dof_grasp",
+        action="store_true",
+        help="Enable the 6DoF grasp path for the Siemens real environment. "
+        "The grasp motion keeps roll/pitch/yaw targets and pose estimation stops "
+        "forcing a fixed orientation.",
+    )
     args = argparse.parse_args()
     config = Config()
+    if args.use_6dof_grasp:
+        if args.task != "siemens":
+            raise ValueError("--use_6dof_grasp is currently only supported for --task siemens.")
+        config.actor_output_dim = 5
+        config.actor_nonvision_input_dim = 26
+        config.max_action = np.array(
+            [
+                0.00025,
+                0.00025,
+                np.deg2rad(0.25),
+                np.deg2rad(0.25),
+                np.deg2rad(0.25),
+            ]
+        )
     launch_processes(args, config)
 
 

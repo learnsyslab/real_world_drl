@@ -23,6 +23,23 @@ def printoptions(*args, **kwargs):
         np.set_printoptions(**original)
 
 
+def rot_matrix_to_euler_xyz(rot: np.ndarray) -> np.ndarray:
+    """Convert a 3x3 rotation matrix to XYZ roll-pitch-yaw Euler angles."""
+    sy = np.sqrt(rot[0, 0] ** 2 + rot[1, 0] ** 2)
+    singular = sy < 1e-6
+
+    if not singular:
+        roll = np.arctan2(rot[2, 1], rot[2, 2])
+        pitch = np.arctan2(-rot[2, 0], sy)
+        yaw = np.arctan2(rot[1, 0], rot[0, 0])
+    else:
+        roll = np.arctan2(-rot[1, 2], rot[1, 1])
+        pitch = np.arctan2(-rot[2, 0], sy)
+        yaw = 0.0
+
+    return np.array([roll, pitch, yaw])
+
+
 class InsertionWrapperSiemens(Wrapper):
     def __init__(
         self,
@@ -38,13 +55,20 @@ class InsertionWrapperSiemens(Wrapper):
         is_eval=False,
         use_pose_estimation=False,
         use_ft_controller: bool = True,
+        use_6dof_grasp: bool = False,
     ):
         super().__init__(env)
-        self.action_space = spaces.Box(-np.inf, np.inf, (2,))
+        self.use_6dof_grasp = use_6dof_grasp
+        self.action_space = spaces.Box(
+            -np.inf, np.inf, (5,) if self.use_6dof_grasp else (2,)
+        )
         self.alg_config = alg_config
         self.env_config = env_config
         self.home_config = env_config.custom_home_position
         self.grasp_position_ground_truth = env_config.grasp_position_ground_truth
+        self.grasp_orientation_ground_truth = np.array(
+            env_config.grasp_orientation_ground_truth_euler
+        )
         self.goal_position_ground_truth = env_config.goal_position_ground_truth
         self.grasp_randomisation_x_range = grasp_randomisation_x_range
         self.grasp_randomisation_z_range = grasp_randomisation_z_range
@@ -54,7 +78,6 @@ class InsertionWrapperSiemens(Wrapper):
         self.step_limit = step_limit
         self.n_since_last_home = 0
         self.first_reset = True
-        self.action_space = spaces.Box(-np.inf, np.inf, (2,))
         self.n_steps = 0
         self.minimal_start_goal_distance = minimal_start_goal_distance
         self.is_eval = is_eval
@@ -62,7 +85,8 @@ class InsertionWrapperSiemens(Wrapper):
         self.use_ft_controller = use_ft_controller
         self.pose_estimation_helper = (
             PoseEstimationHelper(
-                assumed_orientation=alg_config.pose_estimation_assumed_orientation
+                assumed_orientation=alg_config.pose_estimation_assumed_orientation,
+                lock_orientation=not self.use_6dof_grasp,
             )
             if use_pose_estimation
             else None
@@ -87,7 +111,10 @@ class InsertionWrapperSiemens(Wrapper):
         is_via=True,
         is_rotated=False,
     ):
-        target = np.concatenate((position, relative_pose_euler or [0.0, 0.0, 0.0]))
+        relative_pose = (
+            [0.0, 0.0, 0.0] if relative_pose_euler is None else relative_pose_euler
+        )
+        target = np.concatenate((position, relative_pose))
         obs, *_ = self.env.step(
             target
             - np.concatenate(
@@ -171,8 +198,11 @@ class InsertionWrapperSiemens(Wrapper):
         is_via=True,
     ):
         target = delta + current_obs["observation.state.target"][:3]
+        relative_pose = (
+            [0.0, 0.0, 0.0] if relative_pose_euler is None else relative_pose_euler
+        )
         obs, *_ = self.env.step(
-            np.concatenate((delta, relative_pose_euler or [0.0, 0.0, 0.0]))
+            np.concatenate((delta, relative_pose))
         )
 
         # coarse
@@ -318,7 +348,11 @@ class InsertionWrapperSiemens(Wrapper):
 
         print("Moving to grasp position...")
         self.obs = self.go_to_waypoint(
-            self.obs, self.target_grasp_position, distance_err=0.0002, is_via=False
+            self.obs,
+            self.target_grasp_position,
+            self.grasp_orientation_ground_truth if self.use_6dof_grasp else None,
+            distance_err=0.0002,
+            is_via=False,
         )
         print("Grasping...")
         self.env.unwrapped.gripper.set_target(0.2)  # type: ignore
@@ -336,7 +370,7 @@ class InsertionWrapperSiemens(Wrapper):
         self.obs = self.go_delta(
             self.obs,
             self.env_config.relative_motion_after_grasp[:3],
-            self.env_config.relative_motion_after_grasp[3:],
+            self.grasp_orientation_ground_truth if self.use_6dof_grasp else None,
         )
 
         # compute goal position
@@ -468,7 +502,16 @@ class InsertionWrapperSiemens(Wrapper):
         x_action = (
             self.x_torque_controller_dx(self.obs)[0] if self.use_ft_controller else 0.0
         )
-        action = np.array([x_action, action[0], action[1], 0, 0, 0])
+        if self.use_6dof_grasp:
+            if action.shape[0] < 5:
+                raise ValueError(
+                    f"Expected 5D action in 6DoF mode, got shape {action.shape}"
+                )
+            action = np.array(
+                [x_action, action[0], action[1], action[2], action[3], action[4]]
+            )
+        else:
+            action = np.array([x_action, action[0], action[1], 0, 0, 0])
 
         # apply safety box
         current_pos_yz = self.obs["observation.state.cartesian"][1:3]
@@ -507,14 +550,31 @@ class InsertionWrapperSiemensPE(Wrapper):
         safety_box_step_size=0.0004,
         step_limit=150,
         use_ft_controller: bool = True,
+        use_6dof_grasp: bool = False,
+        pose_viz_dir: Optional[str] = None,
     ):
         super().__init__(env)
         self.use_ft_controller = use_ft_controller
-        self.action_space = spaces.Box(-np.inf, np.inf, (2,))
+        self.use_6dof_grasp = use_6dof_grasp
+        self.pose_viz_dir = pose_viz_dir
+        self._pe_episode_idx = -1
+        self._pose_overlay_renderer = None
+        if pose_viz_dir is not None:
+            from crisp_drl.envs.pose_visualizer import PoseOverlayRenderer
+            self._pose_overlay_renderer = PoseOverlayRenderer(
+                camera_info_json_path="camera_parameters/realsense_d405_single.json",
+            )
+            print(f"[InsertionWrapperSiemensPE] pose viz dir = {pose_viz_dir}")
+        self.action_space = spaces.Box(
+            -np.inf, np.inf, (5,) if self.use_6dof_grasp else (2,)
+        )
         self.alg_config = alg_config
         self.env_config = env_config
         self.home_config = env_config.custom_home_position_pe
         self.grasp_position_ground_truth = env_config.grasp_position_ground_truth
+        self.grasp_orientation_ground_truth = np.array(
+            env_config.grasp_orientation_ground_truth_euler
+        )
         self.goal_position_ground_truth = env_config.goal_position_ground_truth
         self.pose_estimation_helper = PoseEstimationHelper(
             assumed_orientation=np.array([])
@@ -524,7 +584,6 @@ class InsertionWrapperSiemensPE(Wrapper):
         self.step_limit = step_limit
         self.n_since_last_home = 0
         self.first_reset = True
-        self.action_space = spaces.Box(-np.inf, np.inf, (2,))
         self.n_steps = 0
         self.pose_estimation_position_euler = np.array(
             alg_config.demo_goal_pose_estimation_euler
@@ -540,6 +599,72 @@ class InsertionWrapperSiemensPE(Wrapper):
         self.o_T_o_tcpgrasp = self.env_config.demo_w_D_w_o[:3, :3].T @ (
             self.grasp_position_ground_truth - self.env_config.demo_w_D_w_o[:3, 3]
         )
+        self.pose_estimation_settle_steps = 1
+        self.alignment_clip_angle_rad = np.deg2rad(25.0)
+        self.alignment_pitch_bias = np.deg2rad(-3.0)
+        print(
+            "[InsertionWrapperSiemensPE] use_6dof_grasp=",
+            self.use_6dof_grasp,
+            "action_dim=",
+            self.action_space.shape[0],
+        )
+
+    def compute_alignment_rpy(self, world_D_world_obj: np.ndarray) -> np.ndarray:
+        world_R_demoobj = self.env_config.demo_w_D_w_o[:3, :3]
+        world_R_estiobj = world_D_world_obj[:3, :3]
+        est_R_demo = world_R_estiobj @ world_R_demoobj.T
+
+        # In non-6DoF mode, take yaw only (open-loop yaw alignment).
+        if not self.use_6dof_grasp:
+            yaw_only = np.array(
+                [0.0, 0.0, rot_matrix_to_euler_xyz(est_R_demo)[2]]
+            )
+            yaw_only[2] = float(
+                np.clip(
+                    yaw_only[2],
+                    -self.alignment_clip_angle_rad,
+                    self.alignment_clip_angle_rad,
+                )
+            )
+            return yaw_only
+
+        # 6DoF: apply hardcoded pitch bias in the demo->estimated relative frame,
+        # then clip the *total* rotation magnitude (axis-angle) so the bound is
+        # meaningful under ZYX coupling and applies uniformly to all components.
+        from scipy.spatial.transform import Rotation as _R
+
+        bias_R = euler_to_rot_matrix(0.0, self.alignment_pitch_bias, 0.0)
+        biased = est_R_demo @ bias_R
+        rotvec = _R.from_matrix(biased).as_rotvec()
+        angle = float(np.linalg.norm(rotvec))
+        if angle > self.alignment_clip_angle_rad and angle > 0.0:
+            rotvec = rotvec * (self.alignment_clip_angle_rad / angle)
+            biased = _R.from_rotvec(rotvec).as_matrix()
+        return rot_matrix_to_euler_xyz(biased)
+
+    def estimate_world_pose_once(self, return_details: bool = False):
+        for _ in range(self.pose_estimation_settle_steps):
+            self.obs, *_ = self.env.step(np.zeros(6))
+        return self.pose_estimation_helper.estimate_siemens_world_frame_coarse(
+            self.obs["observation.images.wrist_camera"],
+            self.obs["observation.images.wrist_depth_camera"],
+            self.obs["observation.state.cartesian"],
+            return_details=return_details,
+        )
+
+    def validate_world_pose_transform(
+        self, world_D_world_obj: np.ndarray, tag: str
+    ) -> dict[str, float | bool]:
+        rot = world_D_world_obj[:3, :3]
+        finite_ok = bool(np.isfinite(world_D_world_obj).all())
+        orth_err = float(np.linalg.norm(rot.T @ rot - np.eye(3), ord="fro"))
+        det_r = float(np.linalg.det(rot))
+        valid = finite_ok and abs(det_r - 1.0) < 1e-2 and orth_err < 1e-2
+        print(
+            f"[InsertionWrapperSiemensPE] {tag} transform valid={valid} "
+            f"det={det_r:.6f} orth_err={orth_err:.6e}"
+        )
+        return {"valid": valid, "det_r": det_r, "orth_err": orth_err}
 
     def go_to_waypoint(
         self,
@@ -551,7 +676,10 @@ class InsertionWrapperSiemensPE(Wrapper):
         is_via=True,
         is_rotated=False,
     ):
-        target = np.concatenate((position, relative_pose_euler or [0.0, 0.0, 0.0]))
+        relative_pose = (
+            [0.0, 0.0, 0.0] if relative_pose_euler is None else relative_pose_euler
+        )
+        target = np.concatenate((position, relative_pose))
         obs, *_ = self.env.step(
             target
             - np.concatenate(
@@ -635,8 +763,11 @@ class InsertionWrapperSiemensPE(Wrapper):
         is_via=True,
     ):
         target = delta + current_obs["observation.state.target"][:3]
+        relative_pose = (
+            [0.0, 0.0, 0.0] if relative_pose_euler is None else relative_pose_euler
+        )
         obs, *_ = self.env.step(
-            np.concatenate((delta, relative_pose_euler or [0.0, 0.0, 0.0]))
+            np.concatenate((delta, relative_pose))
         )
 
         # coarse
@@ -788,16 +919,32 @@ class InsertionWrapperSiemensPE(Wrapper):
 
         self.obs, reset_info = self.env.reset(seed=seed, options=options)
         self.first_reset = False
+        self._pe_episode_idx += 1
 
-        # estimate
-        world_D_world_obj = (
-            self.pose_estimation_helper.estimate_siemens_world_frame_coarse(
-                self.obs["observation.images.wrist_camera"],
-                self.obs["observation.images.wrist_depth_camera"],
-                self.obs["observation.state.cartesian"],
+        # estimate (coarse)
+        _viz_enabled = self._pose_overlay_renderer is not None
+        if _viz_enabled:
+            world_D_world_obj, _coarse_details = self.estimate_world_pose_once(
+                return_details=True
             )
+            _coarse_rgb = np.copy(self.obs["observation.images.wrist_camera"])
+            _coarse_depth = np.copy(self.obs["observation.images.wrist_depth_camera"])
+            _coarse_tcp_cart = np.copy(self.obs["observation.state.cartesian"])
+            _coarse_pose_cam = _coarse_details["pose_cam"]
+            _coarse_mask = _coarse_details["mask"]
+            _coarse_world = np.copy(world_D_world_obj)
+        else:
+            world_D_world_obj = self.estimate_world_pose_once()
+        pose_check_coarse = self.validate_world_pose_transform(
+            world_D_world_obj, "coarse"
         )
-        print("Estimated: ", world_D_world_obj)
+        est_obj_pos = world_D_world_obj[:3, 3]
+        est_obj_euler = rot_matrix_to_euler_xyz(world_D_world_obj[:3, :3])
+        print("Estimated object pose (world frame):")
+        print(f"  position xyz [m] = {est_obj_pos}")
+        print(f"  orientation rpy [rad] = {est_obj_euler}")
+        print(f"  orientation rpy [deg] = {np.rad2deg(est_obj_euler)}")
+        print("Estimated transform matrix:", world_D_world_obj)
         world_T_demoobj_estiobj = (
             world_D_world_obj[:3, 3] - self.env_config.demo_w_D_w_o[:3, 3]
         )
@@ -806,68 +953,208 @@ class InsertionWrapperSiemensPE(Wrapper):
             world_T_demoobj_estiobj,
         )
 
-        world_X_demoobj = self.env_config.demo_w_D_w_o[:3, 0]
-        world_X_estiobj = world_D_world_obj[:3, 0]
-        relative_rotation_z = np.arctan2(
-            np.cross(world_X_demoobj, world_X_estiobj)[2],
-            np.dot(world_X_demoobj, world_X_estiobj),
+        # Apply 6DoF orientation alignment at pre-grasp hover so the wrist
+        # camera approaches refined PE from a demo-aligned viewpoint and the
+        # final descent delta is small. 25 deg axis-angle clip in
+        # compute_alignment_rpy caps the blast radius if coarse PE is bad.
+        # 3DoF PE mode keeps tool at home (no rotation), matching the safe
+        # legacy behavior.
+        coarse_alignment_rpy = self.compute_alignment_rpy(world_D_world_obj)
+        if self.use_6dof_grasp:
+            coarse_rel_euler = coarse_alignment_rpy
+            coarse_R_applied = euler_to_rot_matrix(*coarse_rel_euler)
+            print(
+                "coarse alignment rpy [deg] (applied at hover):",
+                np.rad2deg(coarse_rel_euler),
+            )
+        else:
+            coarse_rel_euler = None
+            coarse_R_applied = np.eye(3)
+            print(
+                "coarse alignment rpy [deg] (3DoF PE, not applied):",
+                np.rad2deg(coarse_alignment_rpy),
+            )
+        # Reassigned to the TOTAL applied (coarse + delta) after descent.
+        # At viz-dump time below, this reflects what has been applied so far
+        # (coarse only).
+        applied_alignment_rpy = (
+            np.asarray(coarse_rel_euler, dtype=np.float64)
+            if coarse_rel_euler is not None
+            else np.zeros(3)
         )
 
-        print(
-            "relative rotation around world z-axis: ", np.deg2rad(relative_rotation_z)
-        )
-
-        # go to grasp position+20mm adjusted by global delta rotate by +15° and adjust z rotation and y rotation
-        self.obs, *_ = self.env.step(
-            [0.0, 0.0, 0.0, 0.0, np.deg2rad(-3), relative_rotation_z]
+        # Pre-grasp hover: use the rotated grasp offset so a yawed object
+        # still ends up centered under the wrist camera for refined PE.
+        coarse_grasp_world = (
+            world_D_world_obj[:3, 3]
+            + world_D_world_obj[:3, :3] @ self.o_T_o_tcpgrasp
         )
         self.obs = self.go_to_waypoint(
             self.obs,
-            self.grasp_position_ground_truth
-            + world_T_demoobj_estiobj
-            + np.array([0.0, 0.0, 0.02]),
+            coarse_grasp_world + np.array([0.0, 0.0, 0.02]),
+            relative_pose_euler=coarse_rel_euler,
             distance_err=0.0002,
             is_via=False,
         )
 
-        # estimate
-        world_D_world_obj = (
-            self.pose_estimation_helper.estimate_siemens_world_frame_coarse(
+        # estimate (refined)
+        if _viz_enabled:
+            world_D_world_obj, _refined_details = self.estimate_world_pose_once(
+                return_details=True
+            )
+            _refined_rgb = np.copy(self.obs["observation.images.wrist_camera"])
+            _refined_depth = np.copy(self.obs["observation.images.wrist_depth_camera"])
+            _refined_tcp_cart = np.copy(self.obs["observation.state.cartesian"])
+            _refined_pose_cam = _refined_details["pose_cam"]
+            _refined_mask = _refined_details["mask"]
+            _refined_world = np.copy(world_D_world_obj)
+        else:
+            world_D_world_obj = self.estimate_world_pose_once()
+        pose_check_refined = self.validate_world_pose_transform(
+            world_D_world_obj, "refined"
+        )
+        est_obj_pos_refined = world_D_world_obj[:3, 3]
+        est_obj_euler_refined = rot_matrix_to_euler_xyz(world_D_world_obj[:3, :3])
+        print("Refined estimated object pose (world frame):")
+        print(f"  position xyz [m] = {est_obj_pos_refined}")
+        print(f"  orientation rpy [rad] = {est_obj_euler_refined}")
+        print(f"  orientation rpy [deg] = {np.rad2deg(est_obj_euler_refined)}")
+
+        # Grasp position: use the full est_R so the object-frame grasp offset
+        # (o_T_o_tcpgrasp) is placed into the world correctly regardless of
+        # object roll/pitch/yaw.
+        est_R = world_D_world_obj[:3, :3]
+        w_T_w_tcpgrasp = world_D_world_obj[:3, 3] + est_R @ self.o_T_o_tcpgrasp
+
+        # Grasp orientation: preserve "gripper-in-object" relative to demo,
+        # target total = est_R_demo @ R_home (see compute_alignment_rpy).
+        # The coarse alignment was already applied at the pre-grasp hover,
+        # so the refined stage commands only the DELTA from coarse->refined.
+        # go_to_waypoint pre-multiplies in world frame:
+        #   R_new = R_delta @ (R_coarse @ R_home) == R_refined @ R_home
+        #   => R_delta = R_refined @ R_coarse^T
+        if self.use_6dof_grasp:
+            refined_rel_euler_full = self.compute_alignment_rpy(world_D_world_obj)
+            refined_R = euler_to_rot_matrix(*refined_rel_euler_full)
+            delta_R = refined_R @ coarse_R_applied.T
+            target_rel_euler = rot_matrix_to_euler_xyz(delta_R)
+            print(
+                "full refined alignment rpy [deg]:",
+                np.rad2deg(refined_rel_euler_full),
+                " delta applied on descent rpy [deg]:",
+                np.rad2deg(target_rel_euler),
+            )
+        else:
+            target_rel_euler = None
+            refined_rel_euler_full = np.zeros(3)
+            print("3DoF PE: descent stays top-down (no gripper rotation)")
+        est_Z = est_R[:, 2]
+        tilt_cos = float(np.clip(est_Z[2], -1.0, 1.0))
+        print(
+            "Estimated grasp position (full est_R):",
+            w_T_w_tcpgrasp,
+            " tilt [deg]:",
+            np.rad2deg(np.arccos(tilt_cos)),
+        )
+
+        refined_alignment_rpy = refined_rel_euler_full
+        print("refined alignment rpy [deg] (total):", np.rad2deg(refined_alignment_rpy))
+
+        if _viz_enabled:
+            try:
+                from crisp_drl.envs.pose_visualizer import dump_raw_npz
+
+                paths = self._pose_overlay_renderer.save_pair(
+                    out_dir=self.pose_viz_dir,
+                    episode_idx=self._pe_episode_idx,
+                    rgb=_coarse_rgb,
+                    mask=_coarse_mask,
+                    pose_cam_coarse=_coarse_pose_cam,
+                    pose_cam_refined=_refined_pose_cam,
+                    rgb_refined=_refined_rgb,
+                    mask_refined=_refined_mask,
+                )
+                raw_path = dump_raw_npz(
+                    out_dir=self.pose_viz_dir,
+                    episode_idx=self._pe_episode_idx,
+                    rgb_coarse=_coarse_rgb,
+                    rgb_refined=_refined_rgb,
+                    depth_coarse=_coarse_depth,
+                    depth_refined=_refined_depth,
+                    mask_coarse=_coarse_mask,
+                    mask_refined=_refined_mask,
+                    pose_cam_coarse=_coarse_pose_cam,
+                    pose_cam_refined=_refined_pose_cam,
+                    world_pose_coarse=_coarse_world,
+                    world_pose_refined=_refined_world,
+                    tcp_cartesian_coarse=_coarse_tcp_cart,
+                    tcp_cartesian_refined=_refined_tcp_cart,
+                    applied_alignment_rpy=np.asarray(applied_alignment_rpy),
+                    refined_alignment_rpy=np.asarray(refined_alignment_rpy),
+                    pose_check_coarse_det_r=np.array([pose_check_coarse["det_r"]], dtype=np.float32),
+                    pose_check_coarse_orth_err=np.array([pose_check_coarse["orth_err"]], dtype=np.float32),
+                    pose_check_refined_det_r=np.array([pose_check_refined["det_r"]], dtype=np.float32),
+                    pose_check_refined_orth_err=np.array([pose_check_refined["orth_err"]], dtype=np.float32),
+                )
+                print(f"[pose viz] saved {paths} and {raw_path}")
+            except Exception as e:
+                print(f"[pose viz] failed to save artifacts: {e}")
+
+        # Final descent: apply target_rel_euler (= coarse->refined DELTA) at
+        # the refined hover so gripper-in-object matches the demo. Coarse
+        # portion was already commanded before refined PE. Rotation delta
+        # is applied ONCE at the hover step and then persists on the robot
+        # target_pose; the descent call MUST pass None to avoid doubling
+        # the rotation (and breaking the undo at end of this method).
+        print("Moving to pre-grasp hover...")
+        hover_xyz = w_T_w_tcpgrasp + np.array([0.0, 0.0, 0.015])
+        self.obs = self.go_to_waypoint(
+            self.obs,
+            hover_xyz,
+            relative_pose_euler=target_rel_euler,
+            distance_err=0.0005,
+            is_via=False,
+        )
+        print("Descending to grasp...")
+        self.obs = self.go_to_waypoint(
+            self.obs,
+            w_T_w_tcpgrasp,
+            relative_pose_euler=None,
+            distance_err=0.0002,
+            is_via=False,
+        )
+        print("Estimating pose at grasp waypoint (pre-close)...")
+        t_D_t_o_at_grasp, _grasp_details = (
+            self.pose_estimation_helper.estimate_siemens_tcp_frame_coarse(
                 self.obs["observation.images.wrist_camera"],
                 self.obs["observation.images.wrist_depth_camera"],
-                self.obs["observation.state.cartesian"],
+                return_details=True,
             )
         )
-
-        w_T_w_tcpgrasp = (
-            world_D_world_obj[:3, 3] + world_D_world_obj[:3, :3] @ self.o_T_o_tcpgrasp
-        )
-        print("Estimated grasp position: ", w_T_w_tcpgrasp)
-
-        world_X_demoobj = self.env_config.demo_w_D_w_o[:3, 0]
-        world_X_estiobj = world_D_world_obj[:3, 0]
-        relative_rotation_z_v2 = np.arctan2(
-            np.cross(world_X_demoobj, world_X_estiobj)[2],
-            np.dot(world_X_demoobj, world_X_estiobj),
-        )
-
         print(
-            "relative rotation around world z-axis: ",
-            np.deg2rad(relative_rotation_z_v2),
+            "pre-close tcp-frame object translation [m]:",
+            t_D_t_o_at_grasp[:3, 3],
         )
+        if _viz_enabled:
+            try:
+                grasp_overlay_png = self._pose_overlay_renderer.save_single(
+                    out_dir=self.pose_viz_dir,
+                    episode_idx=self._pe_episode_idx,
+                    rgb=self.obs["observation.images.wrist_camera"],
+                    pose_cam_obj=_grasp_details["pose_cam"],
+                    mask=_grasp_details["mask"],
+                    suffix="grasp_preclose",
+                    label=f"ep{self._pe_episode_idx} grasp pre-close",
+                )
+                print(f"[pose viz] saved grasp pre-close overlay: {grasp_overlay_png}")
+            except Exception as e:
+                print(f"[pose viz] failed to save grasp pre-close overlay: {e}")
 
-        self.obs, *_ = self.env.step(
-            [0.0, 0.0, 0.0, 0.0, 0.0, relative_rotation_z_v2 - relative_rotation_z]
-        )
-
-        # use delta in gripper frame to demo -> transform into world coordinates and apply
-        print("Moving to grasp position...")
-        self.obs = self.go_to_waypoint(
-            self.obs,
-            w_T_w_tcpgrasp,  # + np.array([0.0, 0.0, 0.01]),
-            distance_err=0.0002,
-            is_via=False,
-        )
+        # Track the TOTAL applied orientation (coarse @ hover + delta @ descent
+        # == refined_rel_euler_full) so the post-pickup "undo" inverses the
+        # orientation we actually commanded. 3DoF PE mode didn't rotate ->
+        # zeros -> undo is a no-op.
+        applied_alignment_rpy = np.asarray(refined_rel_euler_full, dtype=np.float64)
 
         print("Grasping...")
         self.env.unwrapped.gripper.set_target(0.2)  # type: ignore
@@ -892,6 +1179,17 @@ class InsertionWrapperSiemensPE(Wrapper):
             self.obs["observation.images.wrist_camera"],
             self.obs["observation.images.wrist_depth_camera"],
         )
+        if _viz_enabled:
+            try:
+                grasped_png = self._pose_overlay_renderer.save_rgb(
+                    out_dir=self.pose_viz_dir,
+                    episode_idx=self._pe_episode_idx,
+                    rgb=self.obs["observation.images.wrist_camera"],
+                    suffix="grasped",
+                )
+                print(f"[pose viz] saved grasped image: {grasped_png}")
+            except Exception as e:
+                print(f"[pose viz] failed to save grasped image: {e}")
         self.estimated_grasp_delta = (
             t_D_t_o[:3, 3] - self.env_config.demo_t_D_t_o[:3, 3]
         )
@@ -906,7 +1204,22 @@ class InsertionWrapperSiemensPE(Wrapper):
 
         self.start_position = self.goal_position.copy()
 
-        self.obs, *_ = self.env.step([0.0, 0.0, 0.0, 0.0, 0.0, -relative_rotation_z_v2])
+        applied_alignment_rot = euler_to_rot_matrix(
+            applied_alignment_rpy[0],
+            applied_alignment_rpy[1],
+            applied_alignment_rpy[2],
+        )
+        undo_alignment_rpy = rot_matrix_to_euler_xyz(applied_alignment_rot.T)
+        self.obs, *_ = self.env.step(
+            [
+                0.0,
+                0.0,
+                0.0,
+                undo_alignment_rpy[0],
+                undo_alignment_rpy[1],
+                undo_alignment_rpy[2],
+            ]
+        )
         for pose, res in self.env_config.waypoints_after_grasp:
             self.obs = self.go_to_waypoint(
                 self.obs,
@@ -944,6 +1257,32 @@ class InsertionWrapperSiemensPE(Wrapper):
         self.n_steps = 0
         self.obs, reset_info = self.env.reset()
         reset_info["reset.grasped.position"] = self.actual_grasp_position
+        reset_info["reset.pose_estimation.object_pose_world.position"] = (
+            est_obj_pos_refined
+        )
+        reset_info["reset.pose_estimation.object_pose_world.euler_rpy"] = (
+            est_obj_euler_refined
+        )
+        reset_info["reset.pose_estimation.object_pose_world.matrix"] = world_D_world_obj
+        reset_info["reset.pose_estimation.object_pose_world.valid"] = np.array(
+            [pose_check_refined["valid"]], dtype=np.float32
+        )
+        reset_info["reset.pose_estimation.object_pose_world.det_r"] = np.array(
+            [pose_check_refined["det_r"]], dtype=np.float32
+        )
+        reset_info["reset.pose_estimation.object_pose_world.orth_err"] = np.array(
+            [pose_check_refined["orth_err"]], dtype=np.float32
+        )
+        reset_info["reset.pose_estimation.object_pose_world.coarse_valid"] = np.array(
+            [pose_check_coarse["valid"]], dtype=np.float32
+        )
+        reset_info["reset.pose_estimation.alignment_rpy_applied"] = applied_alignment_rpy
+        reset_info["reset.pose_estimation.object_pose_tcp_at_grasp.position"] = (
+            t_D_t_o_at_grasp[:3, 3]
+        )
+        reset_info["reset.pose_estimation.object_pose_tcp_at_grasp.matrix"] = (
+            t_D_t_o_at_grasp
+        )
 
         reset_info["reset.grasped.delta_estimated"] = self.estimated_grasp_delta
 
@@ -955,7 +1294,16 @@ class InsertionWrapperSiemensPE(Wrapper):
         x_action = (
             self.x_torque_controller_dx(self.obs)[0] if self.use_ft_controller else 0.0
         )
-        action = np.array([x_action, action[0], action[1], 0, 0, 0])
+        if self.use_6dof_grasp:
+            if action.shape[0] < 5:
+                raise ValueError(
+                    f"Expected 5D action in 6DoF mode, got shape {action.shape}"
+                )
+            action = np.array(
+                [x_action, action[0], action[1], action[2], action[3], action[4]]
+            )
+        else:
+            action = np.array([x_action, action[0], action[1], 0, 0, 0])
 
         # apply safety box
         current_pos_yz = self.obs["observation.state.cartesian"][1:3]

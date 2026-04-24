@@ -69,13 +69,14 @@ TCP_R_CAM, TCP_T_TCP_CAM = _cam_in_tcp()
 
 
 class PoseEstimationHelper:
-    def __init__(self, assumed_orientation: np.ndarray):
+    def __init__(self, assumed_orientation: np.ndarray, lock_orientation: bool = True):
         self.segmenter = Sam3Detector()
         self.pose_estimator = PoseEstimator(
             "camera_parameters/realsense_d405_single.json"
         )
         self.pose_tracker = PoseTracker("camera_parameters/realsense_d405_single.json")
         self.assumed_orientation = assumed_orientation
+        self.lock_orientation = lock_orientation
 
     def _compute_translation_in_world_frame(
         self,
@@ -154,8 +155,9 @@ class PoseEstimationHelper:
             key: self.pose_estimator.estimate_lego(image, depth_f32, masks[key], key)
             for key in masks
         }
-        for key in poses:
-            poses[key][:3, :3] = self.assumed_orientation
+        if self.lock_orientation and self.assumed_orientation.size > 0:
+            for key in poses:
+                poses[key][:3, :3] = self.assumed_orientation
         return {
             key: self.pose_tracker.track_lego(image, depth_f32, poses[key], key)
             for key in poses
@@ -195,24 +197,37 @@ class PoseEstimationHelper:
         depth_f32 = depth.astype(np.float32) / 1000.0  # Convert to meters
         mask = self.segmenter.segment_siemens(image)
         pose = self.pose_estimator.estimate_siemens(image, depth_f32, mask)
-        pose[:3, :3] = self.assumed_orientation
+        if self.lock_orientation and self.assumed_orientation.size > 0:
+            pose[:3, :3] = self.assumed_orientation
         return self.pose_tracker.track_siemens(image, depth_f32, pose)
 
     def estimate_siemens_tcp_frame_coarse(
-        self, image: np.ndarray, depth: np.ndarray
-    ) -> np.ndarray:
+        self,
+        image: np.ndarray,
+        depth: np.ndarray,
+        return_details: bool = False,
+    ):
         depth_f32 = depth.astype(np.float32) / 1000.0  # Convert to meters
         mask = self.segmenter.segment_siemens(image)
-        pose = self.pose_estimator.estimate_siemens(image, depth_f32, mask)
-        return self._compute_pose_in_tcp_frame(pose)
+        pose_cam = self.pose_estimator.estimate_siemens(image, depth_f32, mask)
+        pose_tcp = self._compute_pose_in_tcp_frame(pose_cam)
+        if return_details:
+            return pose_tcp, {"pose_cam": pose_cam, "mask": mask}
+        return pose_tcp
 
     def estimate_siemens_world_frame_coarse(
         self,
         image: np.ndarray,
         depth: np.ndarray,
         estimation_position_euler: np.ndarray,
-    ) -> np.ndarray:
+        return_details: bool = False,
+    ):
         depth_f32 = depth.astype(np.float32) / 1000.0  # Convert to meters
         mask = self.segmenter.segment_siemens(image)
-        pose = self.pose_estimator.estimate_siemens(image, depth_f32, mask)
-        return self._compute_pose_in_world_frame(pose, estimation_position_euler)
+        pose_cam = self.pose_estimator.estimate_siemens(image, depth_f32, mask)
+        pose_world = self._compute_pose_in_world_frame(
+            pose_cam, estimation_position_euler
+        )
+        if return_details:
+            return pose_world, {"pose_cam": pose_cam, "mask": mask}
+        return pose_world

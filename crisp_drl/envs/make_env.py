@@ -307,6 +307,8 @@ def create_real_env_s1(
     alg_config: Config, env_config: SiemensConfig, args=None
 ) -> gym.Env:
     no_ft = bool(args is not None and getattr(args, "no_ft_sensor", False))
+    use_6dof_grasp = bool(args is not None and getattr(args, "use_6dof_grasp", False))
+    dof_slice_end = 6 if getattr(alg_config, "actor_output_dim", 2) >= 5 else 3
     env = make_env("my_env_v4_no_ft" if no_ft else "my_env_v4")
     print("Env created.")
     env.wait_until_ready()
@@ -344,6 +346,7 @@ def create_real_env_s1(
         if args is not None and args.use_pose_estimation
         else False,
         use_ft_controller=not no_ft,
+        use_6dof_grasp=use_6dof_grasp,
     )
 
     # obs["observation.state.cartesian"][2] < 0.049)
@@ -366,10 +369,10 @@ def create_real_env_s1(
         env,
         "cuda",
         keys_ranges_scales=[
-            ("observation.previous.action", (1, 3), 1000.0),
-            ("observation.previous.error.cartesian", (1, 3), 1000.0),
-            ("observation.velocity.cartesian", (1, 3), 1000.0),
-            ("observation.error.cartesian", (1, 3), 1000.0),
+            ("observation.previous.action", (1, dof_slice_end), 1000.0),
+            ("observation.previous.error.cartesian", (1, dof_slice_end), 1000.0),
+            ("observation.velocity.cartesian", (1, dof_slice_end), 1000.0),
+            ("observation.error.cartesian", (1, dof_slice_end), 1000.0),
             ("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1),
             ("observation.features.wrist_camera", (0, 512), 1.0),
         ],
@@ -381,6 +384,8 @@ def create_real_env_s1_pe(
     alg_config: Config, env_config: SiemensConfig, args=None
 ) -> gym.Env:
     no_ft = bool(args is not None and getattr(args, "no_ft_sensor", False))
+    use_6dof_grasp = bool(args is not None and getattr(args, "use_6dof_grasp", False))
+    dof_slice_end = 6 if getattr(alg_config, "actor_output_dim", 2) >= 5 else 3
     env = make_env("my_env_v4_no_ft" if no_ft else "my_env_v4")
     print("Env created.")
     env.wait_until_ready()
@@ -409,6 +414,8 @@ def create_real_env_s1_pe(
         if not is_eval
         else 2 * env_config.episode_length,
         use_ft_controller=not no_ft,
+        use_6dof_grasp=use_6dof_grasp,
+        pose_viz_dir=getattr(args, "pose_viz_dir", None) if args is not None else None,
     )
 
     # obs["observation.state.cartesian"][2] < 0.049)
@@ -431,10 +438,10 @@ def create_real_env_s1_pe(
         env,
         "cuda",
         keys_ranges_scales=[
-            ("observation.previous.action", (1, 3), 1000.0),
-            ("observation.previous.error.cartesian", (1, 3), 1000.0),
-            ("observation.velocity.cartesian", (1, 3), 1000.0),
-            ("observation.error.cartesian", (1, 3), 1000.0),
+            ("observation.previous.action", (1, dof_slice_end), 1000.0),
+            ("observation.previous.error.cartesian", (1, dof_slice_end), 1000.0),
+            ("observation.velocity.cartesian", (1, dof_slice_end), 1000.0),
+            ("observation.error.cartesian", (1, dof_slice_end), 1000.0),
             ("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1),
             ("observation.features.wrist_camera", (0, 384), 1.0),
         ],

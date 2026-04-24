@@ -205,10 +205,18 @@ class SiemensConfig:
         )
     )  # 0.5106526, -0.03026352, 0.04147444
     """the ground truth grasp position in the real world"""
+    grasp_orientation_ground_truth_euler: np.ndarray = field(
+        default_factory=lambda: np.array([3.1398149, -0.00529997, 0.00330537])
+    )
+    """the ground truth grasp orientation in roll, pitch, yaw"""
     demo_grasp_pose_estimation_pose_euler: np.ndarray = field(
         default_factory=lambda: np.array([])
     )
     """the position used during pose estimation for grasping during demo"""
+    goal_orientation_ground_truth_euler: np.ndarray = field(
+        default_factory=lambda: np.array([-3.1412485, -0.00335749, 0.00383465])
+    )
+    """the ground truth goal orientation in roll, pitch, yaw"""
     pose_estimation_assumed_orientation: np.ndarray = field(
         default_factory=lambda: np.array([[]])
     )
