@@ -989,9 +989,13 @@ class InsertionWrapperSiemensPE(Wrapper):
             world_D_world_obj[:3, 3]
             + world_D_world_obj[:3, :3] @ self.o_T_o_tcpgrasp
         )
+        coarse_hover_world = (
+            coarse_grasp_world
+            + world_D_world_obj[:3, :3] @ np.array([0.0, 0.0, 0.02])
+        )
         self.obs = self.go_to_waypoint(
             self.obs,
-            coarse_grasp_world + np.array([0.0, 0.0, 0.02]),
+            coarse_hover_world,
             relative_pose_euler=coarse_rel_euler,
             distance_err=0.0002,
             is_via=False,
@@ -1107,7 +1111,11 @@ class InsertionWrapperSiemensPE(Wrapper):
         # target_pose; the descent call MUST pass None to avoid doubling
         # the rotation (and breaking the undo at end of this method).
         print("Moving to pre-grasp hover...")
-        hover_xyz = w_T_w_tcpgrasp + np.array([0.0, 0.0, 0.015])
+        # Keep the same hover height, but express it as a single object-frame
+        # offset so the nonzero lateral grasp offset is included explicitly.
+        hover_xyz = world_D_world_obj[:3, 3] + est_R @ (
+            self.o_T_o_tcpgrasp + np.array([0.0, 0.0, 0.015])
+        )
         self.obs = self.go_to_waypoint(
             self.obs,
             hover_xyz,
@@ -1123,33 +1131,6 @@ class InsertionWrapperSiemensPE(Wrapper):
             distance_err=0.0002,
             is_via=False,
         )
-        print("Estimating pose at grasp waypoint (pre-close)...")
-        t_D_t_o_at_grasp, _grasp_details = (
-            self.pose_estimation_helper.estimate_siemens_tcp_frame_coarse(
-                self.obs["observation.images.wrist_camera"],
-                self.obs["observation.images.wrist_depth_camera"],
-                return_details=True,
-            )
-        )
-        print(
-            "pre-close tcp-frame object translation [m]:",
-            t_D_t_o_at_grasp[:3, 3],
-        )
-        if _viz_enabled:
-            try:
-                grasp_overlay_png = self._pose_overlay_renderer.save_single(
-                    out_dir=self.pose_viz_dir,
-                    episode_idx=self._pe_episode_idx,
-                    rgb=self.obs["observation.images.wrist_camera"],
-                    pose_cam_obj=_grasp_details["pose_cam"],
-                    mask=_grasp_details["mask"],
-                    suffix="grasp_preclose",
-                    label=f"ep{self._pe_episode_idx} grasp pre-close",
-                )
-                print(f"[pose viz] saved grasp pre-close overlay: {grasp_overlay_png}")
-            except Exception as e:
-                print(f"[pose viz] failed to save grasp pre-close overlay: {e}")
-
         # Track the TOTAL applied orientation (coarse @ hover + delta @ descent
         # == refined_rel_euler_full) so the post-pickup "undo" inverses the
         # orientation we actually commanded. 3DoF PE mode didn't rotate ->
@@ -1163,6 +1144,33 @@ class InsertionWrapperSiemensPE(Wrapper):
         self.actual_grasp_position = np.copy(
             self.obs["observation.state.cartesian"][:3]
         )
+
+        print("Estimating pose at closed gripper...")
+        t_D_t_o_at_closed, _grasp_details = (
+            self.pose_estimation_helper.estimate_siemens_tcp_frame_coarse(
+                self.obs["observation.images.wrist_camera"],
+                self.obs["observation.images.wrist_depth_camera"],
+                return_details=True,
+            )
+        )
+        print(
+            "closed-gripper tcp-frame object translation [m]:",
+            t_D_t_o_at_closed[:3, 3],
+        )
+        if _viz_enabled:
+            try:
+                grasp_overlay_png = self._pose_overlay_renderer.save_single(
+                    out_dir=self.pose_viz_dir,
+                    episode_idx=self._pe_episode_idx,
+                    rgb=self.obs["observation.images.wrist_camera"],
+                    pose_cam_obj=_grasp_details["pose_cam"],
+                    mask=_grasp_details["mask"],
+                    suffix="grasp_closed",
+                    label=f"ep{self._pe_episode_idx} grasp closed",
+                )
+                print(f"[pose viz] saved grasp closed overlay: {grasp_overlay_png}")
+            except Exception as e:
+                print(f"[pose viz] failed to save grasp closed overlay: {e}")
 
         # pick up quickly
         print("Picking up...")
@@ -1277,11 +1285,11 @@ class InsertionWrapperSiemensPE(Wrapper):
             [pose_check_coarse["valid"]], dtype=np.float32
         )
         reset_info["reset.pose_estimation.alignment_rpy_applied"] = applied_alignment_rpy
-        reset_info["reset.pose_estimation.object_pose_tcp_at_grasp.position"] = (
-            t_D_t_o_at_grasp[:3, 3]
+        reset_info["reset.pose_estimation.object_pose_tcp_at_closed_gripper.position"] = (
+            t_D_t_o_at_closed[:3, 3]
         )
-        reset_info["reset.pose_estimation.object_pose_tcp_at_grasp.matrix"] = (
-            t_D_t_o_at_grasp
+        reset_info["reset.pose_estimation.object_pose_tcp_at_closed_gripper.matrix"] = (
+            t_D_t_o_at_closed
         )
 
         reset_info["reset.grasped.delta_estimated"] = self.estimated_grasp_delta
