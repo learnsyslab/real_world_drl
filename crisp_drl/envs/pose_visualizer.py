@@ -83,6 +83,7 @@ class PoseOverlayRenderer:
         mesh_path: Optional[str] = None,
         axis_length_m: float = 0.03,
         vertex_stride: int = 20,
+        use_default_mesh_fallback: bool = True,
     ):
         self.K, self.D = _load_intrinsics(camera_info_json_path)
         self.axis_length_m = axis_length_m
@@ -91,7 +92,10 @@ class PoseOverlayRenderer:
         self.bbox_corners: Optional[np.ndarray] = None
 
         resolved_mesh = None
-        for p in (mesh_path, DEFAULT_MESH_PATH, DEFAULT_MESH_PATH_HOST_FALLBACK):
+        mesh_candidates = [mesh_path]
+        if use_default_mesh_fallback:
+            mesh_candidates.extend([DEFAULT_MESH_PATH, DEFAULT_MESH_PATH_HOST_FALLBACK])
+        for p in mesh_candidates:
             if p and Path(p).exists():
                 resolved_mesh = p
                 break
@@ -233,34 +237,40 @@ class PoseOverlayRenderer:
         pose_cam_refined: Optional[np.ndarray] = None,
         rgb_refined: Optional[np.ndarray] = None,
         mask_refined: Optional[np.ndarray] = None,
+        names: Optional[tuple[str, str]] = None,
     ) -> dict[str, str]:
+        """Save coarse/refined overlay pair.
+
+        If `names` is provided as (coarse_name, refined_name) the filenames and
+        labels will include those names (e.g. lavender_coarse, purple_refined).
+        """
         os.makedirs(out_dir, exist_ok=True)
         paths: dict[str, str] = {}
         timestamp = datetime.now().strftime("%m-%d-%H-%M")
-        coarse_img = self.render(rgb, pose_cam_coarse, mask=mask, label=f"ep{episode_idx} coarse")
-        p_coarse = os.path.join(
-            out_dir, f"ep{episode_idx:03d}_coarse_{timestamp}.png"
-        )
+
+        name_coarse = f"{names[0]}_coarse" if names else "coarse"
+        coarse_label = f"ep{episode_idx} {name_coarse}"
+        coarse_img = self.render(rgb, pose_cam_coarse, mask=mask, label=coarse_label)
+        p_coarse = os.path.join(out_dir, f"ep{episode_idx:03d}_{name_coarse}_{timestamp}.png")
         cv2.imwrite(p_coarse, coarse_img)
         paths["coarse"] = p_coarse
 
         if pose_cam_refined is not None:
+            name_refined = f"{names[1]}_refined" if names else "refined"
+            refined_label = f"ep{episode_idx} {name_refined}"
             refined_rgb = rgb_refined if rgb_refined is not None else rgb
             refined_mask = mask_refined if mask_refined is not None else mask
             refined_img = self.render(
-                refined_rgb, pose_cam_refined, mask=refined_mask, label=f"ep{episode_idx} refined"
+                refined_rgb, pose_cam_refined, mask=refined_mask, label=refined_label
             )
-            p_refined = os.path.join(
-                out_dir, f"ep{episode_idx:03d}_refined_{timestamp}.png"
-            )
+            p_refined = os.path.join(out_dir, f"ep{episode_idx:03d}_{name_refined}_{timestamp}.png")
             cv2.imwrite(p_refined, refined_img)
             paths["refined"] = p_refined
 
             if refined_img.shape == coarse_img.shape:
+                side_name = f"sidebyside_{names[0]}_{names[1]}" if names else "sidebyside"
                 side = np.concatenate([coarse_img, refined_img], axis=1)
-                p_side = os.path.join(
-                    out_dir, f"ep{episode_idx:03d}_sidebyside_{timestamp}.png"
-                )
+                p_side = os.path.join(out_dir, f"ep{episode_idx:03d}_{side_name}_{timestamp}.png")
                 cv2.imwrite(p_side, side)
                 paths["sidebyside"] = p_side
 

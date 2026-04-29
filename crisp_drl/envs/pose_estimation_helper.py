@@ -69,14 +69,26 @@ TCP_R_CAM, TCP_T_TCP_CAM = _cam_in_tcp()
 
 
 class PoseEstimationHelper:
-    def __init__(self, assumed_orientation: np.ndarray, lock_orientation: bool = True):
+    def __init__(
+        self,
+        assumed_orientation: np.ndarray,
+        lock_orientation: bool = True,
+        brick_size: str = "2x2",
+        use_tracker: bool = True,
+    ):
         self.segmenter = Sam3Detector()
         self.pose_estimator = PoseEstimator(
-            "camera_parameters/realsense_d405_single.json"
+            "camera_parameters/realsense_d405_single.json",
+            brick_size=brick_size,
         )
-        self.pose_tracker = PoseTracker("camera_parameters/realsense_d405_single.json")
+        self.pose_tracker = PoseTracker(
+            "camera_parameters/realsense_d405_single.json",
+            brick_size=brick_size,
+        )
         self.assumed_orientation = assumed_orientation
         self.lock_orientation = lock_orientation
+        self.brick_size = brick_size
+        self.use_tracker = use_tracker
 
     def _compute_translation_in_world_frame(
         self,
@@ -158,6 +170,8 @@ class PoseEstimationHelper:
         if self.lock_orientation and self.assumed_orientation.size > 0:
             for key in poses:
                 poses[key][:3, :3] = self.assumed_orientation
+        if not self.use_tracker:
+            return poses
         return {
             key: self.pose_tracker.track_lego(image, depth_f32, poses[key], key)
             for key in poses

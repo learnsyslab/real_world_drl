@@ -9,10 +9,18 @@ import time
 import random
 import numpy as np
 
-from crisp_drl.agents.shared.insertion_env_config import SiemensConfig
+from crisp_drl.agents.shared.insertion_env_config import (
+    LEGO_BRICK_CONFIGS,
+    LegoConfig,
+    SiemensConfig,
+)
 from crisp_drl.agents.shared.insertion_wrapper_s import (
     InsertionWrapperSiemens,
     InsertionWrapperSiemensPE,
+)
+from crisp_drl.agents.shared.insertion_wrapper_lego import InsertionWrapperLegoPE
+from crisp_drl.agents.shared.insertion_wrapper_lego_2x4 import (
+    InsertionWrapperLego2x4PE,
 )
 from crisp_gym.envs.manipulator_env_config import NoCamFrankaEnvConfig, FrankaEnvConfig
 from crisp_py.camera.camera_config import CameraConfig
@@ -300,6 +308,98 @@ def create_real_env_v4(config: Config, args=None) -> gym.Env:
     if no_ft:
         mp_backend = getattr(args, "mp_backend", "quintic") if args is not None else "quintic"
         env = MotionPlannerWrapper(env, backend=mp_backend)
+    return env
+
+
+def create_real_env_v4_pe(
+    alg_config: Config,
+    env_config: LegoConfig | None = None,
+    args=None,
+    brick_size: str = "2x2",
+) -> gym.Env:
+    """LEGO twin of create_real_env_s1_pe: 6DoF PE-driven grasp + placement."""
+    no_ft = bool(args is not None and getattr(args, "no_ft_sensor", False))
+    env = make_env("my_env_v4_no_ft" if no_ft else "my_env_v4")
+    print("Env created.")
+    env.wait_until_ready()
+    print("Env ready.")
+
+    env = ActionTimeStampWrapper(env)
+    env = NoGripperActionWrapper(env)  # 6D action so PE wrapper can rotate EE
+    env = LastObservationWrapper(env)
+    if no_ft:
+        env = ZeroFTInjectorWrapper(env)
+    else:
+        env = SensorTareWrapper(
+            env,
+            sensor_key="observation.state.sensors_bota_ft_sensor",
+            sensor_data_shape=(6,),
+        )
+    is_eval = False if args is None else args.eval
+    resolved_brick_size = getattr(args, "brick_size", brick_size)
+    if env_config is None:
+        cfg_cls = LEGO_BRICK_CONFIGS.get(resolved_brick_size, LegoConfig)
+        env_config = cfg_cls()
+    wrapper_cls = (
+        InsertionWrapperLego2x4PE
+        if getattr(env_config, "brick_size", "2x2") == "2x4"
+        else InsertionWrapperLegoPE
+    )
+
+    env = wrapper_cls(
+        env,
+        alg_config=alg_config,
+        env_config=env_config,
+        safety_box_radius=0.004 if is_eval else 0.003,
+        safety_box_step_size=0.0005,
+        step_limit=env_config.episode_length
+        if not is_eval
+        else 2 * env_config.episode_length,
+        use_ft_controller=not no_ft,
+        pose_viz_dir=getattr(args, "pose_viz_dir", None) if args is not None else None,
+    )
+
+    env = DinoImageEncoderWrapper(
+        env,
+        n_cameras=env_config.n_cameras,
+        image_keys=["observation.images.wrist_camera"],
+        image_size=(256, 256),
+        crops={"observation.images.wrist_camera": (175, 175 + 224, 346, 346 + 224)},
+        rescales={"observation.images.wrist_camera": 1.5},
+    )
+
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
+    # Match create_real_env_v4 obs schema: 2D action/error slices, 6D FT, 512-D
+    # DINO features (rescaled flow keeps the same encoder dim as v4).
+    env = ObservationFormatterWrapper(
+        env,
+        "cuda",
+        keys_ranges_scales=[
+            ("observation.previous.action", (0, 2), 1000.0),
+            ("observation.previous.error.cartesian", (0, 2), 1000.0),
+            ("observation.velocity.cartesian", (0, 2), 1000.0),
+            ("observation.error.cartesian", (0, 2), 1000.0),
+            ("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1),
+            ("observation.features.wrist_camera", (0, 512), 1.0),
+        ],
+    )
+    success_threshold = (
+        getattr(args, "no_ft_success_threshold", 4.0)
+        if no_ft
+        else getattr(args, "success_threshold", 8.0)
+    )
+    if args is not None and getattr(args, "load_policy", None):
+        env = SuccessClassificationWrapper(
+            env,
+            args=args,
+            sac_config=alg_config,
+            threshold=success_threshold,
+        )
+    env = CLIWrapper(env)
+    mp_backend = getattr(args, "mp_backend", "quintic") if args is not None else "quintic"
+    env = MotionPlannerWrapper(env, backend=mp_backend)
     return env
 
 

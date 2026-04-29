@@ -41,6 +41,12 @@ class LegoConfig:
     n_cameras: int = 1
     """the number of cameras to use for observations"""
 
+    brick_size: str = "2x2"
+    """LEGO brick size — selects which lego_<size>_*_up.obj mesh FoundationPose
+    consumes. '2x2' is the legacy/trained-on size. '2x4' uses the longer 2x4
+    bricks; calibration constants below are still 2x2-tuned and need
+    re-recording for any 2x4 grasp/stack execution."""
+
     # whether to zoom in after cropping and how faroxxxxxcocyyyyycoo
 
     # positions / relative rotations for
@@ -116,6 +122,69 @@ class LegoConfig:
         )
     )
     """the pose matrix extracted from the demo for the lavender brick before grasping"""
+
+    # ---- 6DoF PE pipeline (used by InsertionWrapperLegoPE) ----
+    # Wide PE pose, home, and after-grasp lift are reused from existing LEGO
+    # constants (demo_goal_pose_estimation_euler, custom_home_position,
+    # after_grasp_lift_height=0.016 in InsertionWrapper). Only the values that
+    # have no analog in the original wrapper need calibration:
+
+    diagonal_hover_above_purple_offset: np.ndarray = field(
+        default_factory=lambda: np.array([-0.012, 0.0, 0.045])
+    )
+    """[dx,dy,dz] offset (world frame) from purple's wide-PE position to the
+    diagonal hover where the post-grasp close-up PE happens. TODO calibrate
+    from a hardware test — purple must remain in frame from this viewpoint."""
+
+    place_z_offset: float = 0.0
+    """extra z to add when stacking lavender on purple (e.g. one stud height).
+    Set to 0 first; if lavender lands too low/high after a successful PE,
+    nudge in 1 mm steps."""
+
+    after_grasp_lift_height_pe: float = 0.016
+    """vertical lift right after closing the gripper, before moving to the
+    diagonal hover above purple. Mirrors InsertionWrapper.after_grasp_lift_height."""
+
+    alignment_clip_angle_rad: float = float(np.deg2rad(25.0))
+    """axis-angle clip on the 6DoF grasp orientation alignment (mirrors
+    InsertionWrapperSiemensPE.alignment_clip_angle_rad)."""
+
+    alignment_pitch_bias: float = 0.0
+    """small pitch bias added to the demo->estimated relative rotation
+    before clipping (analog of SiemensConfig.alignment_pitch_bias, zero for
+    LEGO since the lavender brick is grasped top-down)."""
+
+
+@dataclass
+class LegoConfig2x4(LegoConfig):
+    """LegoConfig variant for 2x4 bricks.
+
+    Reuses 2x2 calibration for grasp/goal world poses and the diagonal-hover
+    offset; test bricks must be physically placed at the 2x2 calibration spots.
+
+    `demo_grasped_pose_lavender` is mesh-derived: the centroid of
+    `lego_2x4_lavender_up.obj` sits at the origin and the brick height (~11.5 mm)
+    matches 2x2, so a top-down centroid grasp produces the same world pose as
+    2x2. We inherit the 2x2 value unchanged.
+    """
+
+    brick_size: str = "2x4"
+    demo_grasped_pose_lavender: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [
+                [0.99956242, -0.01966487, -0.02209571, 0.51189277],
+                [0.02016189, 0.99954325, 0.02250109, -0.03525977],
+                [0.02164308, -0.02293679, 0.99950251, 0.05194422],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+    )
+
+
+LEGO_BRICK_CONFIGS = {
+    "2x2": LegoConfig,
+    "2x4": LegoConfig2x4,
+}
 
 
 DELTA_Z_TEST = 0.0

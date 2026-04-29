@@ -15,7 +15,10 @@ class PoseEstimator(Node):
     """Wrapper around FoundationPose for 6DoF pose estimation."""
 
     def __init__(
-        self, camera_info_json_path: str = "", node_name: str = "pose_estimator"
+        self,
+        camera_info_json_path: str = "",
+        node_name: str = "pose_estimator",
+        brick_size: str = "2x2",
     ):
         """
         Initialize the pose estimator.
@@ -23,6 +26,7 @@ class PoseEstimator(Node):
         Args:
             camera_info_json_path: Path to camera info JSON file. If empty, tries default location.
             node_name: ROS2 node name.
+            brick_size: "2x2" (default) or "2x4" — selects lego_<size>_*_up.obj.
         """
         # Initialize ROS2
         if not rclpy.ok():  # pyright: ignore[reportPrivateImportUsage]
@@ -30,6 +34,9 @@ class PoseEstimator(Node):
 
         super().__init__(node_name)
         self.bridge = CvBridge()
+        if brick_size not in ("2x2", "2x4"):
+            raise ValueError(f"brick_size must be '2x2' or '2x4', got {brick_size}")
+        self.brick_size = brick_size
 
         # Load camera parameters
         if camera_info_json_path == "":
@@ -78,13 +85,20 @@ class PoseEstimator(Node):
         except Exception as e:
             self.get_logger().error(f"Error processing pose: {e}")
 
-    def _set_mesh_file_lego(self, color: str):
-        """Set the mesh file path parameter based on color using parameter client."""
-        mesh_path_map = {
+    LEGO_MESH_PATHS = {
+        "2x2": {
             "lavender": "/workspaces/isaac_ros-dev/lego_assets/lego_2x2_lavender_up.obj",
             "purple": "/workspaces/isaac_ros-dev/lego_assets/lego_2x2_purple_up.obj",
-        }
+        },
+        "2x4": {
+            "lavender": "/workspaces/isaac_ros-dev/lego_assets/lego_2x4_lavender_up.obj",
+            "purple": "/workspaces/isaac_ros-dev/lego_assets/lego_2x4_purple_up.obj",
+        },
+    }
 
+    def _set_mesh_file_lego(self, color: str):
+        """Set the mesh file path parameter based on color using parameter client."""
+        mesh_path_map = self.LEGO_MESH_PATHS[self.brick_size]
         if color not in mesh_path_map:
             raise ValueError(f"Unknown color: {color}. Must be 'lavender' or 'purple'")
 

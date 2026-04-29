@@ -24,3 +24,11 @@ plots
 build
 log
 install
+
+# accidental shell-redirect dumps
+np
+plt
+pkg_resources
+
+# pose-estimation visualization output
+pe_viz/
