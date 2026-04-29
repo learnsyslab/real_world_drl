@@ -233,7 +233,16 @@ def _run_episode(
     terminated = truncated = False
     info_last = {}
     n_settle = 0
-    if args.no_ft_sensor or policy_bundle is None:
+    if args.skip_insertion:
+        ee_after_mp = env.unwrapped.robot.end_effector_pose.position
+        mm_err = float(np.linalg.norm(np.asarray(ee_after_mp) - target_xyz) * 1e3)
+        logger.info(
+            "Episode %d: --skip_insertion active, stopping after MP. "
+            "EE-vs-target error=%.2fmm",
+            ep_idx,
+            mm_err,
+        )
+    elif args.no_ft_sensor or policy_bundle is None:
         action_dim = int(np.prod(env.action_space.shape))
         zero_action = np.zeros(action_dim, dtype=np.float32)
         for _ in range(args.max_settle_steps):
@@ -323,6 +332,12 @@ def main() -> int:
     )
     p.add_argument("--max_settle_steps", type=int, default=30)
     p.add_argument(
+        "--skip_insertion",
+        action="store_true",
+        default=False,
+        help="Stop after MP reaches insertion-start (skip post-MP settle/policy rollout).",
+    )
+    p.add_argument(
         "--max_policy_steps",
         type=int,
         default=200,
@@ -351,11 +366,21 @@ def main() -> int:
     p.add_argument(
         "--load_policy",
         type=str,
-        required=True,
+        default=None,
         help="Checkpoint subdir under checkpoints/ — same value you'd pass to "
         "run_sac.py --eval. SuccessClassificationWrapper loads "
         "shared_encoder/actor/qf*_state_dict.pth from this dir to compute "
-        "mean Q(s,pi(s)) as the termination signal.",
+        "mean Q(s,pi(s)) as the termination signal. Optional: if omitted, the "
+        "classifier wrap is skipped and post-MP behaviour is zero-action settle.",
+    )
+    p.add_argument(
+        "--brick_size",
+        type=str,
+        choices=["2x2", "2x4"],
+        default="2x2",
+        help="LEGO brick size (only used with --task lego). Selects which "
+        "lego_<size>_*_up.obj mesh FoundationPose consumes. 2x2 is the legacy/"
+        "trained-on size; 2x4 is for the 2x4 bring-up (no RL).",
     )
     p.add_argument("--resume_training", type=str, default=None)
     p.add_argument("--load_encoder", type=str, default=None)
@@ -366,7 +391,10 @@ def main() -> int:
     import rclpy
 
     from crisp_drl.agents.shared.algorithm_config import Config
-    from crisp_drl.agents.shared.insertion_env_config import SiemensConfig
+    from crisp_drl.agents.shared.insertion_env_config import (
+        LEGO_BRICK_CONFIGS,
+        SiemensConfig,
+    )
     from crisp_drl.envs import make_env
 
     if not rclpy.ok():
@@ -393,7 +421,19 @@ def main() -> int:
     )
 
     if args.task == "lego":
-        env = make_env.create_real_env_v4(cfg, args=args)
+        cfg_cls = LEGO_BRICK_CONFIGS.get(args.brick_size)
+        if cfg_cls is None:
+            raise ValueError(f"Unsupported brick_size={args.brick_size!r}")
+        lego_cfg = cfg_cls()
+        if args.use_pose_estimation:
+            env = make_env.create_real_env_v4_pe(
+                alg_config=cfg,
+                env_config=lego_cfg,
+                args=args,
+                brick_size=args.brick_size,
+            )
+        else:
+            env = make_env.create_real_env_v4(cfg, args=args)
     else:
         if args.use_pose_estimation:
             env = make_env.create_real_env_s1_pe(
@@ -411,12 +451,22 @@ def main() -> int:
         return 1
 
     policy_bundle = None
-    if not args.no_ft_sensor and not force_zero_settle:
+    if (
+        not args.no_ft_sensor
+        and not force_zero_settle
+        and args.load_policy is not None
+    ):
         actor, shared_encoder, _device = _load_policy(args.load_policy, cfg, logger)
         policy_bundle = (actor, shared_encoder, cfg)
         logger.info(
             "FT sensor path: post-MP rollout uses RL policy (max_policy_steps=%d).",
             args.max_policy_steps,
+        )
+    elif args.load_policy is None:
+        logger.info(
+            "No --load_policy: SuccessClassificationWrapper skipped, post-MP path "
+            "is zero-action settle (max_settle_steps=%d).",
+            args.max_settle_steps,
         )
     elif force_zero_settle:
         logger.info(
