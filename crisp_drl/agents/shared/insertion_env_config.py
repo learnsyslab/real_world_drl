@@ -88,14 +88,14 @@ class LegoConfig:
     """the ground truth grasp position in the real world"""
     demo_grasp_pose_estimation_pose_euler: np.ndarray = field(
         default_factory=lambda: np.array(
-            [0.51002705, -0.03166126, 0.07771762, 3.1398149, -0.00529997, 0.00330537]
+            [0.51002705, -0.03166126, 0.07771762, 3.1398149, -0.00529997, 0.00330537] # 2x2 lego            
         )
     )
     """the position used during pose estimation for grasping during demo"""
 
     demo_goal_pose_estimation_euler: np.ndarray = field(
         default_factory=lambda: np.array(
-            [0.52480197, -0.03154222, 0.0966146, -3.1412485, -0.00335749, 0.00383465]
+            [0.52480197, -0.03154222, 0.0966146, -3.1412485, -0.00335749, 0.00383465] # 2x2 lego           
         )
     )
     """whether to include the demo pose in the pose estimation computation"""
