@@ -18,6 +18,10 @@ import torch.multiprocessing as mp
 
 from crisp_drl.envs.pose_estimation_helper import PoseEstimationHelper
 
+# Use current user and home directory instead of hardcoded usernames
+USER_AT_FRANKA = f"{os.getenv('USER', 'gabor')}@franka"
+USER_HOME = os.path.expanduser("~")
+
 
 try:
     from pynput import keyboard
@@ -1410,8 +1414,8 @@ def controller_container_watcher(out_queue):
         error_out = subprocess.run(
             [
                 "ssh",
-                "linusschwarz@franka",
-                r"grep -P 'cartesian_reflex|joint_velocity_violation|communication_constraints_violation|franka::NetworkException' /home/linusschwarz/crisp_controllers_demos/current.log",
+                USER_AT_FRANKA,
+                fr"grep -P 'cartesian_reflex|joint_velocity_violation|communication_constraints_violation|franka::NetworkException' {USER_HOME}/crisp_controllers_demos/current.log",
             ],
             capture_output=True,
             text=True,
@@ -1441,8 +1445,8 @@ def controller_container_watcher(out_queue):
         last_start_time_containing_proc = subprocess.run(
             [
                 "ssh",
-                "linusschwarz@franka",
-                r"head -n 1 /home/linusschwarz/crisp_controllers_demos/current.log",
+                USER_AT_FRANKA,
+                fr"head -n 1 {USER_HOME}/crisp_controllers_demos/current.log",
             ],
             capture_output=True,
             text=True,
@@ -1475,8 +1479,8 @@ def controller_container_watcher(out_queue):
             subprocess.run(
                 [
                     "ssh",
-                    "linusschwarz@franka",
-                    r"head -n 1 /home/linusschwarz/crisp_controllers_demos/current.log",
+                    USER_AT_FRANKA,
+                    fr"head -n 1 {USER_HOME}/crisp_controllers_demos/current.log",
                 ],
                 capture_output=True,
                 text=True,
@@ -1491,7 +1495,7 @@ def controller_container_watcher(out_queue):
             topic_check = subprocess.run(
                 [
                     "ssh",
-                    "linusschwarz@franka",
+                    USER_AT_FRANKA,
                     r"source /opt/ros/humble/setup.bash && ROS_DOMAIN_ID=101 ros2 topic list",
                 ],
                 capture_output=True,

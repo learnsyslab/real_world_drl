@@ -14,13 +14,17 @@ import crisp_gym # type: ignore
 from crisp_gym.manipulator_env import ManipulatorCartesianEnv, make_env_config # type: ignore
 from crisp_gym.util.rl_utils import load_actions_safe, custom_reset # type: ignore
 
+# Use current user and home directory instead of hardcoded usernames
+USER_AT_FRANKA = f"{os.getenv('USER', 'gabor')}@franka"
+USER_HOME = os.path.expanduser("~")
+
 
 def controller_container_watcher(out_queue):
     # until first line of current.log split at " " changes
     while True:
         t = threading.Timer(1.0, lambda: None)
         t.start()
-        error_string = subprocess.run(["ssh", "linusschwarz@franka", r"grep -P 'cartesian_reflex|communication_constraints_violation|franka::NetworkException' /home/linusschwarz/crisp_controllers_demos/current.log"], capture_output=True, text=True).stdout
+        error_string = subprocess.run(["ssh", USER_AT_FRANKA, fr"grep -P 'cartesian_reflex|communication_constraints_violation|franka::NetworkException' {USER_HOME}/crisp_controllers_demos/current.log"], capture_output=True, text=True).stdout
         if len(error_string) < 5:
             t.join()
             continue
@@ -32,7 +36,7 @@ def controller_container_watcher(out_queue):
         crash_timestamp = time.mktime(crash_time_struct) + float("0." + crash_time_str.split(".")[1])
 
 
-        last_start_time_containing_string = subprocess.run(["ssh", "linusschwarz@franka", r"head -n 1 /home/linusschwarz/crisp_controllers_demos/current.log"], capture_output=True, text=True).stdout.split(" ")[0]
+        last_start_time_containing_string = subprocess.run(["ssh", USER_AT_FRANKA, fr"head -n 1 {USER_HOME}/crisp_controllers_demos/current.log"], capture_output=True, text=True).stdout.split(" ")[0]
 
         if 'cartesian_reflex' in error_string:
             out_queue.put((crash_timestamp, "E_TORQUE"))
@@ -42,11 +46,11 @@ def controller_container_watcher(out_queue):
         time.sleep(20)
 
         # wait until new container has launched
-        while subprocess.run(["ssh", "linusschwarz@franka", r"head -n 1 /home/linusschwarz/crisp_controllers_demos/current.log"], capture_output=True, text=True).stdout.split(" ")[0] == last_start_time_containing_string:
+        while subprocess.run(["ssh", USER_AT_FRANKA, fr"head -n 1 {USER_HOME}/crisp_controllers_demos/current.log"], capture_output=True, text=True).stdout.split(" ")[0] == last_start_time_containing_string:
             time.sleep(2)
         
         # wait until topics are available
-        while "/joint_trajectory_controller/state" not in subprocess.run(["ssh", "linusschwarz@franka", r"source /opt/ros/humble/setup.bash && ROS_DOMAIN_ID=101 ros2 topic list"], capture_output=True, text=True).stdout:
+        while "/joint_trajectory_controller/state" not in subprocess.run(["ssh", USER_AT_FRANKA, r"source /opt/ros/humble/setup.bash && ROS_DOMAIN_ID=101 ros2 topic list"], capture_output=True, text=True).stdout:
             time.sleep(5)
         out_queue.put((time.time(), "E_CONTROLLER_READY"))
 

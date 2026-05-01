@@ -7,6 +7,9 @@ from crisp_drl.agents.shared.algorithm_config import Config
 from crisp_drl.envs.pose_estimator import PoseEstimator
 from crisp_drl.envs.pose_tracker import PoseTracker
 import pyvista as pv
+import os
+
+BASE_HOME = os.path.expanduser("~")
 
 estimation_position_euler = [
     0.5187528,
@@ -111,7 +114,7 @@ def show_3d(block_poses):
     roll, pitch, yaw = estimation_position_euler[3:]
     world_R_tcp = euler_to_rot_matrix(roll, pitch, yaw)
 
-    obj_path = "/home/linusschwarz/workspaces/isaac_ros-dev/lego_assets/lego_2x2_lavender_up.obj"
+    obj_path = BASE_HOME + "/workspaces/isaac_ros-dev/lego_assets/lego_2x2_lavender_up.obj"
     mesh_scale = 1.0  # scale the loaded mesh if it's too large/small
     base_mesh = pv.read(obj_path)
     base_mesh.points = base_mesh.points * mesh_scale

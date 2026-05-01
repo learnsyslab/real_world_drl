@@ -1,11 +1,11 @@
 """Push a local LeRobot dataset to Hugging Face Hub."""
 
 from pathlib import Path
+import os
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-LOCAL_ROOT = Path(
-    "/home/linusschwarz/repos/real_world_drl/rollout_data/collect_data_real/run_4_0.75"
-)
+# Use current user's home directory as base for local dataset root
+LOCAL_ROOT = Path(os.path.expanduser("~")) / "repos" / "real_world_drl" / "rollout_data" / "collect_data_real" / "run_4_0.75"
 HUB_REPO_ID = "LSY-lab/lego_stacking_generated_v0"
 
 # Load the dataset from local disk

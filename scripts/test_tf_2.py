@@ -1,6 +1,10 @@
 import json
 import numpy as np
 import pyvista as pv
+import os
+
+# Use user's home directory for paths
+BASE_HOME = os.path.expanduser("~")
 
 
 def r_x(phi):
@@ -70,18 +74,16 @@ tcp_R_cam = np.linalg.inv(cam_R_tcp)
 
 # goal: worl_T_world_obj = world_T_world_tcp + world_R_tcp @ tcp_T_tcp_cam + world_R_tcp @ tcp_R_cam @ cam_T_cam_obj
 # 1) load poses
-estimated_poses_grp_cam_path = "/home/linusschwarz/workspaces/isaac_ros-dev/own_samples/1/fpt_grp_d0.05-1.0_r5_up_prior_p4.json"
+estimated_poses_grp_cam_path = BASE_HOME + "/workspaces/isaac_ros-dev/own_samples/1/fpt_grp_d0.05-1.0_r5_up_prior_p4.json"
 with open(estimated_poses_grp_cam_path, "r") as f:
     estimated_poses_grp_cam = [np.array(x) for x in json.load(f)]
-estimated_poses_plc_cam_path = "/home/linusschwarz/workspaces/isaac_ros-dev/own_samples/1/fpt_plc_d0.05-1.0_r5_up_prior_p4.json"
+estimated_poses_plc_cam_path = BASE_HOME + "/workspaces/isaac_ros-dev/own_samples/1/fpt_plc_d0.05-1.0_r5_up_prior_p4.json"
 with open(estimated_poses_plc_cam_path, "r") as f:
     estimated_poses_plc_cam = [np.array(x) for x in json.load(f)]
-tcp_in_world_poses_path = "/home/linusschwarz/workspaces/isaac_ros-dev/own_samples/1/positions.json"  # xzy, euler-xyz radians
+tcp_in_world_poses_path = BASE_HOME + "/workspaces/isaac_ros-dev/own_samples/1/positions.json"  # xzy, euler-xyz radians
 with open(tcp_in_world_poses_path, "r") as f:
     tcp_in_world_poses_euler = json.load(f)
-obj_path = (
-    "/home/linusschwarz/workspaces/isaac_ros-dev/lego_assets/lego_2x2_lavender_up.obj"
-)
+obj_path = BASE_HOME + "/workspaces/isaac_ros-dev/lego_assets/lego_2x2_lavender_up.obj"
 mesh_scale = 1.0  # scale the loaded mesh if it's too large/small
 base_mesh = pv.read(obj_path)
 base_mesh.points = base_mesh.points * mesh_scale
