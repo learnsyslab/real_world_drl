@@ -65,7 +65,7 @@ def on_press(key):
             env.step(np.array([0, 0, 0, np.deg2rad(-rot_deg_x), 0, 0, 0.0]))
             print_and_write(f"Executed: rotate -x {rot_deg_x:.2f}°")
         elif key.char == "c":
-            env.step(np.array([0, 0, 0, 0, 0, 0, -0.2]))
+            env.step(np.array([0, 0, 0, 0, 0, 0, -0.4]))
             print_and_write("Executed: gripper close")
         elif key.char == "r":
             obs, *_ = env.step(np.zeros(7))
