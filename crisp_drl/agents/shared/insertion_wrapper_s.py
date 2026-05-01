@@ -624,7 +624,7 @@ class InsertionWrapperSiemensPE(Wrapper):
                     yaw_only[2],
                     -self.alignment_clip_angle_rad,
                     self.alignment_clip_angle_rad,
-                )
+                ) 
             )
             return yaw_only
 

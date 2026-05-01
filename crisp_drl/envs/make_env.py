@@ -69,6 +69,7 @@ from crisp_drl.agents.shared.env_wrappers import (
 )
 from crisp_drl.agents.shared.insertion_wrapper import (
     InsertionWrapper,
+    InsertionWrapper3DoFRotZ,
     SensorTareWrapper,
 )
 from crisp_drl.data.utils import crisp_batch_concat_obs_to_tensor, crisp_obs_to_tensor
@@ -301,6 +302,91 @@ def create_real_env_v4(config: Config, args=None) -> gym.Env:
             ("observation.previous.error.cartesian", (0, 2), 1000.0),
             ("observation.velocity.cartesian", (0, 2), 1000.0),
             ("observation.error.cartesian", (0, 2), 1000.0),
+            ("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1),
+            ("observation.features.wrist_camera", (0, 512), 1.0),
+        ],
+    )
+    if no_ft:
+        mp_backend = getattr(args, "mp_backend", "quintic") if args is not None else "quintic"
+        env = MotionPlannerWrapper(env, backend=mp_backend)
+    return env
+
+
+def create_real_env_v4_3dof_rz(config: Config, args=None) -> gym.Env:
+    """3-DoF + Rot-Z LEGO env (XY translation + yaw).
+
+    Stack: ``ManipulatorCartesianEnv → ActionTimeStampWrapper →
+    NoGripperActionWrapper (6→7) → LastObservationWrapper →
+    [SensorTareWrapper | ZeroFTInjectorWrapper] → InsertionWrapper3DoFRotZ
+    (3→6) → CLIWrapper → DinoImageEncoderWrapper → ObservationFormatterWrapper``.
+
+    Convention: ``observation.state.cartesian[3:6]`` is rotvec (axis*angle).
+    Home pose has rx≈ry≈0 so ``cartesian[5]`` is pure yaw.
+    """
+    no_ft = bool(args is not None and getattr(args, "no_ft_sensor", False))
+    env = make_env("my_env_v4_no_ft" if no_ft else "my_env_v4")
+    print("Env created.")
+    env.wait_until_ready()
+    print("Env ready.")
+
+    env = ActionTimeStampWrapper(env)
+    env = NoGripperActionWrapper(env)  # 6-D action; gripper padded inside
+    env = LastObservationWrapper(env)
+    if no_ft:
+        env = ZeroFTInjectorWrapper(env)
+    else:
+        env = SensorTareWrapper(
+            env,
+            sensor_key="observation.state.sensors_bota_ft_sensor",
+            sensor_data_shape=(6,),
+        )
+    is_eval = False if args is None else args.eval
+    env = InsertionWrapper3DoFRotZ(
+        env,
+        config=config,
+        grasp_randomisation_z_range=(0.0005, 0.0015) if is_eval else (0.00025, 0.00175),
+        grasp_randomisation_x_range=(-0.0015, 0.0015) if is_eval else (-0.002, 0.002),
+        safety_box_radius=0.004 if is_eval else 0.003,
+        safety_box_step_size=0.0005,
+        safety_box_angular_radius=np.deg2rad(4) if is_eval else np.deg2rad(3),
+        safety_box_angular_step_size=np.deg2rad(0.5),
+        goal_orientation_randomisation_angle=np.deg2rad(1.5),
+        minimal_start_goal_angle=np.deg2rad(1.0),
+        step_limit=config.episode_length if not is_eval else 2 * config.episode_length,
+        is_eval=is_eval,
+        use_pose_estimation=False,  # PE path not yet wired for yaw
+        use_ft_controller=not no_ft,
+    )
+
+    env = CLIWrapper(env)
+
+    env = DinoImageEncoderWrapper(
+        env,
+        n_cameras=config.n_cameras,
+        image_keys=["observation.images.wrist_camera"],
+        image_size=(256, 256),
+        crops={
+            "observation.images.wrist_camera": (175, 175 + 224, 346, 346 + 224)
+        },
+        rescales={"observation.images.wrist_camera": 1.5},
+    )
+
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
+    # 18-dim non-vision: 3 prev_action (XY+yaw) + 3 vel + 3 err + 3 prev_err + 6 FT
+    env = ObservationFormatterWrapper(
+        env,
+        "cuda",
+        keys_ranges_scales=[
+            ("observation.previous.action", (0, 2), 1000.0),
+            ("observation.previous.action", (5, 6), 40.0),
+            ("observation.velocity.cartesian", (0, 2), 1000.0),
+            ("observation.velocity.angular", (2, 3), 40.0),
+            ("observation.error.cartesian", (0, 2), 1000.0),
+            ("observation.error.angular", (2, 3), 40.0),
+            ("observation.previous.error.cartesian", (0, 2), 1000.0),
+            ("observation.previous.error.angular", (2, 3), 40.0),
             ("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1),
             ("observation.features.wrist_camera", (0, 512), 1.0),
         ],

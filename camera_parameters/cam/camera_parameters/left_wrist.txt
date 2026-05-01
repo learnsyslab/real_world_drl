@@ -1,0 +1,114 @@
+user@tueilsy-franka-01:/ros2_ws$ ros2 topic echo /left/left_wrist_camera/depth/camera_info --once
+header:
+  stamp:
+    sec: 1764228858
+    nanosec: 519727295
+  frame_id: left_wrist_camera_depth_optical_frame
+height: 480
+width: 848
+distortion_model: plumb_bob
+d:
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+k:
+- 423.3563232421875
+- 0.0
+- 420.90582275390625
+- 0.0
+- 423.3563232421875
+- 240.6958770751953
+- 0.0
+- 0.0
+- 1.0
+r:
+- 1.0
+- 0.0
+- 0.0
+- 0.0
+- 1.0
+- 0.0
+- 0.0
+- 0.0
+- 1.0
+p:
+- 423.3563232421875
+- 0.0
+- 420.90582275390625
+- 0.0
+- 0.0
+- 423.3563232421875
+- 240.6958770751953
+- 0.0
+- 0.0
+- 0.0
+- 1.0
+- 0.0
+binning_x: 0
+binning_y: 0
+roi:
+  x_offset: 0
+  y_offset: 0
+  height: 0
+  width: 0
+  do_rectify: false
+---
+user@tueilsy-franka-01:/ros2_ws$ ros2 topic echo /left/left_wrist_camera/color/camera_info --once
+header:
+  stamp:
+    sec: 1764228923
+    nanosec: 536010254
+  frame_id: left_wrist_camera_color_optical_frame
+height: 480
+width: 848
+distortion_model: plumb_bob
+d:
+- -0.05497325584292412
+- 0.0570296049118042
+- 0.0006210693391039968
+- 0.0007308147614821792
+- -0.018218209967017174
+k:
+- 430.4698791503906
+- 0.0
+- 414.8119812011719
+- 0.0
+- 430.0895080566406
+- 242.16055297851562
+- 0.0
+- 0.0
+- 1.0
+r:
+- 1.0
+- 0.0
+- 0.0
+- 0.0
+- 1.0
+- 0.0
+- 0.0
+- 0.0
+- 1.0
+p:
+- 430.4698791503906
+- 0.0
+- 414.8119812011719
+- 0.0
+- 0.0
+- 430.0895080566406
+- 242.16055297851562
+- 0.0
+- 0.0
+- 0.0
+- 1.0
+- 0.0
+binning_x: 0
+binning_y: 0
+roi:
+  x_offset: 0
+  y_offset: 0
+  height: 0
+  width: 0
+  do_rectify: false
+---

@@ -18,6 +18,45 @@ from crisp_drl.agents.shared.insertion_env_config import SiemensConfig
 from crisp_drl.envs import make_env, make_rew
 
 
+def _override_config_for_task(args, config):
+    """Apply per-task config overrides.
+
+    Note: ``launch_processes`` re-instantiates ``Config()`` (existing pattern),
+    so per-task overrides must be re-applied inside ``launch_actor`` /
+    ``launch_learner`` after the spawn boundary as well as in ``main``.
+    """
+    if args is None:
+        return config
+    task = getattr(args, "task", "siemens")
+    if task == "lego_3dof_rz":
+        config.actor_output_dim = 3
+        config.actor_nonvision_input_dim = 18
+        config.max_action = np.array(
+            [
+                0.00025,
+                0.00025,
+                np.deg2rad(0.5),
+            ]
+        )
+    if getattr(args, "use_6dof_grasp", False):
+        if task != "siemens":
+            raise ValueError(
+                "--use_6dof_grasp is currently only supported for --task siemens."
+            )
+        config.actor_output_dim = 5
+        config.actor_nonvision_input_dim = 26
+        config.max_action = np.array(
+            [
+                0.00025,
+                0.00025,
+                np.deg2rad(0.25),
+                np.deg2rad(0.25),
+                np.deg2rad(0.25),
+            ]
+        )
+    return config
+
+
 @contextmanager
 def no_interrupts():
     old_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -37,6 +76,7 @@ def launch_processes(args, config):
     parameters_queue = ctx.Queue()
 
     config = Config()
+    config = _override_config_for_task(args, config)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     algo_name = str(os.path.dirname(__file__).split("/")[-1])
     if args.run_name is not None:
@@ -119,7 +159,10 @@ def launch_actor(
         #         "live_view": False,
         #     }
         # )
-        if args is not None and getattr(args, "task", "siemens") == "lego":
+        task = getattr(args, "task", "siemens") if args is not None else "siemens"
+        if task == "lego_3dof_rz":
+            env = make_env.create_real_env_v4_3dof_rz(config, args=args)
+        elif task == "lego":
             env = make_env.create_real_env_v4(config, args=args)
         else:
             env = (
@@ -247,10 +290,11 @@ def main():
     argparse.add_argument(
         "--task",
         type=str,
-        choices=["siemens", "lego"],
+        choices=["siemens", "lego", "lego_3dof_rz"],
         default="siemens",
         help="Which task/env builder to use. 'siemens' keeps the current default "
-        "(create_real_env_s1[_pe]). 'lego' switches to create_real_env_v4.",
+        "(create_real_env_s1[_pe]). 'lego' switches to create_real_env_v4. "
+        "'lego_3dof_rz' uses create_real_env_v4_3dof_rz (XY + yaw, 3-D action).",
     )
     argparse.add_argument(
         "--no_ft_sensor",
@@ -279,20 +323,7 @@ def main():
     )
     args = argparse.parse_args()
     config = Config()
-    if args.use_6dof_grasp:
-        if args.task != "siemens":
-            raise ValueError("--use_6dof_grasp is currently only supported for --task siemens.")
-        config.actor_output_dim = 5
-        config.actor_nonvision_input_dim = 26
-        config.max_action = np.array(
-            [
-                0.00025,
-                0.00025,
-                np.deg2rad(0.25),
-                np.deg2rad(0.25),
-                np.deg2rad(0.25),
-            ]
-        )
+    config = _override_config_for_task(args, config)
     launch_processes(args, config)
 
 
