@@ -15,6 +15,7 @@ import signal
 from contextlib import contextmanager
 
 from crisp_drl.agents.shared.insertion_env_config import SiemensConfig
+from crisp_drl.agents.shared.insertion_wrapper import install_stop_handler
 from crisp_drl.envs import make_env, make_rew
 
 
@@ -174,6 +175,9 @@ def launch_actor(
                     alg_config=config, env_config=SiemensConfig(), args=args
                 )
             )
+        # rclpy overwrites Python's SIGINT handler on init; reinstall so that
+        # Ctrl+C raises KeyboardInterrupt inside movement loops.
+        install_stop_handler()
         # rew_fn = make_rew.create_sim_reward_fn(  # noqa: F821
         #     self.config,
         #     ideal_goal_pos_xy=np.array([0.6, 0.0]),

@@ -1,3 +1,5 @@
+import signal
+import threading
 import time
 from typing import Any, Dict, Optional
 from gymnasium import Wrapper, spaces
@@ -7,6 +9,33 @@ from crisp_drl.agents.shared.insertion_env_config import SiemensConfig
 from crisp_drl.envs.pose_estimation_helper import PoseEstimationHelper
 from crisp_drl.agents.shared.algorithm_config import Config
 from crisp_gym.envs.env_wrapper import LastObservationWrapper
+
+# ---------------------------------------------------------------------------
+# Graceful stop support
+# ---------------------------------------------------------------------------
+# rclpy installs a C-level SIGINT handler that silently suppresses Ctrl+C from
+# Python loops.  Callers should invoke install_stop_handler() once the ROS env
+# is initialised so that Ctrl+C raises KeyboardInterrupt as expected.
+
+_stop_event = threading.Event()
+
+
+def _check_stop() -> None:
+    if _stop_event.is_set():
+        raise KeyboardInterrupt("Stop requested via SIGINT")
+
+
+def install_stop_handler() -> None:
+    """Re-install a Python SIGINT handler after rclpy has overridden it.
+
+    Call this once per process, after the ROS environment has been created.
+    Ctrl+C will then raise KeyboardInterrupt from within any movement loop.
+    """
+    def _handler(sig, frame):
+        _stop_event.set()
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _handler)
 
 
 class SensorTareWrapper(Wrapper):
@@ -119,12 +148,14 @@ class InsertionWrapper(Wrapper):
             > 0.002
             or np.linalg.norm(obs["observation.velocity.cartesian"][:3]) > 0.001
         ) and n < max_settle_iter:
+            _check_stop()
             obs, *_ = self.env.step(np.zeros(3))
             n += 1
         if fine_resolution is not None:
             err = target_cartesian - obs["observation.state.cartesian"][:3]
             n = 0
             while np.linalg.norm(err) > fine_resolution and n < max_settle_iter:
+                _check_stop()
                 obs, *_ = self.env.step(
                     np.clip(err, -self.i_term_clip, self.i_term_clip)
                 )
@@ -132,6 +163,7 @@ class InsertionWrapper(Wrapper):
                 n += 1
             n = 0
             while np.linalg.norm(obs["observation.velocity.cartesian"][:3]) > 0.0005 and n < max_settle_iter:
+                _check_stop()
                 obs, *_ = self.env.step(np.zeros(3))
                 n += 1
         return obs
@@ -351,6 +383,7 @@ class InsertionWrapper(Wrapper):
             # [s.reset() for s in self.env.unwrapped.sensors]  # pyright: ignore[reportAttributeAccessIssue] # tare ft sensor
             z_step, z_force_error = self.z_force_controller_dz(self.obs)
             while abs(z_force_error) > 0.1:  # wait until some contact
+                _check_stop()
                 delta_xy = (
                     self.start_position[0:2] - self.obs["observation.state.cartesian"][0:2]
                 )
@@ -494,13 +527,16 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         self.start_rotation_z = 0.0
 
     def _step_zeros(self):
+        _check_stop()
         return self.env.step(np.zeros(6))
 
     def _step_translation(self, dxyz):
+        _check_stop()
         action6 = np.array([dxyz[0], dxyz[1], dxyz[2], 0.0, 0.0, 0.0])
         return self.env.step(action6)
 
     def _step_yaw(self, drz):
+        _check_stop()
         action6 = np.array([0.0, 0.0, 0.0, 0.0, 0.0, drz])
         return self.env.step(action6)
 

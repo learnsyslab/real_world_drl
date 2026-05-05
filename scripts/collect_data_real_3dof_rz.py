@@ -15,6 +15,7 @@ from datetime import datetime
 import numpy as np
 
 from crisp_drl.agents.shared.algorithm_config import Config
+from crisp_drl.agents.shared.insertion_wrapper import install_stop_handler
 from crisp_drl.envs import make_env, make_rew
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -61,6 +62,7 @@ config.max_action = np.array(
 )
 
 env = make_env.create_real_env_v4_3dof_rz(config)
+install_stop_handler()
 
 reward_fn = make_rew.create_real_reward_fn(
     config,
