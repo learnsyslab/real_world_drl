@@ -23,7 +23,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 # Alternate between perfect goal-seeking action (with prob 1-p) and uniform random (p)
 p = 0.70 # 0.70 to start with
 # p = 0.0 # perfect action test
-N_ROLLOUTS = 30 # 10 to start with
+N_ROLLOUTS = 31 # 10 to start with
 
 # Translation magnitudes
 max_random_action_magnitude = 0.25e-3   # m / step
@@ -43,6 +43,7 @@ exp_name = f"{base_exp_name}_{p}_{start_time_tag}"
 
 # Continue from folder, eg. "run_4_3dof_rz_0.7_0501_10_57"
 exp_name = "run_4_3dof_rz_0.7_0501_11_48"
+#exp_name = "run_4_3dof_rz_0.7_0501_11_48_images"  # with images
 
 repo_id = f"collect_data_real/{exp_name}"
 data_dir = Path("rollout_data") / repo_id
@@ -169,7 +170,8 @@ def create_or_load_lerobot_dataset():
             "shape": (config.vision_head_input_dim,),
             "dtype": "float32",
         },
-        # "observation.images.wrist_camera": {
+        # uncomment to save out images (will increase dataset size significantly)
+        #"observation.images.wrist_camera": {
         #     "shape": (480, 848, 3),
         #     "dtype": "image",
         # },
@@ -351,7 +353,8 @@ try:
                     "goal_position_delta": goal_position_delta.astype(np.float32),
                     "goal_rotation_z": np.array([goal_rotation_z], dtype=np.float32),
                     "start_rotation_z": np.array([start_rotation_z], dtype=np.float32),
-                    # "observation.images.wrist_camera": obs_f["observation.images.wrist_camera"].astype(np.uint8),
+                    # uncomment to save out images
+                    #"observation.images.wrist_camera": obs_f["observation.images.wrist_camera"].astype(np.uint8),
                 }
                 dataset.add_frame(
                     frame=frame_data,

@@ -1737,6 +1737,7 @@ class SuccessClassificationWrapper(Wrapper):
     def __init__(self, env, args, sac_config: Config, threshold: float):
         super().__init__(env)
         classifier_dir = Path("checkpoints") / getattr(args, "load_policy", "")
+        self.snap_reinforce = getattr(args, "snap_reinforce", False)
         if classifier_dir is None:
             raise ValueError("SuccessClassificationWrapper requires args.load_policy.")
 
@@ -1816,12 +1817,23 @@ class SuccessClassificationWrapper(Wrapper):
         self.max_val = max(score, self.max_val)
         print(f"[CLASSIFIER SCORE]: {score:.3f}")
         if score >= self.threshold or self.max_val > 8 and score < 6:
+            self._snap_push()
             t = time.time()
             append_or_insert(info, "custom_events", (t, "E_SUCCESS"))
             append_or_insert(info, "custom_events", (t, "E_SUCCESS_CLS"))
             terminated = True
 
         return observation, reward, terminated, truncated, info
+
+    def _snap_push(self) -> None:
+        """Find the InsertionWrapper in the chain and call its snap_push()."""
+        inner = self.env
+        while inner is not None:
+            if hasattr(inner, "snap_push"):
+                inner.snap_push(reinforce=self.snap_reinforce)
+                return
+            inner = getattr(inner, "env", None)
+        print("[SuccessClassificationWrapper] snap_push: no InsertionWrapper found, skipping.")
 
     def reset(self, options=None, seed=None):
         v = self.env.reset(options=options, seed=seed)

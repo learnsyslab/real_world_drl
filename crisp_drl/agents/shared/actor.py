@@ -220,11 +220,13 @@ class SACActor:
                             os.O_WRONLY | os.O_APPEND | os.O_CREAT,
                             0o644,
                         )
+                        grasp_delta = (
+                            all_infos[0].get("reset.grasped.delta")
+                            or all_infos[0].get("reset.grasped.delta_estimated")
+                        )
                         line = json.dumps(
                             {
-                                "reset.grasped.delta": all_infos[0][
-                                    "reset.grasped.delta"
-                                ].tolist(),
+                                "reset.grasped.delta": grasp_delta.tolist() if grasp_delta is not None else None,
                                 "reset.goal_position.offset": all_infos[0][
                                     "reset.goal_position.offset"
                                 ].tolist(),

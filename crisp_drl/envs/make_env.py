@@ -318,7 +318,9 @@ def create_real_env_v4_3dof_rz(config: Config, args=None) -> gym.Env:
     Stack: ``ManipulatorCartesianEnv → ActionTimeStampWrapper →
     NoGripperActionWrapper (6→7) → LastObservationWrapper →
     [SensorTareWrapper | ZeroFTInjectorWrapper] → InsertionWrapper3DoFRotZ
-    (3→6) → CLIWrapper → DinoImageEncoderWrapper → ObservationFormatterWrapper``.
+    (3→6) → DinoImageEncoderWrapper → ObservationFormatterWrapper →
+    [MotionPlannerWrapper if no_ft] → [SuccessClassificationWrapper if load_policy]
+    → CLIWrapper``.
 
     Convention: ``observation.state.cartesian[3:6]`` is rotvec (axis*angle).
     Home pose has rx≈ry≈0 so ``cartesian[5]`` is pure yaw.
@@ -358,8 +360,6 @@ def create_real_env_v4_3dof_rz(config: Config, args=None) -> gym.Env:
         use_ft_controller=not no_ft,
     )
 
-    env = CLIWrapper(env)
-
     env = DinoImageEncoderWrapper(
         env,
         n_cameras=config.n_cameras,
@@ -394,6 +394,19 @@ def create_real_env_v4_3dof_rz(config: Config, args=None) -> gym.Env:
     if no_ft:
         mp_backend = getattr(args, "mp_backend", "quintic") if args is not None else "quintic"
         env = MotionPlannerWrapper(env, backend=mp_backend)
+    success_threshold = (
+        getattr(args, "no_ft_success_threshold", 4.0)
+        if no_ft
+        else getattr(args, "success_threshold", 9.3)
+    )
+    if args is not None and getattr(args, "load_policy", None):
+        env = SuccessClassificationWrapper(
+            env,
+            args=args,
+            sac_config=config,
+            threshold=success_threshold,
+        )
+    env = CLIWrapper(env)
     return env
 
 

@@ -102,7 +102,8 @@ class InsertionWrapper(Wrapper):
         self.delta_z_push_reset_careful_threshold_velocity = 0.003
 
     def go_to_cartesian(
-        self, current_obs, target_cartesian=None, delta=None, fine_resolution=None
+        self, current_obs, target_cartesian=None, delta=None, fine_resolution=None,
+        max_settle_iter: int = 30,
     ):
         assert target_cartesian is not None or delta is not None, (
             "Must provide either target_cartesian or delta"
@@ -112,21 +113,27 @@ class InsertionWrapper(Wrapper):
         obs, *_ = self.env.step(
             target_cartesian - current_obs["observation.state.cartesian"][:3]
         )
+        n = 0
         while (
             np.linalg.norm(target_cartesian - obs["observation.state.cartesian"][:3])
             > 0.002
             or np.linalg.norm(obs["observation.velocity.cartesian"][:3]) > 0.001
-        ):
+        ) and n < max_settle_iter:
             obs, *_ = self.env.step(np.zeros(3))
+            n += 1
         if fine_resolution is not None:
             err = target_cartesian - obs["observation.state.cartesian"][:3]
-            while np.linalg.norm(err) > fine_resolution:
+            n = 0
+            while np.linalg.norm(err) > fine_resolution and n < max_settle_iter:
                 obs, *_ = self.env.step(
                     np.clip(err, -self.i_term_clip, self.i_term_clip)
                 )
                 err = target_cartesian - obs["observation.state.cartesian"][:3]
-            while np.linalg.norm(obs["observation.velocity.cartesian"][:3]) > 0.0005:
+                n += 1
+            n = 0
+            while np.linalg.norm(obs["observation.velocity.cartesian"][:3]) > 0.0005 and n < max_settle_iter:
                 obs, *_ = self.env.step(np.zeros(3))
+                n += 1
         return obs
 
     def z_force_controller_dz(self, obs):
@@ -474,8 +481,8 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         self.z_force_target = -0.7
         self.z_force_k = 2500
         self.z_force_clip = 0.003
-        self.i_term_clip = 0.001
-        self.reset_lift_height = 0.015
+        self.i_term_clip = 0.001 * 2 # allow more aggressive z action since we have rotation control to help recover from mistakes
+        self.reset_lift_height = 0.020
         self.after_grasp_lift_height = 0.016
 
         self.delta_z_push_reset = 0.003
@@ -498,7 +505,8 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         return self.env.step(action6)
 
     def go_to_cartesian(
-        self, current_obs, target_cartesian=None, delta=None, fine_resolution=None
+        self, current_obs, target_cartesian=None, delta=None, fine_resolution=None,
+        max_settle_iter: int = 300,
     ):
         assert target_cartesian is not None or delta is not None, (
             "Must provide either target_cartesian or delta"
@@ -508,21 +516,32 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         obs, *_ = self._step_translation(
             target_cartesian - current_obs["observation.state.cartesian"][:3]
         )
+        n = 0
         while (
             np.linalg.norm(target_cartesian - obs["observation.state.cartesian"][:3])
             > 0.002
             or np.linalg.norm(obs["observation.velocity.cartesian"][:3]) > 0.001
-        ):
+        ) and n < max_settle_iter:
             obs, *_ = self._step_zeros()
+            n += 1
+        if n >= max_settle_iter:
+            print(
+                f"[InsertionWrapper3DoFRotZ] go_to_cartesian: max_settle_iter={max_settle_iter} hit; "
+                f"residual={np.linalg.norm(target_cartesian - obs['observation.state.cartesian'][:3])*1e3:.2f} mm"
+            )
         if fine_resolution is not None:
             err = target_cartesian - obs["observation.state.cartesian"][:3]
-            while np.linalg.norm(err) > fine_resolution:
+            n = 0
+            while np.linalg.norm(err) > fine_resolution and n < max_settle_iter:
                 obs, *_ = self._step_translation(
                     np.clip(err, -self.i_term_clip, self.i_term_clip)
                 )
                 err = target_cartesian - obs["observation.state.cartesian"][:3]
-            while np.linalg.norm(obs["observation.velocity.cartesian"][:3]) > 0.0005:
+                n += 1
+            n = 0
+            while np.linalg.norm(obs["observation.velocity.cartesian"][:3]) > 0.0005 and n < max_settle_iter:
                 obs, *_ = self._step_zeros()
+                n += 1
         return obs
 
     def _yaw_error_to(self, current_rotvec, target_rz):
@@ -896,6 +915,87 @@ class InsertionWrapper3DoFRotZ(Wrapper):
             truncated = True
 
         return self.obs, reward, terminated, truncated, info
+
+    def snap_push(
+        self,
+        push_distance: float = 0.0030,
+        pause_before: float = 1.0,
+        pause_after: float = 2.0,
+        reinforce: bool = False,
+        reinforce_lift: float = 0.0150,
+        reinforce_push: float = 0.0200,
+        reinforce_post_lift: float = 0.0050,
+    ) -> None:
+        """Stop → push down push_distance m → hold. Called on E_SUCCESS_CLS.
+
+        If ``reinforce=True``, after the hold phase executes a re-seat cycle:
+          open gripper → lift reinforce_lift → close gripper →
+          push down reinforce_push → lift reinforce_post_lift →
+          open gripper → re-grasp lego → lift reinforce_lift
+        """
+        print(f"[InsertionWrapper3DoFRotZ] snap_push: pausing {pause_before}s...")
+        t0 = time.time()
+        while time.time() - t0 < pause_before:
+            self.obs, *_ = self._step_zeros()
+        print(f"[InsertionWrapper3DoFRotZ] snap_push: pushing down {push_distance*1e3:.1f} mm...")
+        self.obs = self.go_to_cartesian(
+            self.obs,
+            delta=np.array([0.0, 0.0, -push_distance]),
+            fine_resolution=push_distance * 0.3,
+        )
+        print(f"[InsertionWrapper3DoFRotZ] snap_push: holding {pause_after}s...")
+        t0 = time.time()
+        while time.time() - t0 < pause_after:
+            self.obs, *_ = self._step_zeros()
+        print("[InsertionWrapper3DoFRotZ] snap_push: done.")
+
+        if not reinforce:
+            return
+
+        print("[InsertionWrapper3DoFRotZ] snap_push: reinforce — opening gripper...")
+        self.env.unwrapped.gripper.set_target(0.80)  # type: ignore
+        time.sleep(1.0)
+
+        print(f"[InsertionWrapper3DoFRotZ] snap_push: reinforce — lifting {reinforce_lift*1e3:.1f} mm...")
+        lift1_target = self.obs["observation.state.cartesian"][:3] + np.array([0.0, 0.0, reinforce_lift])
+        t0 = time.time()
+        while time.time() - t0 < 1.5:
+            err = lift1_target - self.obs["observation.state.cartesian"][:3]
+            self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
+
+        print("[InsertionWrapper3DoFRotZ] snap_push: reinforce — closing gripper (press from top)...")
+        self.env.unwrapped.gripper.set_target(0.4)  # type: ignore
+        time.sleep(1.4)
+
+        print(f"[InsertionWrapper3DoFRotZ] snap_push: reinforce — pressing down {reinforce_push*1e3:.1f} mm...")
+        press_target = self.obs["observation.state.cartesian"][:3] + np.array([0.0, 0.0, -reinforce_push])
+        t0 = time.time()
+        while time.time() - t0 < 1.5:
+            err = press_target - self.obs["observation.state.cartesian"][:3]
+            self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
+
+        print(f"[InsertionWrapper3DoFRotZ] snap_push: reinforce — lifting {reinforce_post_lift*1e3:.1f} mm...")
+        lift2_target = self.obs["observation.state.cartesian"][:3] + np.array([0.0, 0.0, reinforce_post_lift])
+        t0 = time.time()
+        while time.time() - t0 < 1.5:
+            err = lift2_target - self.obs["observation.state.cartesian"][:3]
+            self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
+
+        print("[InsertionWrapper3DoFRotZ] snap_push: reinforce — opening gripper...")
+        self.env.unwrapped.gripper.set_target(0.75)  # type: ignore
+        time.sleep(1.0)
+
+        print("[InsertionWrapper3DoFRotZ] snap_push: reinforce — descending to goal position...")
+        grasp_target = self.goal_position.copy()
+        t0 = time.time()
+        while time.time() - t0 < 1.5:
+            err = grasp_target - self.obs["observation.state.cartesian"][:3]
+            self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
+
+        print("[InsertionWrapper3DoFRotZ] snap_push: reinforce — re-grasping lego...")
+        self.env.unwrapped.gripper.set_target(0.5)  # type: ignore
+        time.sleep(1.0)
+        print("[InsertionWrapper3DoFRotZ] snap_push: reinforce done.")
 
     def add_perfect_action_to_obs(self, obs):
         obs["observation.perfect_action"] = obs["observation.state.cartesian"][:3] - (

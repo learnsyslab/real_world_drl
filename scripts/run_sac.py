@@ -321,6 +321,13 @@ def main():
         "The grasp motion keeps roll/pitch/yaw targets and pose estimation stops "
         "forcing a fixed orientation.",
     )
+    argparse.add_argument(
+        "--snap_reinforce",
+        action="store_true",
+        help="After the snap-push hold, execute a reinforce cycle: open gripper → "
+        "lift 6mm → close → press down → lift → open → re-grasp lego → lift. "
+        "Helps confirm full LEGO seating before reset.",
+    )
     args = argparse.parse_args()
     config = Config()
     config = _override_config_for_task(args, config)
