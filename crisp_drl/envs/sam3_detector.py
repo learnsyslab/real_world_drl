@@ -12,7 +12,23 @@ class Sam3Detector:
         processor = Sam3Processor(model, confidence_threshold=0.01)
         self.processor = processor
 
-    def segment_lego(self, image: np.ndarray) -> dict[str, np.ndarray]:
+    def segment_lego(
+        self,
+        image: np.ndarray,
+        colors: tuple[str, str] = ("lavender", "purple"),
+    ) -> dict[str, np.ndarray]:
+        """Segment two LEGO bricks and label them by brightness.
+
+        Args:
+            image: HxWx3 RGB image.
+            colors: ``(bright_color, dark_color)`` — the brightest detected
+                mask is assigned ``colors[0]``, the darkest ``colors[1]``.
+                Defaults to ``("lavender", "purple")`` for backward compat.
+                Use ``("yellow", "lavender")`` for the yellow+lavender task.
+
+        Returns:
+            Dict mapping each color name to its binary mask (uint8, 0/255).
+        """
         inference_state = self.processor.set_image(Image.fromarray(image))
         output = self.processor.set_text_prompt(
             state=inference_state, prompt="small lego brick"
@@ -40,17 +56,10 @@ class Sam3Detector:
 
         lightest_mask_idx = np.argmax(image_region_means)
         darkest_mask_idx = np.argmin(image_region_means)
+        hw = (mask.shape[-2], mask.shape[-1])  # pyright: ignore[reportPossiblyUnboundVariable]
         return {
-            "lavender": masks[lightest_mask_idx]
-            .cpu()
-            .numpy()
-            .reshape(mask.shape[-2], mask.shape[-1])  # pyright: ignore[reportPossiblyUnboundVariable]
-            * 255,
-            "purple": masks[darkest_mask_idx]
-            .cpu()
-            .numpy()
-            .reshape(mask.shape[-2], mask.shape[-1])  # pyright: ignore[reportPossiblyUnboundVariable]
-            * 255,
+            colors[0]: masks[lightest_mask_idx].cpu().numpy().reshape(*hw) * 255,
+            colors[1]: masks[darkest_mask_idx].cpu().numpy().reshape(*hw) * 255,
         }
 
     def segment_siemens(self, image: np.ndarray) -> np.ndarray:

@@ -4,6 +4,7 @@ import time
 from typing import Any, Dict, Optional
 from gymnasium import Wrapper, spaces
 import numpy as np
+import logging
 
 from crisp_drl.agents.shared.insertion_env_config import SiemensConfig
 from crisp_drl.envs.pose_estimation_helper import PoseEstimationHelper
@@ -85,6 +86,7 @@ class InsertionWrapper(Wrapper):
         is_eval=False,
         use_pose_estimation=False,
         use_ft_controller: bool = True,
+        pe_align_gripper: bool = False,
     ):
         super().__init__(env)
         self.config = config
@@ -106,6 +108,8 @@ class InsertionWrapper(Wrapper):
         self.is_eval = is_eval
         self.use_pose_estimation = use_pose_estimation
         self.use_ft_controller = use_ft_controller
+        # If True, use pose-estimation detected yaw to align gripper Z (3DoF only)
+        self.pe_align_gripper = pe_align_gripper
         self.pose_estimation_helper = (
             PoseEstimationHelper(
                 assumed_orientation=config.pose_estimation_assumed_orientation
@@ -116,7 +120,8 @@ class InsertionWrapper(Wrapper):
         self.pose_estimation_position_euler = np.array(
             config.demo_goal_pose_estimation_euler
         )
-        print("[InsertionWrapper] [__init__] Eval mode:", is_eval)
+        logger = logging.getLogger(__name__)
+        logger.info("[InsertionWrapper] [__init__] Eval mode: %s", is_eval)
 
         self.z_force_target = -0.7
         self.z_force_k = 2500
@@ -279,13 +284,13 @@ class InsertionWrapper(Wrapper):
         self.target_grasp_position[0] += grasp_randomisation_x
         self.target_grasp_position[2] += grasp_randomisation_z
 
-        print("Moving to grasp position...")
+        logger.info("Moving to grasp position...")
         self.obs = self.go_to_cartesian(
             self.obs,
             target_cartesian=self.target_grasp_position,
             fine_resolution=0.0002,
         )
-        print("Grasping...")
+        logger.info("Grasping...")
         self.env.unwrapped.gripper.set_target(0.2)  # type: ignore
         time.sleep(1.0)
         self.obs, *_ = self.env.step(np.zeros(3))
@@ -294,7 +299,7 @@ class InsertionWrapper(Wrapper):
         )
 
         # pick up quickly
-        print("Picking up...")
+        logger.info("Picking up...")
         self.obs = self.go_to_cartesian(
             self.obs, delta=np.array([0.0, 0.0, self.after_grasp_lift_height])
         )
@@ -302,7 +307,7 @@ class InsertionWrapper(Wrapper):
         # compute goal position
         if self.use_pose_estimation and self.pose_estimation_helper is not None:
             # go to pose estimation position; estimate; compare to demo pose estimation; compute goal position
-            print("Moving to pose estimation position...")
+            logger.info("Moving to pose estimation position...")
             self.obs = self.go_to_cartesian(
                 self.obs,
                 target_cartesian=self.pose_estimation_position_euler[:3],
@@ -327,6 +332,21 @@ class InsertionWrapper(Wrapper):
                 + purple_pose[:3, 3]
                 - lavender_pose[:3, 3]
             )
+            # If requested, align gripper yaw (Z) to the detected lavender brick yaw
+            if self.pe_align_gripper:
+                try:
+                    detected_R = lavender_pose[:3, :3]
+                    detected_yaw = self._rotmat_to_yaw(detected_R)
+                    logger.info(
+                        "[InsertionWrapper3DoFRotZ] PE detected yaw: %.2f deg; aligning gripper Z...",
+                        np.rad2deg(detected_yaw),
+                    )
+                    self.obs = self.go_to_rotation_z(self.obs, target_rz=detected_yaw)
+                    # stash for reset_info to persist
+                    self._detected_yaw = detected_yaw
+                except Exception as e:
+                    logger.warning("[InsertionWrapper3DoFRotZ] PE yaw alignment failed: %s", e)
+                    self._detected_yaw = None
 
         else:
             self.goal_position = np.copy(self.goal_position_ground_truth)
@@ -412,7 +432,10 @@ class InsertionWrapper(Wrapper):
             reset_info["reset.pose_estimation.cartesian"] = (
                 self.actual_estimation_position
             )  # pyright: ignore[reportPossiblyUnboundVariable]
-        print("Reset complete.")
+        # persist detected yaw (if any)
+        if hasattr(self, "_detected_yaw"):
+            reset_info["reset.pose_estimation.detected_yaw"] = getattr(self, "_detected_yaw", None)
+        logger.info("Reset complete.")
         self.obs = self.add_perfect_action_to_obs(self.obs)
         return self.obs, reset_info
 
@@ -474,6 +497,7 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         is_eval=False,
         use_pose_estimation=False,
         use_ft_controller: bool = True,
+        pe_align_gripper: bool = False,
     ):
         super().__init__(env)
         self.config = config
@@ -499,6 +523,8 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         self.is_eval = is_eval
         self.use_pose_estimation = use_pose_estimation
         self.use_ft_controller = use_ft_controller
+        # If True, use pose-estimation detected yaw to align gripper Z (3DoF only)
+        self.pe_align_gripper = pe_align_gripper
         self.pose_estimation_helper = (
             PoseEstimationHelper(
                 assumed_orientation=config.pose_estimation_assumed_orientation
@@ -509,7 +535,8 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         self.pose_estimation_position_euler = np.array(
             config.demo_goal_pose_estimation_euler
         )
-        print("[InsertionWrapper3DoFRotZ] [__init__] Eval mode:", is_eval)
+        logger = logging.getLogger(__name__)
+        logger.info("[InsertionWrapper3DoFRotZ] [__init__] Eval mode: %s", is_eval)
 
         self.z_force_target = -0.7
         self.z_force_k = 2500
@@ -561,9 +588,10 @@ class InsertionWrapper3DoFRotZ(Wrapper):
             obs, *_ = self._step_zeros()
             n += 1
         if n >= max_settle_iter:
-            print(
-                f"[InsertionWrapper3DoFRotZ] go_to_cartesian: max_settle_iter={max_settle_iter} hit; "
-                f"residual={np.linalg.norm(target_cartesian - obs['observation.state.cartesian'][:3])*1e3:.2f} mm"
+            logger.warning(
+                "[InsertionWrapper3DoFRotZ] go_to_cartesian: max_settle_iter=%s hit; residual=%.2f mm",
+                max_settle_iter,
+                np.linalg.norm(target_cartesian - obs["observation.state.cartesian"][:3]) * 1e3,
             )
         if fine_resolution is not None:
             err = target_cartesian - obs["observation.state.cartesian"][:3]
@@ -607,9 +635,9 @@ class InsertionWrapper3DoFRotZ(Wrapper):
             rz_err = self._yaw_error_to(obs["observation.state.cartesian"][3:6], target_rz)
             n += 1
         if n >= max_drive_iter:
-            print(
-                f"[InsertionWrapper3DoFRotZ] go_to_rotation_z: max_drive_iter "
-                f"hit; residual rz_err={np.rad2deg(rz_err):.3f} deg"
+            logger.warning(
+                "[InsertionWrapper3DoFRotZ] go_to_rotation_z: max_drive_iter hit; residual rz_err=%.3f deg",
+                np.rad2deg(rz_err),
             )
         n_settle = 0
         while (
@@ -619,6 +647,13 @@ class InsertionWrapper3DoFRotZ(Wrapper):
             obs, *_ = self._step_zeros()
             n_settle += 1
         return obs
+
+    def _rotmat_to_yaw(self, R: np.ndarray) -> float:
+        """Extract yaw (rotation about Z) from a 3x3 rotation matrix R.
+
+        Uses atan2(R[1,0], R[0,0]) which yields the yaw angle in radians.
+        """
+        return float(np.arctan2(R[1, 0], R[0, 0]))
 
     def z_force_controller_dz(self, obs):
         z_force_error = (
@@ -761,13 +796,13 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         # self.env.unwrapped.gripper.set_target(0.8)  # type: ignore
         time.sleep(1.0)
         
-        print("Moving to grasp position...")
+        logger.info("Moving to grasp position...")
         self.obs = self.go_to_cartesian(
             self.obs,
             target_cartesian=self.target_grasp_position,
             fine_resolution=0.0002,
         )
-        print("Grasping...")
+        logger.info("Grasping...")
         self.env.unwrapped.gripper.set_target(0.5)  # type: ignore
         time.sleep(2.0)
         self.obs, *_ = self._step_zeros()
@@ -776,14 +811,14 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         )
 
         # pick up quickly
-        print("Picking up...")
+        logger.info("Picking up...")
         self.obs = self.go_to_cartesian(
             self.obs, delta=np.array([0.0, 0.0, self.after_grasp_lift_height])
         )
 
         # compute goal position (XY)
         if self.use_pose_estimation and self.pose_estimation_helper is not None:
-            print("Moving to pose estimation position...")
+            logger.info("Moving to pose estimation position...")
             self.obs = self.go_to_cartesian(
                 self.obs,
                 target_cartesian=self.pose_estimation_position_euler[:3],
@@ -857,7 +892,7 @@ class InsertionWrapper3DoFRotZ(Wrapper):
             self.start_rotation_z = self.goal_rotation_z
 
         # move to start XY (rz still 0 from home)
-        print("Moving to start position...")
+        logger.info("Moving to start position...")
         self.obs = self.go_to_cartesian(
             self.obs,
             target_cartesian=np.array(
@@ -871,7 +906,7 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         )
 
         # rotate yaw to start_rotation_z BEFORE establishing FT contact
-        print(f"Rotating yaw to {np.rad2deg(self.start_rotation_z):.2f} deg...")
+        logger.info("Rotating yaw to %.2f deg...", np.rad2deg(self.start_rotation_z))
         self.obs = self.go_to_rotation_z(self.obs, target_rz=self.start_rotation_z)
 
         # Do NOT call env.reset() here: switch_to_default_controller() inside
@@ -917,7 +952,7 @@ class InsertionWrapper3DoFRotZ(Wrapper):
             reset_info["reset.pose_estimation.cartesian"] = (
                 self.actual_estimation_position
             )  # pyright: ignore[reportPossiblyUnboundVariable]
-        print("Reset complete.")
+        logger.info("Reset complete.")
         self.obs = self.add_perfect_action_to_obs(self.obs)
         return self.obs, reset_info
 
@@ -969,69 +1004,82 @@ class InsertionWrapper3DoFRotZ(Wrapper):
           push down reinforce_push → lift reinforce_post_lift →
           open gripper → re-grasp lego → lift reinforce_lift
         """
-        print(f"[InsertionWrapper3DoFRotZ] snap_push: pausing {pause_before}s...")
+        logger.info("[InsertionWrapper3DoFRotZ] snap_push: pausing %s s...", pause_before)
         t0 = time.time()
         while time.time() - t0 < pause_before:
             self.obs, *_ = self._step_zeros()
-        print(f"[InsertionWrapper3DoFRotZ] snap_push: pushing down {push_distance*1e3:.1f} mm...")
+        logger.info(
+            "[InsertionWrapper3DoFRotZ] snap_push: pushing down %.1f mm...", push_distance * 1e3
+        )
         self.obs = self.go_to_cartesian(
             self.obs,
             delta=np.array([0.0, 0.0, -push_distance]),
             fine_resolution=push_distance * 0.3,
         )
-        print(f"[InsertionWrapper3DoFRotZ] snap_push: holding {pause_after}s...")
+        logger.info("[InsertionWrapper3DoFRotZ] snap_push: holding %s s...", pause_after)
         t0 = time.time()
         while time.time() - t0 < pause_after:
             self.obs, *_ = self._step_zeros()
-        print("[InsertionWrapper3DoFRotZ] snap_push: done.")
+        logger.info("[InsertionWrapper3DoFRotZ] snap_push: done.")
 
         if not reinforce:
             return
 
-        print("[InsertionWrapper3DoFRotZ] snap_push: reinforce — opening gripper...")
+        logger.info("[InsertionWrapper3DoFRotZ] snap_push: reinforce — opening gripper...")
         self.env.unwrapped.gripper.set_target(0.80)  # type: ignore
         time.sleep(1.0)
 
-        print(f"[InsertionWrapper3DoFRotZ] snap_push: reinforce — lifting {reinforce_lift*1e3:.1f} mm...")
+        logger.info(
+            "[InsertionWrapper3DoFRotZ] snap_push: reinforce — lifting %.1f mm...",
+            reinforce_lift * 1e3,
+        )
         lift1_target = self.obs["observation.state.cartesian"][:3] + np.array([0.0, 0.0, reinforce_lift])
         t0 = time.time()
         while time.time() - t0 < 1.5:
             err = lift1_target - self.obs["observation.state.cartesian"][:3]
             self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
 
-        print("[InsertionWrapper3DoFRotZ] snap_push: reinforce — closing gripper (press from top)...")
+        logger.info(
+            "[InsertionWrapper3DoFRotZ] snap_push: reinforce — closing gripper (press from top)..."
+        )
         self.env.unwrapped.gripper.set_target(0.4)  # type: ignore
         time.sleep(1.4)
 
-        print(f"[InsertionWrapper3DoFRotZ] snap_push: reinforce — pressing down {reinforce_push*1e3:.1f} mm...")
+        logger.info(
+            "[InsertionWrapper3DoFRotZ] snap_push: reinforce — pressing down %.1f mm...",
+            reinforce_push * 1e3,
+        )
         press_target = self.obs["observation.state.cartesian"][:3] + np.array([0.0, 0.0, -reinforce_push])
         t0 = time.time()
         while time.time() - t0 < 1.5:
             err = press_target - self.obs["observation.state.cartesian"][:3]
             self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
 
-        print(f"[InsertionWrapper3DoFRotZ] snap_push: reinforce — lifting {reinforce_post_lift*1e3:.1f} mm...")
+        logger.info(
+            "[InsertionWrapper3DoFRotZ] snap_push: reinforce — lifting %.1f mm...",
+            reinforce_post_lift * 1e3,
+        )
         lift2_target = self.obs["observation.state.cartesian"][:3] + np.array([0.0, 0.0, reinforce_post_lift])
         t0 = time.time()
         while time.time() - t0 < 1.5:
             err = lift2_target - self.obs["observation.state.cartesian"][:3]
             self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
 
-        print("[InsertionWrapper3DoFRotZ] snap_push: reinforce — opening gripper...")
+        logger.info("[InsertionWrapper3DoFRotZ] snap_push: reinforce — opening gripper...")
         self.env.unwrapped.gripper.set_target(0.75)  # type: ignore
         time.sleep(1.0)
 
-        print("[InsertionWrapper3DoFRotZ] snap_push: reinforce — descending to goal position...")
+        logger.info("[InsertionWrapper3DoFRotZ] snap_push: reinforce — descending to goal position...")
         grasp_target = self.goal_position.copy()
         t0 = time.time()
         while time.time() - t0 < 1.5:
             err = grasp_target - self.obs["observation.state.cartesian"][:3]
             self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
 
-        print("[InsertionWrapper3DoFRotZ] snap_push: reinforce — re-grasping lego...")
+        logger.info("[InsertionWrapper3DoFRotZ] snap_push: reinforce — re-grasping lego...")
         self.env.unwrapped.gripper.set_target(0.5)  # type: ignore
         time.sleep(1.0)
-        print("[InsertionWrapper3DoFRotZ] snap_push: reinforce done.")
+        logger.info("[InsertionWrapper3DoFRotZ] snap_push: reinforce done.")
 
     def add_perfect_action_to_obs(self, obs):
         obs["observation.perfect_action"] = obs["observation.state.cartesian"][:3] - (

@@ -29,7 +29,7 @@ def _override_config_for_task(args, config):
     if args is None:
         return config
     task = getattr(args, "task", "siemens")
-    if task == "lego_3dof_rz":
+    if task in ("lego_3dof_rz", "lego_3dof_rz_pe"):
         config.actor_output_dim = 3
         config.actor_nonvision_input_dim = 18
         config.max_action = np.array(
@@ -163,6 +163,8 @@ def launch_actor(
         task = getattr(args, "task", "siemens") if args is not None else "siemens"
         if task == "lego_3dof_rz":
             env = make_env.create_real_env_v4_3dof_rz(config, args=args)
+        elif task == "lego_3dof_rz_pe":
+            env = make_env.create_real_env_v4_3dof_rz_pe(config, args=args)
         elif task == "lego":
             env = make_env.create_real_env_v4(config, args=args)
         else:
@@ -205,10 +207,12 @@ def launch_actor(
         return
 
     try:
-        if not args or not args.use_pose_estimation:
-            actor.run(data_queue)
-        else:
+        task = getattr(args, "task", "siemens") if args is not None else "siemens"
+        use_pe = (args and args.use_pose_estimation) or task == "lego_3dof_rz_pe"
+        if use_pe:
             actor.run_pe(data_queue)
+        else:
+            actor.run(data_queue)
     finally:
         actor.close()
 
@@ -275,6 +279,11 @@ def main():
         action="store_true",
         help="Use pose estimation module in the environment.",
     )
+    argparse.add_argument(
+        "--pe_align_gripper",
+        action="store_true",
+        help="If set, align gripper yaw (Z) to PE-detected brick yaw during reset (3DoF only).",
+    )
     # argument for maximum number of episodes to run
     argparse.add_argument(
         "--max_episodes",
@@ -294,11 +303,13 @@ def main():
     argparse.add_argument(
         "--task",
         type=str,
-        choices=["siemens", "lego", "lego_3dof_rz"],
+        choices=["siemens", "lego", "lego_3dof_rz", "lego_3dof_rz_pe"],
         default="siemens",
         help="Which task/env builder to use. 'siemens' keeps the current default "
         "(create_real_env_s1[_pe]). 'lego' switches to create_real_env_v4. "
-        "'lego_3dof_rz' uses create_real_env_v4_3dof_rz (XY + yaw, 3-D action).",
+        "'lego_3dof_rz' uses create_real_env_v4_3dof_rz (XY + yaw, 3-D action). "
+        "'lego_3dof_rz_pe' uses create_real_env_v4_3dof_rz_pe (same action space "
+        "but with PE-driven grasp and goal from FoundationPose).",
     )
     argparse.add_argument(
         "--no_ft_sensor",
@@ -324,6 +335,13 @@ def main():
         help="Enable the 6DoF grasp path for the Siemens real environment. "
         "The grasp motion keeps roll/pitch/yaw targets and pose estimation stops "
         "forcing a fixed orientation.",
+    )
+    argparse.add_argument(
+        "--pose_viz_dir",
+        type=str,
+        default=None,
+        help="If set, save per-reset pose-estimation overlays (PNG) + raw NPZ "
+        "artifacts into this directory for offline inspection.",
     )
     argparse.add_argument(
         "--snap_reinforce",

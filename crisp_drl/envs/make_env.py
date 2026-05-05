@@ -22,6 +22,9 @@ from crisp_drl.agents.shared.insertion_wrapper_lego import InsertionWrapperLegoP
 from crisp_drl.agents.shared.insertion_wrapper_lego_2x4 import (
     InsertionWrapperLego2x4PE,
 )
+from crisp_drl.agents.shared.insertion_wrapper_lego_3dof_rz_pe import (
+    InsertionWrapper3DoFRotZPE,
+)
 from crisp_gym.envs.manipulator_env_config import NoCamFrankaEnvConfig, FrankaEnvConfig
 from crisp_py.camera.camera_config import CameraConfig
 from crisp_py.gripper.gripper import GripperConfig
@@ -243,9 +246,9 @@ def create_real_env_v3_timo(config: Config) -> gym.Env:
 def create_real_env_v4(config: Config, args=None) -> gym.Env:
     no_ft = bool(args is not None and getattr(args, "no_ft_sensor", False))
     env = make_env("my_env_v4_no_ft" if no_ft else "my_env_v4")
-    print("Env created.")
+    logging.getLogger(__name__).info("Env created.")
     env.wait_until_ready()
-    print("Env ready.")
+    logging.getLogger(__name__).info("Env ready.")
 
     env = ActionTimeStampWrapper(env)
     env = NoRotationNoGripperActionWrapper(env)
@@ -356,7 +359,8 @@ def create_real_env_v4_3dof_rz(config: Config, args=None) -> gym.Env:
         minimal_start_goal_angle=np.deg2rad(1.0),
         step_limit=config.episode_length if not is_eval else 2 * config.episode_length,
         is_eval=is_eval,
-        use_pose_estimation=False,  # PE path not yet wired for yaw
+        use_pose_estimation=True if (args is not None and getattr(args, "use_pose_estimation", False)) else False,
+        pe_align_gripper=True if (args is not None and getattr(args, "pe_align_gripper", False)) else False,
         use_ft_controller=not no_ft,
     )
 
@@ -488,6 +492,107 @@ def create_real_env_v4_pe(
         getattr(args, "no_ft_success_threshold", 4.0)
         if no_ft
         else getattr(args, "success_threshold", 8.0)
+    )
+    if args is not None and getattr(args, "load_policy", None):
+        env = SuccessClassificationWrapper(
+            env,
+            args=args,
+            sac_config=alg_config,
+            threshold=success_threshold,
+        )
+    env = CLIWrapper(env)
+    mp_backend = getattr(args, "mp_backend", "quintic") if args is not None else "quintic"
+    env = MotionPlannerWrapper(env, backend=mp_backend)
+    return env
+
+
+def create_real_env_v4_3dof_rz_pe(
+    alg_config: Config,
+    env_config=None,
+    args=None,
+    brick_size: str = "2x4",
+) -> gym.Env:
+    """3-DoF + Rot-Z LEGO env with PE-driven grasp and goal (XY + yaw, 3-D action).
+
+    Stack: ``ManipulatorCartesianEnv → ActionTimeStampWrapper →
+    NoGripperActionWrapper (6→7) → LastObservationWrapper →
+    [SensorTareWrapper | ZeroFTInjectorWrapper] → InsertionWrapper3DoFRotZPE
+    (3→6) → DinoImageEncoderWrapper → ObservationFormatterWrapper →
+    MotionPlannerWrapper → [SuccessClassificationWrapper if load_policy]
+    → CLIWrapper``.
+    """
+    no_ft = bool(args is not None and getattr(args, "no_ft_sensor", False))
+    env = make_env("my_env_v4_no_ft" if no_ft else "my_env_v4")
+    print("Env created.")
+    env.wait_until_ready()
+    print("Env ready.")
+
+    env = ActionTimeStampWrapper(env)
+    env = NoGripperActionWrapper(env)
+    env = LastObservationWrapper(env)
+    if no_ft:
+        env = ZeroFTInjectorWrapper(env)
+    else:
+        env = SensorTareWrapper(
+            env,
+            sensor_key="observation.state.sensors_bota_ft_sensor",
+            sensor_data_shape=(6,),
+        )
+    is_eval = False if args is None else args.eval
+    resolved_brick_size = getattr(args, "brick_size", brick_size) if args is not None else brick_size
+    if env_config is None:
+        cfg_cls = LEGO_BRICK_CONFIGS.get(resolved_brick_size, LegoConfig)
+        env_config = cfg_cls()
+
+    env = InsertionWrapper3DoFRotZPE(
+        env,
+        alg_config=alg_config,
+        env_config=env_config,
+        safety_box_radius=0.004 if is_eval else 0.003,
+        safety_box_step_size=0.0005,
+        safety_box_angular_radius=np.deg2rad(4) if is_eval else np.deg2rad(3),
+        safety_box_angular_step_size=np.deg2rad(0.5),
+        goal_orientation_randomisation_angle=np.deg2rad(1.5),
+        minimal_start_goal_angle=np.deg2rad(1.0),
+        step_limit=env_config.episode_length if not is_eval else 2 * env_config.episode_length,
+        is_eval=is_eval,
+        use_ft_controller=not no_ft,
+        pose_viz_dir=getattr(args, "pose_viz_dir", None) if args is not None else None,
+    )
+
+    env = DinoImageEncoderWrapper(
+        env,
+        n_cameras=alg_config.n_cameras,
+        image_keys=["observation.images.wrist_camera"],
+        image_size=(256, 256),
+        crops={"observation.images.wrist_camera": (175, 175 + 224, 346, 346 + 224)},
+        rescales={"observation.images.wrist_camera": 1.5},
+    )
+
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
+    # 18-dim non-vision: 3 prev_action (XY+yaw) + 3 vel + 3 err + 3 prev_err + 6 FT
+    env = ObservationFormatterWrapper(
+        env,
+        "cuda",
+        keys_ranges_scales=[
+            ("observation.previous.action", (0, 2), 1000.0),
+            ("observation.previous.action", (5, 6), 40.0),
+            ("observation.velocity.cartesian", (0, 2), 1000.0),
+            ("observation.velocity.angular", (2, 3), 40.0),
+            ("observation.error.cartesian", (0, 2), 1000.0),
+            ("observation.error.angular", (2, 3), 40.0),
+            ("observation.previous.error.cartesian", (0, 2), 1000.0),
+            ("observation.previous.error.angular", (2, 3), 40.0),
+            ("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1),
+            ("observation.features.wrist_camera", (0, 512), 1.0),
+        ],
+    )
+    success_threshold = (
+        getattr(args, "no_ft_success_threshold", 4.0)
+        if no_ft
+        else getattr(args, "success_threshold", 9.3)
     )
     if args is not None and getattr(args, "load_policy", None):
         env = SuccessClassificationWrapper(

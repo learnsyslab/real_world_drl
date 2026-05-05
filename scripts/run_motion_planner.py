@@ -284,7 +284,10 @@ def main() -> int:
 
     p = argparse.ArgumentParser()
     p.add_argument(
-        "--task", type=str, choices=["siemens", "lego"], default="siemens"
+        "--task",
+        type=str,
+        choices=["siemens", "lego", "lego_3dof_rz_pe"],
+        default="siemens",
     )
     p.add_argument("--use_pose_estimation", action="store_true", default=True)
     p.add_argument(
@@ -420,7 +423,12 @@ def main() -> int:
         args.mp_backend,
     )
 
-    if args.task == "lego":
+    if args.task == "lego_3dof_rz_pe":
+        cfg.actor_output_dim = 3
+        cfg.actor_nonvision_input_dim = 18
+        cfg.max_action = np.array([0.00025, 0.00025, np.deg2rad(0.5)])
+        env = make_env.create_real_env_v4_3dof_rz_pe(cfg, args=args)
+    elif args.task == "lego":
         cfg_cls = LEGO_BRICK_CONFIGS.get(args.brick_size)
         if cfg_cls is None:
             raise ValueError(f"Unsupported brick_size={args.brick_size!r}")

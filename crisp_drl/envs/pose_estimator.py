@@ -34,8 +34,10 @@ class PoseEstimator(Node):
 
         super().__init__(node_name)
         self.bridge = CvBridge()
-        if brick_size not in ("2x2", "2x4"):
-            raise ValueError(f"brick_size must be '2x2' or '2x4', got {brick_size}")
+        if brick_size not in self.LEGO_MESH_PATHS:
+            raise ValueError(
+                f"brick_size must be one of {list(self.LEGO_MESH_PATHS)}, got {brick_size!r}"
+            )
         self.brick_size = brick_size
 
         # Load camera parameters
@@ -93,6 +95,7 @@ class PoseEstimator(Node):
         "2x4": {
             "lavender": "/workspaces/isaac_ros-dev/lego_assets/lego_2x4_lavender_up.obj",
             "purple": "/workspaces/isaac_ros-dev/lego_assets/lego_2x4_purple_up.obj",
+            "yellow": "/workspaces/isaac_ros-dev/lego_assets/lego_2x4_yellow_up.obj",
         },
     }
 
@@ -100,7 +103,10 @@ class PoseEstimator(Node):
         """Set the mesh file path parameter based on color using parameter client."""
         mesh_path_map = self.LEGO_MESH_PATHS[self.brick_size]
         if color not in mesh_path_map:
-            raise ValueError(f"Unknown color: {color}. Must be 'lavender' or 'purple'")
+            raise ValueError(
+                f"Unknown color {color!r} for brick_size={self.brick_size!r}. "
+                f"Must be one of {list(mesh_path_map)}"
+            )
 
         mesh_path = mesh_path_map[color]
         self._set_mesh_path(mesh_path)
