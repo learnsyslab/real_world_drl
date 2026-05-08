@@ -1,7 +1,10 @@
 import os
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 from matplotlib.patches import Ellipse
+from matplotlib.colors import Normalize
 from pathlib import Path
 from collections import defaultdict
 
@@ -18,10 +21,11 @@ def parse_folder_name(name: str) -> tuple[str, float, int]:
     return datetime_str, hyperparameter, success_pct
 
 
-def compute_rollout_stats(folder_path: Path) -> tuple[float, float]:
-    """Compute success rate and mean successful episode length for a folder."""
+def compute_rollout_stats(folder_path: Path) -> tuple[float, float, int]:
+    """Compute success rate, mean successful episode length, and dataset size."""
     n_total = 0
     n_success = 0
+    n_actions_total = 0
     success_lengths = []
 
     for f in sorted(os.listdir(folder_path)):
@@ -29,13 +33,17 @@ def compute_rollout_stats(folder_path: Path) -> tuple[float, float]:
             continue
         data = np.load(folder_path / f, allow_pickle=True)
         n_total += 1
+        n_actions_total += len(data["actions"])
         if data["terminated"]:
             n_success += 1
             success_lengths.append(len(data["actions"]))
 
-    success_rate = n_success / n_total * 100 if n_total > 0 else 0.0
-    mean_success_length = np.mean(success_lengths) if success_lengths else float("nan")
-    return success_rate, mean_success_length
+    success_rate = n_success / n_total if n_total > 0 else 0.0
+    mean_success_length = (
+        float(np.mean(success_lengths)) if success_lengths else float("nan")
+    )
+    dataset_size = n_actions_total
+    return success_rate, mean_success_length, dataset_size
 
 
 def confidence_ellipse(mean, cov, ax, n_std=1.0, **kwargs):
@@ -56,10 +64,21 @@ def confidence_ellipse(mean, cov, ax, n_std=1.0, **kwargs):
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Plot v9 ablation: success rate vs successful episode length."
+    )
+    parser.add_argument(
+        "--no-variance-ellipses",
+        action="store_true",
+        help="Do not draw covariance/variance ellipses around each hyperparameter point.",
+    )
+    args = parser.parse_args()
+
     # Collect all v9 ablation folders
     hyper_data = defaultdict(
         list
     )  # hyperparameter -> [(success_rate, mean_success_length)]
+    dataset_size_data = defaultdict(list)  # hyperparameter -> [dataset_size]
 
     for folder_name in sorted(os.listdir(BASE_FOLDER)):
         if not folder_name.startswith(V9_PREFIX):
@@ -71,7 +90,10 @@ def main():
         _, hyperparameter, _ = parse_folder_name(folder_name)
         print(f"Processing {folder_name} (hyperparameter={hyperparameter})")
 
-        success_rate, mean_success_length = compute_rollout_stats(folder_path)
+        success_rate, mean_success_length, dataset_size = compute_rollout_stats(
+            folder_path
+        )
+        dataset_size_data[hyperparameter].append(dataset_size)
         if not np.isnan(mean_success_length):
             hyper_data[hyperparameter].append((success_rate, mean_success_length))
 
@@ -93,28 +115,70 @@ def main():
         covs.append(cov)
         print(
             f"  hp={hp}: n={len(points)}, "
-            f"success_rate={mean[0]:.1f}% ± {np.sqrt(cov[0, 0]):.1f}, "
+            f"success_rate={mean[0]:.1f} ± {np.sqrt(cov[0, 0]):.1f}, "
             f"mean_length={mean[1]:.1f} ± {np.sqrt(cov[1, 1]):.1f}"
         )
 
     means = np.array(means)
 
-    # Plot
-    fig, ax = plt.subplots(figsize=(10, 7))
+    # Compute mean/std dataset size per hyperparameter (uses all runs).
+    dataset_size_means = []
+    dataset_size_stds = []
+    for hp in hyperparams_sorted:
+        sizes = np.array(dataset_size_data[hp], dtype=float)
+        dataset_size_means.append(float(np.mean(sizes)))
+        dataset_size_stds.append(float(np.std(sizes)))
 
-    # Draw uncertainty ellipses
-    for i, (mean, cov, hp) in enumerate(zip(means, covs, labels)):
-        if np.any(cov > 0):
-            confidence_ellipse(
-                mean,
-                cov,
-                ax,
-                n_std=1.0,
-                facecolor=plt.cm.viridis(i / (len(labels) - 1)),
-                alpha=0.2,
-                edgecolor=plt.cm.viridis(i / (len(labels) - 1)),
-                linewidth=1.5,
-            )
+    dataset_size_means = np.array(dataset_size_means)
+    dataset_size_stds = np.array(dataset_size_stds)
+
+    # Plot
+    viridis = cm.get_cmap("viridis")
+
+    # Figure 1: mean dataset size over p_rand.
+    fig_left, ax_left = plt.subplots(figsize=(7, 6))
+    ax_left.errorbar(
+        hyperparams_sorted,
+        dataset_size_means,
+        yerr=dataset_size_stds,
+        fmt="-o",
+        color="tab:blue",
+        ecolor="tab:blue",
+        elinewidth=1.2,
+        capsize=3,
+        markersize=5,
+    )
+    ax_left.set_xlabel("$p_{rand}$", fontsize=13)
+    ax_left.set_ylabel(
+        "Dataset Size $\\left\\langle\\mathcal{D}\\right\\rangle$ (number of transitions)",
+        fontsize=13,
+    )
+    ax_left.set_title(
+        "Dataset Size $\\left\\langle\\mathcal{D}\\right\\rangle$ vs $p_{rand}$",
+        fontsize=14,
+    )
+    ax_left.grid(True, alpha=0.3)
+    fig_left.tight_layout()
+    fig_left.savefig("eval/v9_ablation_dataset_size.png", dpi=150, bbox_inches="tight")
+
+    # Figure 2: success vs length.
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # Draw uncertainty ellipses unless disabled via CLI.
+    if not args.no_variance_ellipses:
+        for i, (mean, cov, hp) in enumerate(zip(means, covs, labels)):
+            if np.any(cov > 0):
+                color_value = 0.5 if len(labels) == 1 else i / (len(labels) - 1)
+                confidence_ellipse(
+                    mean,
+                    cov,
+                    ax,
+                    n_std=1.0,
+                    facecolor=viridis(color_value),
+                    alpha=0.2,
+                    edgecolor=viridis(color_value),
+                    linewidth=1.5,
+                )
 
     # Draw line through means (ordered by increasing hyperparameter)
     ax.plot(
@@ -128,8 +192,11 @@ def main():
     )
 
     # Draw data points
-    colors = [plt.cm.viridis(i / (len(labels) - 1)) for i in range(len(labels))]
-    scatter = ax.scatter(
+    colors = [
+        viridis(0.5 if len(labels) == 1 else i / (len(labels) - 1))
+        for i in range(len(labels))
+    ]
+    ax.scatter(
         means[:, 0],
         means[:, 1],
         c=colors,
@@ -150,26 +217,30 @@ def main():
             fontweight="bold",
         )
 
-    ax.set_xlabel("Episode Success Rate (%)", fontsize=13)
-    ax.set_ylabel("Mean Successful Episode Length (steps)", fontsize=13)
+    ax.set_xlabel("Success Rate", fontsize=13)
+    ax.set_ylabel("Mean Successful Rollout Length (steps)", fontsize=13)
+    ax.set_xlim(-0.05, 1.05)
+    ax.set_ylim(-5, 125)
     ax.set_title(
-        "Env v9 Ablation: Success Rate vs Episode Length by Hyperparameter", fontsize=14
+        "Dataset Mean Successful Rollout Length vs Success Rate by $p_{rand}$",
+        fontsize=14,
     )
     ax.grid(True, alpha=0.3)
 
     # Add colorbar for hyperparameter
-    sm = plt.cm.ScalarMappable(
-        cmap=plt.cm.viridis,
-        norm=plt.Normalize(vmin=min(labels), vmax=max(labels)),
+    sm = cm.ScalarMappable(
+        cmap=viridis,
+        norm=Normalize(vmin=min(labels), vmax=max(labels)),
     )
     sm.set_array([])
     cbar = plt.colorbar(sm, ax=ax, pad=0.02)
-    cbar.set_label("Hyperparameter Value", fontsize=12)
+    cbar.set_label("$p_{rand}$", fontsize=12)
 
-    plt.tight_layout()
-    plt.savefig("eval/v9_ablation_success_vs_length.png", dpi=150, bbox_inches="tight")
-    plt.savefig("eval/v9_ablation_success_vs_length.pdf", bbox_inches="tight")
-    print("\nSaved to eval/v9_ablation_success_vs_length.png and .pdf")
+    fig.tight_layout()
+    fig.savefig("eval/v9_ablation_success_vs_length.png", dpi=150, bbox_inches="tight")
+    print(
+        "\nSaved to eval/v9_ablation_dataset_size.png and eval/v9_ablation_success_vs_length.png"
+    )
     plt.show()
 
 

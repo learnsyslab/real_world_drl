@@ -33,10 +33,10 @@ SEED=$1
 # pixi run -e jazzy python scripts/run_sac_pretraining.py --run_name 1cft_d600v9_25_60_s${SEED} --pre_train rollout_data/collect_data/replay_buffer_600v9_1cft_25_60_s${SEED}.joblib --seed ${SEED} --utd_ratio 8
 
 
-pixi run -e jazzy python scripts/run_sac_pretraining.py --run_name 1cft_d500v9_30_s${SEED} --pre_train rollout_data/collect_data/replay_buffer_500v9_1cft_30_s${SEED}.joblib --seed ${SEED} --utd_ratio 0.965
-pixi run -e jazzy python scripts/run_sac_pretraining.py --run_name 1cft_d600v9_30_s${SEED} --pre_train rollout_data/collect_data/replay_buffer_600v9_1cft_30_s${SEED}.joblib --seed ${SEED} --utd_ratio 0.965
-pixi run -e jazzy python scripts/run_sac_pretraining.py --run_name 1cft_d700v9_30_s${SEED} --pre_train rollout_data/collect_data/replay_buffer_700v9_1cft_30_s${SEED}.joblib --seed ${SEED} --utd_ratio 0.965
-pixi run -e jazzy python scripts/run_sac_pretraining.py --run_name 1cft_d800v9_30_s${SEED} --pre_train rollout_data/collect_data/replay_buffer_800v9_1cft_30_s${SEED}.joblib --seed ${SEED} --utd_ratio 0.965
+# pixi run -e jazzy python scripts/run_sac_pretraining.py --run_name 1cft_d500v9_30_s${SEED} --pre_train rollout_data/collect_data/replay_buffer_500v9_1cft_30_s${SEED}.joblib --seed ${SEED} --utd_ratio 0.965
+# pixi run -e jazzy python scripts/run_sac_pretraining.py --run_name 1cft_d600v9_30_s${SEED} --pre_train rollout_data/collect_data/replay_buffer_600v9_1cft_30_s${SEED}.joblib --seed ${SEED} --utd_ratio 0.965
+# pixi run -e jazzy python scripts/run_sac_pretraining.py --run_name 1cft_d700v9_30_s${SEED} --pre_train rollout_data/collect_data/replay_buffer_700v9_1cft_30_s${SEED}.joblib --seed ${SEED} --utd_ratio 0.965
+# pixi run -e jazzy python scripts/run_sac_pretraining.py --run_name 1cft_d800v9_30_s${SEED} --pre_train rollout_data/collect_data/replay_buffer_800v9_1cft_30_s${SEED}.joblib --seed ${SEED} --utd_ratio 0.965
 
 
 # pixi run -e jazzy python scripts/run_sac_pretraining.py --run_name 1cft_d500v9_30_40_s${SEED} --pre_train rollout_data/collect_data/replay_buffer_500v9_1cft_30_40_s${SEED}.joblib --seed ${SEED} --utd_ratio 10

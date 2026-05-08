@@ -3,6 +3,8 @@
 import json
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from pathlib import Path
 
 
@@ -38,7 +40,7 @@ def plot_xy_error_distribution(
     output_path: str = "",
 ):
     """Create scatter plot of XY error distribution centered at (0,0), colored by Z error."""
-    fig, ax = plt.subplots(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=(8, 7))
 
     # Convert to millimeters for better readability
     x_mm = x_errors * 1000
@@ -58,7 +60,10 @@ def plot_xy_error_distribution(
     )
 
     # Add colorbar for z-error
-    cbar = plt.colorbar(scatter, ax=ax, label="Z Error (mm)")
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="3%", pad=0.08)
+    cbar = fig.colorbar(scatter, cax=cax)
+    cbar.set_label("z-error [mm]")
     cbar.ax.tick_params(labelsize=10)
 
     # Add sample numbers inside the circles
@@ -76,9 +81,7 @@ def plot_xy_error_distribution(
     # Add crosshairs at origin
     ax.axhline(y=0, color="gray", linestyle="--", linewidth=0.8, alpha=0.7)
     ax.axvline(x=0, color="gray", linestyle="--", linewidth=0.8, alpha=0.7)
-
-    # Mark the origin
-    ax.scatter(
+    gt_legend = ax.scatter(
         [0],
         [0],
         c="red",
@@ -86,7 +89,7 @@ def plot_xy_error_distribution(
         marker="+",
         linewidths=2,
         zorder=5,
-        label="Origin (0,0)",
+        label="Ground Truth",
     )
 
     # Calculate and display statistics
@@ -98,10 +101,10 @@ def plot_xy_error_distribution(
     mean_euclidean = np.mean(euclidean_errors).item()
 
     # Mark mean position
-    ax.scatter(
+    mean_legend = ax.scatter(
         [mean_x],
         [mean_y],
-        c="orange",
+        c="black",
         s=100,
         marker="x",
         linewidths=2,
@@ -110,54 +113,57 @@ def plot_xy_error_distribution(
     )
 
     # Add circle showing mean euclidean error
-    circle = plt.Circle(  # pyright: ignore[reportPrivateImportUsage]
-        (0, 0),
-        mean_euclidean,
-        fill=False,
-        color="green",
-        linestyle="--",
-        linewidth=1.5,
-        label=f"Mean Euclidean Error: {mean_euclidean:.2f} mm",
-    )
-    ax.add_patch(circle)
 
     # Make axes equal and centered
     max_range = max(np.max(np.abs(x_mm)), np.max(np.abs(y_mm))) * 1.2
-    ax.set_xlim(-max_range, max_range)
-    ax.set_ylim(-max_range, max_range)
+    ax.set_xlim(-2.58, 0.2)
+    ax.set_ylim(-1.1, 0.2)
+    ax.set_xticks(np.arange(-2.5, 0.2, 0.25))
+    ax.set_yticks(np.arange(-1.0, 0.2, 0.25))
     ax.set_aspect("equal")
 
     # Labels and title
-    ax.set_xlabel("X Error (mm)", fontsize=12)
-    ax.set_ylabel("Y Error (mm)", fontsize=12)
-    ax.set_title("XY Goal Position Error Distribution", fontsize=14, fontweight="bold")
+    ax.set_xlabel("x-error [mm]")
+    ax.set_ylabel("y-error [mm]")
+    ax.set_title("PE Error Distribution", fontsize=14)
 
     # Calculate z statistics
     mean_z = np.mean(z_mm)
     std_z = np.std(z_mm)
 
     # Add statistics text box
-    stats_text = (
-        f"N = {len(x_mm)}\n"
-        f"Mean X: {mean_x:.3f} mm\n"
-        f"Mean Y: {mean_y:.3f} mm\n"
-        f"Mean Z: {mean_z:.3f} mm\n"
-        f"Std X: {std_x:.3f} mm\n"
-        f"Std Y: {std_y:.3f} mm\n"
-        f"Std Z: {std_z:.3f} mm\n"
-        f"Mean Euclidean (XY): {mean_euclidean:.3f} mm"
-    )
-    ax.text(
-        0.02,
-        0.98,
-        stats_text,
-        transform=ax.transAxes,
-        fontsize=10,
-        verticalalignment="top",
-        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
-    )
+    # stats_text = (
+    #     f"N = {len(x_mm)}\n"
+    #     f"Mean X: {mean_x:.3f} mm\n"
+    #     f"Mean Y: {mean_y:.3f} mm\n"
+    #     f"Mean Z: {mean_z:.3f} mm\n"
+    #     f"Std X: {std_x:.3f} mm\n"
+    #     f"Std Y: {std_y:.3f} mm\n"
+    #     f"Std Z: {std_z:.3f} mm\n"
+    #     f"Mean Euclidean (XY): {mean_euclidean:.3f} mm"
+    # )
+    # ax.text(
+    #     0.02,
+    #     0.98,
+    #     stats_text,
+    #     transform=ax.transAxes,
+    #     fontsize=10,
+    #     verticalalignment="top",
+    #     bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+    # )
 
-    ax.legend(loc="upper right")
+    sample_legend = Line2D(
+        [0],
+        [0],
+        marker="o",
+        color="w",
+        markerfacecolor="C0",
+        markeredgecolor="black",
+        markersize=10,
+        linestyle="None",
+        label="Samples",
+    )
+    ax.legend(handles=[sample_legend, mean_legend, gt_legend], loc="lower right")
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()

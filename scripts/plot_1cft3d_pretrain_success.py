@@ -12,7 +12,8 @@ CHECKPOINTS_DIR = REPO_ROOT / "checkpoints"
 PLOTS_DIR = REPO_ROOT / "plots"
 
 EXPERIMENT_PATTERN = re.compile(r"^1cft3d_d(?P<dataset_size>\d+)v9_s(?P<seed>\d+)$")
-PASSES = list(range(1, 11))
+PASSES = list(range(1, 9))
+PLOT_EXCLUDED_DATASET_SIZES = {300}
 
 
 def load_success_rate(eval_path: Path) -> float | None:
@@ -52,13 +53,68 @@ def discover_experiments() -> dict[int, list[int]]:
     }
 
 
-def plot_success_vs_passes(datasets_to_seeds: dict[int, list[int]]) -> Path:
+def build_dataset_color_map() -> dict[int, str]:
+    """Map each dataset size (e.g. d300) to a consistent color."""
+    # Keep the first four colors and use more distinct colors for higher dataset sizes.
+    return {
+        200: "tab:blue",
+        300: "tab:orange",
+        400: "tab:green",
+        500: "tab:red",
+        600: "tab:purple",
+        700: "tab:cyan",
+        800: "tab:brown",
+        2000: "tab:blue",
+    }
+
+
+def build_latex_summary_table(
+    doa: int, rows: list[tuple[int, float, float, int]]
+) -> str:
+    """Build a LaTeX table of max mean success rate and corresponding stats."""
+    rows = sorted(rows, key=lambda row: row[0])
+    lines = [
+        r"\begin{table}[htpb]",
+        r"\centering",
+        r"\begin{tabular}{lcccc}",
+        r"\hline",
+        r"DoA & $\left|\mathcal{D}\right|$ & Max. Mean \ac{SR} & Corresp. Std. & Corresp. \ac{UTD} \\",
+        r"\hline",
+    ]
+
+    if rows:
+        lines.append(
+            rf"\multirow{{{len(rows)}}}{{*}}{{{doa}}} & {rows[0][0]} & {rows[0][1]:.4f} & {rows[0][2]:.4f} & {rows[0][3]} \\",
+        )
+        for dataset_size, max_mean, corr_std, corr_utd in rows[1:]:
+            lines.append(
+                f" & {dataset_size} & {max_mean:.3f} & {corr_std:.3f} & {corr_utd} \\\\",
+            )
+
+    lines.extend(
+        [
+            r"\hline",
+            r"\end{tabular}",
+            rf"\caption{{Maximum mean success rate over \ac{{UTD}} for {doa}\ac{{DoA}} with corresponding standard deviation and \ac{{UTD}}.}}",
+            rf"\label{{tab:doa{doa}_sr}}",
+            r"\end{table}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def plot_success_vs_passes(
+    datasets_to_seeds: dict[int, list[int]],
+) -> tuple[Path, Path]:
     """Plot mean and std success rate over pretrain passes for each dataset size."""
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = PLOTS_DIR / "1cft3d_pretrain_success_zoomed.png"
+    output_path = PLOTS_DIR / "1cft3d_pretrain_success.png"
+    table_path = PLOTS_DIR / "1cft3d_pretrain_success_table.tex"
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(6, 6))
     cmap = plt.cm.tab10  # pyright: ignore[reportAttributeAccessIssue]
+    dataset_color_map = build_dataset_color_map()
+    summary_rows: list[tuple[int, float, float, int]] = []
 
     for i, (dataset_size, seeds) in enumerate(datasets_to_seeds.items()):
         rates = np.full((len(PASSES), len(seeds)), np.nan)
@@ -87,21 +143,59 @@ def plot_success_vs_passes(datasets_to_seeds: dict[int, list[int]]) -> Path:
         y = mean[valid]
         yerr = std[valid]
 
-        color = cmap(i % 10)
-        ax.plot(x, y, marker="o", color=color, label=f"dataset={dataset_size}")
+        best_idx = int(np.nanargmax(y))
+        summary_rows.append(
+            (
+                dataset_size,
+                float(y[best_idx]),
+                float(yerr[best_idx]),
+                int(x[best_idx]),
+            )
+        )
+
+        if dataset_size in PLOT_EXCLUDED_DATASET_SIZES:
+            continue
+
+        color = dataset_color_map.get(dataset_size, cmap(i % 10))
+        ax.plot(
+            x,
+            y,
+            marker="o",
+            markersize=4.5,
+            color=color,
+            label=f"$\\left|\\mathcal{{D}}\\right|={dataset_size}$",
+        )
         ax.fill_between(x, y - yerr, y + yerr, color=color, alpha=0.2)
 
-    ax.set_xlabel("Pretrain Passes")
+    ax.set_xlabel("UTD (epochs)")
     ax.set_ylabel("Success Rate")
-    ax.set_title("1cft3d: Success Rate vs Pretrain Passes")
+    ax.set_title("3 DoA, Success Rate vs UTD", fontsize=16)
     ax.set_xticks(PASSES)
-    ax.set_ylim(0.95, 1.05)
+    ax.set_xlim(PASSES[0], PASSES[-1])
+    ax.set_xticklabels(
+        [
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+        ]
+    )
+    ax.set_ylim(0.945, 1.005)
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best", fontsize="small")
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
-    return output_path
+
+    table_tex = build_latex_summary_table(doa=3, rows=summary_rows)
+    table_path.write_text(table_tex + "\n")
+    print(table_tex)
+
+    return output_path, table_path
 
 
 def main() -> None:
@@ -111,8 +205,9 @@ def main() -> None:
             "No matching experiments found for pattern '1cft3d_d{datasetsize}v9_s{seed}'."
         )
 
-    output_path = plot_success_vs_passes(datasets_to_seeds)
+    output_path, table_path = plot_success_vs_passes(datasets_to_seeds)
     print(f"Saved plot to {output_path}")
+    print(f"Saved table to {table_path}")
 
 
 if __name__ == "__main__":

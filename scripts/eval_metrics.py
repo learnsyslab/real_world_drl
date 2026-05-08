@@ -109,7 +109,7 @@ def plot_goal_offsets_2d(
     show_plot: bool = False,
 ):
     """Create a 2D scatter plot of goal position offsets (X vs Y)."""
-    fig, ax = plt.subplots(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=(6, 6))
 
     if len(successful_offsets) > 0:
         ax.scatter(
@@ -171,7 +171,7 @@ def plot_grasped_deltas_xz(
     show_plot: bool = False,
 ):
     """Create a 2D scatter plot of grasped delta offsets (X vs Z)."""
-    fig, ax = plt.subplots(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=(7, 5))
 
     if len(successful_deltas) > 0:
         ax.scatter(
@@ -179,7 +179,7 @@ def plot_grasped_deltas_xz(
             successful_deltas[:, 2] * 1000,  # Z axis (index 2)
             c="green",
             alpha=0.6,
-            label=f"Successful (n={len(successful_deltas)})",
+            label=f"Successful",  # (n={len(successful_deltas)})",
             s=50,
         )
 
@@ -189,7 +189,7 @@ def plot_grasped_deltas_xz(
             failed_deltas[:, 2] * 1000,  # Z axis (index 2)
             c="red",
             alpha=0.8,
-            label=f"Failed (n={len(failed_deltas)})",
+            label=f"Failed",  #  (n={len(failed_deltas)})",
             s=100,
             marker="x",
         )
@@ -210,25 +210,28 @@ def plot_grasped_deltas_xz(
     min_val_z = np.min(all_deltas[:, 2]) * 1000
     delta_x = max_val_x - min_val_x
     delta_z = max_val_z - min_val_z
-    ax.set_xlim(min_val_x - delta_x * 0.1, max_val_x + delta_x * 0.1)
-    ax.set_ylim(min_val_z - delta_z * 0.1, max_val_z + delta_z * 0.1)
+    # ax.set_xlim(min_val_x - delta_x * 0.1, max_val_x + delta_x * 0.1)
+    # ax.set_ylim(min_val_z - delta_z * 0.1, max_val_z + delta_z * 0.1)
+    ax.set_xlim(-1.75, 1.75)
+    ax.set_ylim(0.0, 2.0)
 
-    ax.set_xlabel("X Delta (mm)", fontsize=12)
-    ax.set_ylabel("Z Delta (mm)", fontsize=12)
+    ax.set_xlabel("$\\Delta s_{g,x}$ [mm]")
+    ax.set_ylabel("$\\Delta s_{g,z}$ [mm]")
+    ax.legend(loc="lower right", fontsize="small")
     ax.set_title(
-        "Grasped Delta Offsets (X vs Z): Successful vs Failed Episodes", fontsize=14
+        "Grasp Deviation $\\Delta \\mathbf{{s}}_g$: Successful vs Failed Episodes",
+        fontsize=14,
     )
-    ax.legend(fontsize=11)
     ax.grid(True, alpha=0.3)
     ax.axhline(y=0, color="k", linestyle="-", linewidth=0.5)
     ax.axvline(x=0, color="k", linestyle="-", linewidth=0.5)
     ax.set_aspect("equal")
 
     # Draw ellipse at x=0, y=1 with width=3 and height=1
-    ellipse = Ellipse(
-        xy=(0, 1), width=3, height=1, fill=False, edgecolor="orange", linestyle="--"
-    )
-    ax.add_patch(ellipse)
+    # ellipse = Ellipse(
+    #     xy=(0, 1), width=3, height=1, fill=False, edgecolor="orange", linestyle="--"
+    # )
+    # ax.add_patch(ellipse)
 
     plt.tight_layout()
     output_path = output_dir / "grasped_deltas_xz.png"

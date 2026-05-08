@@ -12,8 +12,8 @@ from crisp_drl.envs.sam3_detector import Sam3Detector
 # -----------------------
 # User constants
 # -----------------------
-rgb_image_path = "test_images/demo_img_color_0_siemens_pe_g.tiff"
-depth_image_path = "test_images/demo_img_depth_0_siemens_pe_g.tiff"
+rgb_image_path = "test_images/demo_img_color_0_abus.tiff"
+depth_image_path = "test_images/demo_img_depth_0_abus.tiff"
 camera_info_json_path = "camera_parameters/realsense_d405_single.json"
 
 # End-effector (TCP) pose in world frame

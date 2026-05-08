@@ -245,14 +245,15 @@ def plot_success_aligned(success_values: list[np.ndarray], output_path: Path) ->
 
     max_len = max(len(v) for v in success_values)
 
-    plt.figure(figsize=(12, 7))
+    plt.figure(figsize=(8, 5))
     for values in success_values:
         x = np.arange(max_len - len(values), max_len)
         plt.plot(x, values, alpha=0.65, linewidth=1.0)
 
-    plt.xlabel("Aligned timestep (all successful episodes end at same x)")
-    plt.ylabel("State value V(s) = mean_i Q_i(s, pi(s))")
-    plt.title(f"Successful rollouts (n={len(success_values)}), end-aligned")
+    plt.xlabel("Aligned timestep (all episodes end at $t=150$)")
+    plt.ylabel("Mean Q-value across critic ensemble")
+    plt.ylim(-0.5, 10.5)
+    plt.title("Successful rollouts, end-aligned")
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(output_path, dpi=200)
@@ -265,14 +266,15 @@ def plot_truncated(truncated_values: list[np.ndarray], output_path: Path) -> Non
         print("No truncated episodes found. Skipping truncated plot.")
         return
 
-    plt.figure(figsize=(12, 7))
+    plt.figure(figsize=(8, 5))
     for values in truncated_values:
         x = np.arange(len(values))
         plt.plot(x, values, alpha=0.65, linewidth=1.0)
 
     plt.xlabel("Timestep")
-    plt.ylabel("State value V(s) = mean_i Q_i(s, pi(s))")
-    plt.title(f"Truncated rollouts (n={len(truncated_values)})")
+    plt.ylabel("Mean Q-value across critic ensemble")
+    plt.title("Truncated rollouts")
+    plt.ylim(-0.5, 10.5)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(output_path, dpi=200)

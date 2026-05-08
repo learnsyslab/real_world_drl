@@ -116,6 +116,7 @@ class SACActor:
 
         try:
             # reset the episode variables
+
             obs, reset_info = self.env.reset(seed=self.config.seed)
             perfect_action = obs["observation.perfect_action"]
             obs = obs["observation.formatted"]
@@ -379,6 +380,9 @@ class SACActor:
     def run_pe(self, data_queue: mp.Queue):
         """Main process loop for the SAC actor.
         This method will execture actions in the environment"""
+        # for _ in range(self.args.max_episodes):
+        #     obs, reset_info = self.env.reset(seed=self.config.seed)
+        # return
 
         try:
             # reset the episode variables
