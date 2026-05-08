@@ -158,11 +158,11 @@ def show_3d(poses_world: Dict[int, np.ndarray], mesh_path: str):
 
         # axes at pose (slightly darker versions of the mesh colour)
         arrow_x = pv.Arrow(start=t, direction=R[:, 0], scale=0.01)
-        plotter.add_mesh(arrow_x, color=[c * 0.6 for c in color_f])
+        plotter.add_mesh(arrow_x, color="red")
         arrow_y = pv.Arrow(start=t, direction=R[:, 1], scale=0.01)
-        plotter.add_mesh(arrow_y, color=[c * 0.6 for c in color_f])
+        plotter.add_mesh(arrow_y, color="green")
         arrow_z = pv.Arrow(start=t, direction=R[:, 2], scale=0.01)
-        plotter.add_mesh(arrow_z, color=[c * 0.6 for c in color_f])
+        plotter.add_mesh(arrow_z, color="blue")
 
     plotter.add_axes()
     plotter.add_legend()
