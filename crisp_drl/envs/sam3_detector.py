@@ -17,12 +17,11 @@ class Sam3Detector:
         image: np.ndarray,
         colors: tuple[str, str] = ("lavender", "purple"),
     ) -> dict[str, np.ndarray]:
-        """Segment two LEGO bricks and label them by brightness.
+        """Segment two LEGO bricks using color-specific prompts.
 
         Args:
             image: HxWx3 RGB image.
-            colors: ``(bright_color, dark_color)`` — the brightest detected
-                mask is assigned ``colors[0]``, the darkest ``colors[1]``.
+            colors: ``(color1, color2)`` — color names to use in SAM3 prompts.
                 Defaults to ``("lavender", "purple")`` for backward compat.
                 Use ``("yellow", "lavender")`` for the yellow+lavender task.
 
@@ -30,37 +29,66 @@ class Sam3Detector:
             Dict mapping each color name to its binary mask (uint8, 0/255).
         """
         inference_state = self.processor.set_image(Image.fromarray(image))
-        output = self.processor.set_text_prompt(
-            state=inference_state, prompt="small lego brick"
-        )
-        masks, _boxes, scores = output["masks"], output["boxes"], output["scores"]
-        scores = scores.cpu().numpy()
-        if len(masks) > 2:
-            masks = masks[np.argsort(scores)[-2:]]
-            scores_sorted = np.sort(scores)
-            if scores_sorted[-2] - scores_sorted[-3] < 0.2:
-                print(
-                    f"Warning: more than two masks detected (scores {scores.tolist()}), "
-                    "choosing the two with highest scores, although the difference to the third "
-                    f"highest score is only {scores_sorted[-2] - scores_sorted[-3]:.2f}"
-                )
-        # find the mask that has the lighter color average
-        image_region_means = []
-        for mask in masks:
-            print(f"Mask shape: {mask.shape}, dtype: {mask.dtype}")
-            masked_image = np.array(image) * mask.cpu().numpy().reshape(
-                mask.shape[-2], mask.shape[-1], 1
-            )
-            mean_color = masked_image.sum(axis=(0, 1)) / mask.sum().cpu().numpy()
-            image_region_means.append(mean_color.mean())
+        result = {}
 
-        lightest_mask_idx = np.argmax(image_region_means)
-        darkest_mask_idx = np.argmin(image_region_means)
-        hw = (mask.shape[-2], mask.shape[-1])  # pyright: ignore[reportPossiblyUnboundVariable]
-        return {
-            colors[0]: masks[lightest_mask_idx].cpu().numpy().reshape(*hw) * 255,
-            colors[1]: masks[darkest_mask_idx].cpu().numpy().reshape(*hw) * 255,
-        }
+        # Query SAM3 for each color separately using color-specific prompts
+        for color_name in colors:
+            output = self.processor.set_text_prompt(
+                state=inference_state, prompt=f"small {color_name} lego brick"
+            )
+            masks, _boxes, scores = output["masks"], output["boxes"], output["scores"]
+            scores = scores.cpu().numpy()
+
+            if len(masks) == 0:
+                print(f"[SAM3] Warning: No mask found for {color_name}")
+                continue
+
+            # Select the mask with highest confidence score
+            best_mask_idx = np.argmax(scores)
+            hw = (masks[0].shape[-2], masks[0].shape[-1])
+            result[color_name] = masks[best_mask_idx].cpu().numpy().reshape(*hw) * 255
+            print(f"[SAM3] Detected {color_name} brick (confidence: {scores[best_mask_idx]:.3f})")
+
+        # Fallback: if color prompting didn't find both bricks, use generic detection
+        if len(result) < 2:
+            print(f"[SAM3] Color-specific prompts found only {len(result)} brick(s), falling back to generic detection")
+            output = self.processor.set_text_prompt(
+                state=inference_state, prompt="small lego brick"
+            )
+            masks, _boxes, scores = output["masks"], output["boxes"], output["scores"]
+            scores = scores.cpu().numpy()
+
+            if len(masks) > 2:
+                masks = masks[np.argsort(scores)[-2:]]
+                scores_sorted = np.sort(scores)
+                if scores_sorted[-2] - scores_sorted[-3] < 0.2:
+                    print(
+                        f"Warning: more than two masks detected (scores {scores.tolist()}), "
+                        "choosing the two with highest scores, although the difference to the third "
+                        f"highest score is only {scores_sorted[-2] - scores_sorted[-3]:.2f}"
+                    )
+
+            # Use brightness-based assignment only as fallback
+            image_region_means = []
+            for mask in masks:
+                masked_image = np.array(image) * mask.cpu().numpy().reshape(
+                    mask.shape[-2], mask.shape[-1], 1
+                )
+                mean_color = masked_image.sum(axis=(0, 1)) / mask.sum().cpu().numpy()
+                image_region_means.append(mean_color.mean())
+
+            lightest_mask_idx = np.argmax(image_region_means)
+            darkest_mask_idx = np.argmin(image_region_means)
+            hw = (masks[0].shape[-2], masks[0].shape[-1])
+
+            # Assign by brightness to the remaining missing colors
+            missing_colors = [c for c in colors if c not in result]
+            if len(missing_colors) >= 1:
+                result[missing_colors[0]] = masks[lightest_mask_idx].cpu().numpy().reshape(*hw) * 255
+            if len(missing_colors) >= 2:
+                result[missing_colors[1]] = masks[darkest_mask_idx].cpu().numpy().reshape(*hw) * 255
+
+        return result
 
     def segment_siemens(self, image: np.ndarray) -> np.ndarray:
         inference_state = self.processor.set_image(Image.fromarray(image))

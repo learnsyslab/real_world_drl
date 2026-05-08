@@ -21,7 +21,7 @@ from gymnasium import Wrapper, spaces
 from scipy.spatial.transform import Rotation
 
 from crisp_drl.agents.shared.algorithm_config import Config
-from crisp_drl.agents.shared.insertion_env_config import LegoConfig
+from crisp_drl.agents.shared.insertion_env_config import LegoConfig, LegoConfig2x4
 from crisp_drl.agents.shared.insertion_wrapper_s import rot_matrix_to_euler_xyz
 from crisp_drl.envs.pose_estimation_helper import PoseEstimationHelper, euler_to_rot_matrix
 from crisp_gym.envs.env_wrapper import LastObservationWrapper
@@ -47,13 +47,13 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         self,
         env,
         alg_config: Config,
-        env_config: LegoConfig,
+        env_config: LegoConfig2x4,
         grasp_color: str = "lavender",
         target_color: str = "yellow",
         safety_box_radius: float = 0.003,
         safety_box_step_size: float = 0.0005,
         safety_box_angular_radius: float = np.deg2rad(3),
-        safety_box_angular_step_size: float = np.deg2rad(0.5),
+        safety_box_angular_step_size: float = np.deg2rad(3.0),
         goal_orientation_randomisation_angle: float = np.deg2rad(3),
         step_limit: int = 150,
         minimal_start_goal_distance: float = 0.003,
@@ -63,6 +63,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         pose_viz_dir: Optional[str] = None,
         use_tracker: bool = False,
         workspace_box: tuple = ((0.2, 0.85), (-0.4, 0.4), (-0.1, 0.7)),
+        pe_3dof: bool = False,
     ):
         super().__init__(env)
         self.alg_config = alg_config
@@ -77,6 +78,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         self.wide_pe_pose_euler = np.array(env_config.demo_goal_pose_estimation_euler)
         self.diagonal_hover_offset = np.array(env_config.diagonal_hover_above_purple_offset)
         self.place_z_offset = float(env_config.place_z_offset)
+        self.place_xy_correction = np.array(getattr(env_config, "place_xy_correction", [0.0, 0.0]))
         self.after_grasp_lift_height_pe = float(env_config.after_grasp_lift_height_pe)
         self.alignment_clip_angle_rad = float(env_config.alignment_clip_angle_rad)
         self.alignment_pitch_bias = float(getattr(env_config, "alignment_pitch_bias", 0.0))
@@ -159,10 +161,12 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             )
             print(f"[InsertionWrapper3DoFRotZPE] pose viz dir = {pose_viz_dir}")
 
+        self.pe_3dof = pe_3dof
+
         print(
             f"[InsertionWrapper3DoFRotZPE] __init__: eval={is_eval} "
             f"grasp_color={grasp_color} target_color={target_color} "
-            f"use_tracker={use_tracker}"
+            f"use_tracker={use_tracker} pe_3dof={pe_3dof}"
         )
 
     # ------------------------------------------------------------------ #
@@ -287,12 +291,94 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                 n += 1
         return obs
 
-    def _yaw_error_to(self, current_rotvec, target_rz):
-        goal_rotvec = np.array([0.0, 0.0, float(target_rz)], dtype=np.float64)
-        rot_err = LastObservationWrapper._relative_rotation_error(
-            goal_rotvec, np.asarray(current_rotvec, dtype=np.float64)
+    def _yaw_error_to(self, current_rot_obs, target_rz):
+        # obs[3:6] is Euler XYZ in radians; index [2] = yaw (z)
+        current_rz = float(current_rot_obs[2])
+        err = target_rz - current_rz
+        return float(((err + np.pi) % (2 * np.pi)) - np.pi)
+
+    def _current_rz(self) -> float:
+        """Return current gripper Z-rotation (Euler z) in radians (world frame)."""
+        return float(self.obs["observation.state.cartesian"][5])
+
+    @staticmethod
+    def _nearest_symmetric_yaw(brick_yaw: float, current_rz: float) -> float:
+        """Return brick_yaw or brick_yaw+π — whichever is closest to current_rz.
+
+        For 180°-symmetric objects (2x4 LEGO) this caps the required rotation at 90°.
+        """
+        def _wrap(a: float) -> float:
+            return ((a + np.pi) % (2 * np.pi)) - np.pi
+
+        yaw0 = _wrap(brick_yaw)
+        yaw1 = _wrap(brick_yaw + np.pi)
+        if abs(_wrap(yaw0 - current_rz)) <= abs(_wrap(yaw1 - current_rz)):
+            return yaw0
+        return yaw1
+
+    def go_to_rotation_xyz(
+        self,
+        current_obs,
+        target_rx=0.0,
+        target_ry=0.0,
+        target_rz=0.0,
+        tol=np.deg2rad(0.3),
+        step_size=np.deg2rad(0.5),
+        max_drive_iter=200,
+        max_settle_iter=30,
+    ):
+        """Drive all three Euler angles to target values (default 0°) iteratively.
+
+        Uses 180°-symmetric nearest target per axis so e.g. roll=-179° → target=+180°
+        (1° move) rather than target=0° (179° move).
+        """
+        obs = current_obs
+
+        def _wrap(a):
+            return ((a + np.pi) % (2 * np.pi)) - np.pi
+
+        def _sym_target(target, current):
+            t0 = _wrap(target)
+            t1 = _wrap(target + np.pi)
+            return t0 if abs(_wrap(t0 - current)) <= abs(_wrap(t1 - current)) else t1
+
+        def _effective_targets(o):
+            cur = np.array(o["observation.state.cartesian"][3:6], dtype=np.float64)
+            raw = np.array([target_rx, target_ry, target_rz])
+            return np.array([_sym_target(raw[i], cur[i]) for i in range(3)])
+
+        def _rot_err(o, eff_targets):
+            cur = np.array(o["observation.state.cartesian"][3:6], dtype=np.float64)
+            return np.array([_wrap(eff_targets[i] - cur[i]) for i in range(3)])
+
+        eff = _effective_targets(obs)
+        err = _rot_err(obs, eff)
+        print(
+            f"[go_to_rotation_xyz] effective_targets={np.round(np.rad2deg(eff), 2)}° "
+            f"initial_err={np.round(np.rad2deg(err), 2)}° "
+            f"raw_obs[3:6]={np.round(np.rad2deg(obs['observation.state.cartesian'][3:6]), 2)}"
         )
-        return float(rot_err[2])
+        n = 0
+        while np.any(np.abs(err) > tol) and n < max_drive_iter:
+            drpy = np.sign(err) * np.minimum(step_size, np.abs(err))
+            drpy[np.abs(err) <= tol] = 0.0
+            obs, *_ = self.env.step(np.concatenate((np.zeros(3), drpy)))
+            err = _rot_err(obs, eff)
+            n += 1
+        print(
+            f"[go_to_rotation_xyz] done: n={n} final_err={np.round(np.rad2deg(err), 2)}° "
+            f"raw_obs[3:6]={np.round(np.rad2deg(obs['observation.state.cartesian'][3:6]), 2)}"
+        )
+        if n >= max_drive_iter:
+            print(f"[go_to_rotation_xyz] WARNING: max_drive_iter hit; residual={np.round(np.rad2deg(err), 3)}°")
+        n_settle = 0
+        while (
+            np.linalg.norm(obs["observation.velocity.angular"]) > np.deg2rad(1.0)
+            and n_settle < max_settle_iter
+        ):
+            obs, *_ = self._step_zeros()
+            n_settle += 1
+        return obs
 
     def go_to_rotation_z(
         self,
@@ -301,15 +387,31 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         tol=np.deg2rad(0.3),
         max_drive_iter=200,
         max_settle_iter=30,
+        max_step=None,
     ):
+        # Adaptive: step = min(max_step, |err|) — large steps far from target,
+        # proportionally smaller steps as error shrinks, final step is exact.
+        if max_step is None:
+            max_step = self.safety_box_angular_step_size
         obs = current_obs
-        rz_err = self._yaw_error_to(obs["observation.state.cartesian"][3:6], target_rz)
+        raw_rot = obs["observation.state.cartesian"][3:6]
+        rz_err = self._yaw_error_to(raw_rot, target_rz)
+        print(
+            f"[go_to_rotation_z] target={np.rad2deg(target_rz):.2f}° "
+            f"initial_err={np.rad2deg(rz_err):.2f}° "
+            f"raw_obs[3:6]={np.round(np.rad2deg(raw_rot), 2)}"
+        )
         n = 0
         while abs(rz_err) > tol and n < max_drive_iter:
-            drz = np.sign(rz_err) * min(self.safety_box_angular_step_size, abs(rz_err))
+            drz = np.sign(rz_err) * min(max_step, abs(rz_err))
             obs, *_ = self._step_yaw(drz)
             rz_err = self._yaw_error_to(obs["observation.state.cartesian"][3:6], target_rz)
             n += 1
+        raw_rot_after = obs["observation.state.cartesian"][3:6]
+        print(
+            f"[go_to_rotation_z] done: n_drive={n} final_err={np.rad2deg(rz_err):.2f}° "
+            f"raw_obs[3:6]={np.round(np.rad2deg(raw_rot_after), 2)}"
+        )
         if n >= max_drive_iter:
             print(
                 f"[InsertionWrapper3DoFRotZPE] go_to_rotation_z: max_drive_iter hit; "
@@ -439,6 +541,9 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         world_target = self.pose_estimation_helper._compute_pose_in_world_frame(
             cam_poses[self.target_color], tcp_cart
         )
+        if self.pe_3dof:
+            world_grasp = self._project_pose_to_3dof(world_grasp)
+            world_target = self._project_pose_to_3dof(world_target)
         details = {
             "rgb": np.copy(rgb),
             "depth": np.copy(self.obs["observation.images.wrist_depth_camera"]),
@@ -475,6 +580,8 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         world_pose = self.pose_estimation_helper._compute_pose_in_world_frame(
             pose_cam, tcp_cart
         )
+        if self.pe_3dof:
+            world_pose = self._project_pose_to_3dof(world_pose)
         details = {
             "rgb": np.copy(rgb),
             "depth": np.copy(self.obs["observation.images.wrist_depth_camera"]),
@@ -496,6 +603,20 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         )
         return {"valid": valid, "det_r": det_r, "orth_err": orth_err}
 
+    def _project_pose_to_3dof(self, world_D_world_obj: np.ndarray) -> np.ndarray:
+        """Flat-lego constraint: zero roll/pitch, keep only yaw + XYZ.
+
+        Analogous to Siemens lock_orientation=True, but instead of locking to a
+        fixed assumed_orientation, we preserve the yaw extracted from the estimated
+        world-frame rotation and rebuild the rotation as pure Rz(yaw).  This
+        ensures downstream code sees a consistent SE(3) pose where the object Z
+        axis is aligned with the world Z axis.
+        """
+        yaw = float(Rotation.from_matrix(world_D_world_obj[:3, :3]).as_euler("xyz")[2])
+        result = world_D_world_obj.copy()
+        result[:3, :3] = Rotation.from_euler("z", yaw).as_matrix()
+        return result
+
     def compute_alignment_rpy(self, world_D_world_lav: np.ndarray) -> np.ndarray:
         """Demo-relative orientation for the gripper at the lavender grasp."""
         world_R_demo = np.array(self.env_config.demo_grasped_pose_lavender)[:3, :3]
@@ -510,6 +631,102 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             rotvec = rotvec * (self.alignment_clip_angle_rad / angle)
             biased = Rotation.from_rotvec(rotvec).as_matrix()
         return rot_matrix_to_euler_xyz(biased)
+
+    def validate_brick_detection(self, details: dict, brick_color: str, expected_xy=None, is_single=False) -> dict:
+        """Verify correct brick was detected during PE.
+
+        Args:
+            is_single: True if from _estimate_lego_world_single() (uses "mask" key)
+                       False if from _estimate_lego_world_both() (uses "mask_{color}" key)
+
+        Returns dict with:
+          - valid: bool, whether detection looks correct
+          - mask_area: number of pixels in mask
+          - detection_reason: str, explanation
+        """
+        # Determine correct mask key based on source
+        mask_key = "mask" if is_single else f"mask_{brick_color}"
+        pose_key = "pose_cam" if is_single else f"pose_cam_{brick_color}"
+
+        if mask_key not in details:
+            return {"valid": False, "mask_area": 0, "detection_reason": f"No mask for {brick_color}"}
+
+        mask = details[mask_key]
+        mask_area = float(np.sum(mask > 0)) if mask is not None else 0
+
+        result = {
+            "valid": True,
+            "mask_area": mask_area,
+            "detection_reason": f"✓ {brick_color} mask detected with {mask_area:.0f} pixels",
+        }
+
+        # Check mask is reasonable size (not tiny noise, not entire image)
+        total_pixels = mask.shape[0] * mask.shape[1] if mask.ndim == 2 else mask.shape[1] * mask.shape[2]
+        pixel_pct = (mask_area / total_pixels) * 100
+
+        if mask_area < 100:
+            result["valid"] = False
+            result["detection_reason"] = f"⚠️  {brick_color} mask too small ({mask_area:.0f} pixels, {pixel_pct:.1f}%)"
+        elif pixel_pct > 50:
+            result["valid"] = False
+            result["detection_reason"] = f"⚠️  {brick_color} mask too large ({pixel_pct:.1f}%, likely wrong object)"
+        else:
+            result["detection_reason"] += f" ({pixel_pct:.1f}% of image)"
+
+        # Note: Position checking should be done in verify_brick_identity_by_position() which
+        # compares world-frame positions correctly. Skipping it here because pose_cam is
+        # camera frame while expected_xy is world frame (mixing coordinate frames is meaningless).
+
+        return result
+
+    # ------------------------------------------------------------------ #
+
+    # ------------------------------------------------------------------ #
+    # Brick identity verification (position-based)                        #
+    # ------------------------------------------------------------------ #
+
+    def verify_brick_identity_by_position(
+        self, detected_pose_world, grasp_pos_world, target_pos_world, brick_name: str
+    ) -> tuple[bool, str]:
+        """Verify detected brick is actually the expected brick by comparing positions.
+
+        Args:
+            detected_pose_world: Detected brick pose in world frame (4x4)
+            grasp_pos_world: Expected grasp (lavender) position in world frame (4x4)
+            target_pos_world: Expected target (yellow) position in world frame (4x4)
+            brick_name: The brick we expected to detect ("lavender" or "yellow")
+
+        Returns:
+            (is_correct_brick: bool, reason: str)
+        """
+        detected_xy = detected_pose_world[:2, 3]
+        grasp_xy = grasp_pos_world[:2, 3]
+        target_xy = target_pos_world[:2, 3]
+        dist_to_grasp = np.linalg.norm(detected_xy - grasp_xy)
+        dist_to_target = np.linalg.norm(detected_xy - target_xy)
+
+        if brick_name == self.grasp_color:
+            # Expected to detect lavender
+            is_correct = dist_to_grasp < dist_to_target
+            if is_correct:
+                return True, f"✓ Detected position {dist_to_grasp*1000:.1f}mm from {brick_name} (correct)"
+            else:
+                return (
+                    False,
+                    f"⚠️  Detected position {dist_to_target*1000:.1f}mm from {self.target_color} "
+                    f"(expected {brick_name} at {dist_to_grasp*1000:.1f}mm away) - WRONG BRICK DETECTED!",
+                )
+        else:
+            # Expected to detect yellow/target
+            is_correct = dist_to_target < dist_to_grasp
+            if is_correct:
+                return True, f"✓ Detected position {dist_to_target*1000:.1f}mm from {brick_name} (correct)"
+            else:
+                return (
+                    False,
+                    f"⚠️  Detected position {dist_to_grasp*1000:.1f}mm from {self.grasp_color} "
+                    f"(expected {brick_name} at {dist_to_target*1000:.1f}mm away) - WRONG BRICK DETECTED!",
+                )
 
     # ------------------------------------------------------------------ #
     # Viz helpers (best-effort)                                            #
@@ -546,6 +763,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                 rgb_refined=det_b["rgb"],
                 mask_refined=det_b.get(f"mask_{self.target_color}", det_b.get("mask")),
                 names=(self.grasp_color, self.target_color),
+                stage=suffix,
             )
             print(f"[pose viz] saved {suffix}: {paths}")
         except Exception as e:
@@ -635,11 +853,17 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             self.n_since_last_home += 1
 
         if self.n_since_last_home >= 4 or self.first_reset:
-            print(
-                f"n_since_last_home={self.n_since_last_home}, "
-                f"first_reset={self.first_reset}, homing..."
-            )
-            self.env.unwrapped.home(home_config=self.home_config)  # type: ignore
+            if self.pe_3dof:
+                print(
+                    f"n_since_last_home={self.n_since_last_home}, "
+                    f"first_reset={self.first_reset}, skipping home (3DOF mode, going to PE pose instead)."
+                )
+            else:
+                print(
+                    f"n_since_last_home={self.n_since_last_home}, "
+                    f"first_reset={self.first_reset}, homing..."
+                )
+                self.env.unwrapped.home(home_config=self.home_config)  # type: ignore
             self.n_since_last_home = 0
             self.first_reset = False
 
@@ -651,12 +875,17 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         self._pe_episode_idx += 1
         time.sleep(1.0)
 
+        # ---- zero orientation before wide PE ----------------------------- #
+        print("Zeroing orientation (symmetric) before wide PE...")
+        self.obs = self.go_to_rotation_xyz(self.obs, target_rx=0.0, target_ry=0.0, target_rz=0.0)
+
         # ---- wide PE -------------------------------------------------- #
         print("Moving to wide PE pose...")
         self.obs = self.go_to_cartesian(
             self.obs,
             target_cartesian=self.wide_pe_pose_euler[:3],
             fine_resolution=0.0005,
+            max_settle_iter=50,
         )
         print("Wide PE: estimating both bricks...")
         wide_grasp, wide_target, wide_det = self._estimate_lego_world_both()
@@ -664,90 +893,292 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         check_wide_target = self.validate_world_pose_transform(wide_target, f"wide_{self.target_color}")
         print(f"wide PE {self.grasp_color} pos = {wide_grasp[:3, 3]}")
         print(f"wide PE {self.target_color} pos = {wide_target[:3, 3]}")
-        self._viz_save_pair("wide", wide_det, wide_det)
 
-        # ---- coarse hover above lavender -------------------------------- #
-        coarse_alignment_rpy = self.compute_alignment_rpy(wide_grasp)
-        coarse_R_applied = euler_to_rot_matrix(*coarse_alignment_rpy)
-        print(f"coarse alignment rpy [deg] = {np.rad2deg(coarse_alignment_rpy)}")
+        # ---- Verify correct bricks detected in wide PE ---- #
+        wide_grasp_check = self.validate_brick_detection(wide_det, self.grasp_color)
+        wide_target_check = self.validate_brick_detection(wide_det, self.target_color)
+        print(f"[BRICK VERIFY] Wide PE {self.grasp_color}: {wide_grasp_check['detection_reason']}")
+        print(f"[BRICK VERIFY] Wide PE {self.target_color}: {wide_target_check['detection_reason']}")
 
-        coarse_grasp_world = (
-            wide_grasp[:3, 3] + wide_grasp[:3, :3] @ self.o_T_o_tcpgrasp_lavender
-        )
-        coarse_hover_world = (
-            coarse_grasp_world + wide_grasp[:3, :3] @ np.array([0.0, 0.0, 0.025])
-        )
-        current_xyz = self.obs["observation.state.cartesian"][:3]
-        safe_hover_z = max(
-            coarse_hover_world[2],
-            self.min_coarse_hover_z,
-            current_xyz[2] + self.coarse_hover_min_above_current,
-        )
-        if safe_hover_z != coarse_hover_world[2]:
-            print(
-                f"[InsertionWrapper3DoFRotZPE] WARNING: clamping coarse hover z from "
-                f"{coarse_hover_world[2]:.6f} to {safe_hover_z:.6f}"
+        # Cross-check: bricks should be ~5-10cm apart
+        brick_distance = np.linalg.norm(wide_target[:3, 3] - wide_grasp[:3, 3])
+        print(f"[BRICK VERIFY] Distance between {self.grasp_color} and {self.target_color}: {brick_distance*100:.1f} cm")
+        if brick_distance < 0.02 or brick_distance > 0.15:
+            print(f"[BRICK VERIFY] ⚠️  WARNING: Brick distance {brick_distance*100:.1f} cm seems unusual!")
+
+        # Attempt to save visualization (Gymnasium may block access to private methods)
+        try:
+            self._viz_save_pair("wide", wide_det, wide_det)
+        except (AttributeError, TypeError):
+            pass  # Visualization not available or blocked by Gymnasium wrapper
+
+        if self.pe_3dof:
+            # ---- 3DOF path: coarse X-Y hover (no orientation change) ---- #
+            grasp_xy = wide_grasp[:3, 3][:2]
+            current_xyz = self.obs["observation.state.cartesian"][:3]
+            hover_z = max(current_xyz[2], self.min_coarse_hover_z)
+            hover_3dof = np.array([grasp_xy[0], grasp_xy[1], hover_z])
+            print(f"3DOF: moving to hover above grasp XY = {hover_3dof}")
+            self.obs = self.go_to_cartesian(self.obs, target_cartesian=hover_3dof, max_settle_iter=50)
+
+            # ---- 3DOF: Initialize gripper yaw to 0° (baseline for PE) ---- #
+            print("3DOF: initializing gripper yaw to 0° (baseline)...")
+            self.obs = self.go_to_rotation_z(self.obs, target_rz=0.0)
+
+            # ---- 3DOF: close-up PE for refined X-Y + yaw ---------------- #
+            print("3DOF: close-up PE for refined X-Y + yaw...")
+            refined_grasp, refined_det = self._estimate_lego_world_single(self.grasp_color)
+            check_refined = self.validate_world_pose_transform(refined_grasp, f"refined_{self.grasp_color}")
+
+            # ---- Verify correct brick detected in refined PE ---- #
+            refined_grasp_check = self.validate_brick_detection(
+                refined_det, self.grasp_color, expected_xy=wide_grasp[:3, 3][:2], is_single=True
             )
-            coarse_hover_world[2] = safe_hover_z
+            print(f"[BRICK VERIFY] Refined PE {self.grasp_color}: {refined_grasp_check['detection_reason']}")
 
-        print(f"Moving to coarse hover = {coarse_hover_world}")
-        self.obs = self.go_to_waypoint(
-            self.obs,
-            coarse_hover_world,
-            relative_pose_euler=coarse_alignment_rpy,
-            distance_err=0.0005,
-            is_via=False,
-            label="coarse_hover",
-        )
+            # ---- Verify by position: is detected brick actually lavender or was wrong brick detected? ---- #
+            identity_correct, identity_reason = self.verify_brick_identity_by_position(
+                refined_grasp, wide_grasp, wide_target, self.grasp_color
+            )
+            print(f"[BRICK IDENTITY] {identity_reason}")
+            if not identity_correct:
+                print(f"[BRICK IDENTITY] 🔴 WRONG BRICK DETECTED!")
+                print(f"[BRICK IDENTITY]    Root cause: SAM3 brightness ranking may have flipped at close-up range")
+                print(f"[BRICK IDENTITY]    Likely reason: Lighting angle changed, yellow appears brighter at this range")
+                print(f"[BRICK IDENTITY] ⚠️  This causes incorrect yaw extraction and XY position!")
 
-        # ---- refined PE (lavender only) --------------------------------- #
-        print("Refined PE: estimating lavender...")
-        refined_grasp, refined_det = self._estimate_lego_world_single(self.grasp_color)
-        check_refined = self.validate_world_pose_transform(refined_grasp, f"refined_{self.grasp_color}")
-        est_R = refined_grasp[:3, :3]
-        w_T_w_tcpgrasp = refined_grasp[:3, 3] + est_R @ self.o_T_o_tcpgrasp_lavender
+            if not refined_grasp_check["valid"]:
+                print(f"[BRICK VERIFY] ⚠️  WARNING: {self.grasp_color} detection may be incorrect!")
+                print(f"[BRICK VERIFY]    Expected near wide PE position: {wide_grasp[:3, 3][:2]}")
+                print(f"[BRICK VERIFY]    Detected position: {refined_grasp[:3, 3][:2]}")
 
-        refined_alignment_rpy = self.compute_alignment_rpy(refined_grasp)
-        refined_R = euler_to_rot_matrix(*refined_alignment_rpy)
-        delta_R = refined_R @ coarse_R_applied.T
-        delta_alignment_rpy = rot_matrix_to_euler_xyz(delta_R)
-        print(
-            f"refined alignment rpy [deg] = {np.rad2deg(refined_alignment_rpy)}, "
-            f"delta rpy [deg] = {np.rad2deg(delta_alignment_rpy)}"
-        )
-        self._viz_save_single("refined_grasp", refined_det, f"refined {self.grasp_color}")
+            # Cross-check: position should not jump too far between wide and refined PE
+            refined_wide_delta = np.linalg.norm(refined_grasp[:3, 3][:2] - wide_grasp[:3, 3][:2])
+            if refined_wide_delta > 0.06:  # > 6cm between wide and refined
+                print(f"[BRICK VERIFY] ⚠️  Position delta between wide and refined PE: {refined_wide_delta*100:.1f} cm")
+                print(f"[BRICK VERIFY]    This correlates with wrong brick detection!")
 
-        # ---- pre-grasp hover + descent ---------------------------------- #
-        hover_xyz = refined_grasp[:3, 3] + est_R @ (
-            self.o_T_o_tcpgrasp_lavender + np.array([0.0, 0.0, 0.015])
-        )
-        print(f"Moving to pre-grasp hover = {hover_xyz}")
-        self.obs = self.go_to_waypoint(
-            self.obs,
-            hover_xyz,
-            relative_pose_euler=delta_alignment_rpy,
-            distance_err=0.0005,
-            is_via=False,
-            label="pre_grasp_hover",
-        )
-        print(f"Descending to grasp = {w_T_w_tcpgrasp}")
-        self.obs = self.go_to_waypoint(
-            self.obs,
-            w_T_w_tcpgrasp,
-            relative_pose_euler=None,
-            distance_err=0.0002,
-            is_via=False,
-            label="descent_to_grasp",
-        )
-        applied_alignment_rpy = np.asarray(refined_alignment_rpy, dtype=np.float64)
+            # Extract yaw using multiple methods to diagnose
+            # SAM3's X-axis = brick short axis → subtract 90° to get long-axis yaw
+            R = refined_grasp[:3, :3]
+            raw_yaw = np.arctan2(refined_grasp[1, 0], refined_grasp[0, 0]) - np.pi / 2
+            yaw_from_R = np.arctan2(R[1, 0], R[0, 0]) - np.pi / 2
+            scipy_yaw = Rotation.from_matrix(R).as_euler('xyz')[2] - np.pi / 2
 
+            print(f"[3DOF YAW DEBUG] Multiple extraction methods (corrected: SAM3 X=short axis, -90°):")
+            print(f"  Method 1 - arctan2(T[1,0], T[0,0])-90°: {np.rad2deg(raw_yaw):8.2f}°")
+            print(f"  Method 2 - arctan2(R[1,0], R[0,0])-90°: {np.rad2deg(yaw_from_R):8.2f}°")
+            print(f"  Method 3 - scipy as_euler('xyz')[2]-90°: {np.rad2deg(scipy_yaw):8.2f}°")
+
+            refined_xy = refined_grasp[:3, 3][:2]
+
+            # Safety: cap refined XY to stay within reasonable range of wide PE position
+            # (refined PE observes from hover above the brick, so should not deviate too much)
+            max_refined_drift = 0.05  # Maximum 5cm drift from wide PE
+            wide_xy = wide_grasp[:3, 3][:2]
+            drift = np.linalg.norm(refined_xy - wide_xy)
+            if drift > max_refined_drift:
+                print(f"[3DOF SAFETY] ⚠️  Refined PE drifted {drift*100:.1f}cm from wide PE (max: {max_refined_drift*100:.1f}cm)")
+                print(f"[3DOF SAFETY]    Wide XY: {wide_xy}, Refined XY: {refined_xy}")
+                print(f"[3DOF SAFETY]    Using wide PE XY instead for safety")
+                refined_xy = wide_xy
+
+            print(f"3DOF: refined X-Y = {refined_xy}, raw brick yaw = {np.rad2deg(raw_yaw):.2f} deg")
+
+            # ---- USE WIDE PE YAW INSTEAD OF REFINED (since refined may detect wrong brick) ---- #
+            # Due to SAM3 brightness ranking flipping at close-up, refined PE often detects yellow instead of lavender
+            # Solution: Use the yaw from wide PE which detected the correct brick
+            wide_grasp_yaw = np.arctan2(wide_grasp[1, 0], wide_grasp[0, 0]) - np.pi / 2
+            if not identity_correct:
+                print(f"[3DOF YAW FIX] Wrong brick detected in refined PE!")
+                print(f"[3DOF YAW FIX] Using yaw from wide PE ({np.rad2deg(wide_grasp_yaw):.2f}°) instead of refined PE ({np.rad2deg(raw_yaw):.2f}°)")
+                raw_yaw = wide_grasp_yaw
+            else:
+                print(f"[3DOF YAW] Correct brick detected. Refined PE yaw: {np.rad2deg(raw_yaw):.2f}°")
+
+            # Attempt to save visualization (Gymnasium may block access to private methods)
+            try:
+                self._viz_save_single("refined_lavender", refined_det, f"refined {self.grasp_color}")
+            except (AttributeError, TypeError):
+                pass  # Visualization not available or blocked by Gymnasium wrapper
+
+            # ---- 3DOF DEBUG: Compare yaw sources and check rotation matrix ---- #
+            wide_grasp_yaw = np.arctan2(wide_grasp[1, 0], wide_grasp[0, 0]) - np.pi / 2
+            print(f"[3DOF DEBUG] wide_grasp yaw = {np.rad2deg(wide_grasp_yaw):.2f} deg")
+            print(f"[3DOF DEBUG] refined_grasp yaw = {np.rad2deg(raw_yaw):.2f} deg")
+            yaw_differential = np.rad2deg(np.abs(wide_grasp_yaw - raw_yaw))
+            print(f"[3DOF DEBUG] ⚠️  Yaw differential: {yaw_differential:.2f}° (expect low if same brick)")
+            if abs(yaw_differential - 180.0) < 5.0:
+                print(f"[3DOF DEBUG] ⚠️  WARNING: yaws differ by ~180° - possible brick ambiguity or wrong segmentation!")
+            print(f"[3DOF DEBUG] Rotation matrix R (refined_grasp):")
+            print(R)
+            euler_check = Rotation.from_matrix(R).as_euler('xyz')
+            print(f"[3DOF DEBUG] Full Euler (XYZ): roll={np.rad2deg(euler_check[0]):.2f}°, "
+                  f"pitch={np.rad2deg(euler_check[1]):.2f}°, yaw={np.rad2deg(euler_check[2]):.2f}°")
+            if abs(euler_check[0]) > 0.1 or abs(euler_check[1]) > 0.1:
+                print(f"[3DOF DEBUG] ⚠️  WARNING: Significant roll/pitch detected! "
+                      f"Brick may not be flat or PE orientation is unexpected.")
+            print(f"[3DOF DEBUG] Expected ~0° roll/pitch for flat-lying brick on table.")
+
+            # ---- 3DOF: align gripper yaw (180° symmetry: pick nearest) --- #
+            # Note: gripper is NOW at 0° due to initialization above
+            cur_rz = self._current_rz()
+            grasp_yaw = self._nearest_symmetric_yaw(raw_yaw, cur_rz)
+            delta_rz = grasp_yaw - cur_rz
+            print(
+                f"3DOF: aligning gripper: current={np.rad2deg(cur_rz):.2f} deg, "
+                f"raw={np.rad2deg(raw_yaw):.2f} deg, "
+                f"target={np.rad2deg(grasp_yaw):.2f} deg, "
+                f"delta={np.rad2deg(delta_rz):.2f} deg"
+            )
+            if abs(delta_rz) > np.deg2rad(90):
+                print(f"[3DOF DEBUG] ⚠️  WARNING: Rotation > 90° needed ({np.rad2deg(delta_rz):.2f}°)!")
+                print(f"[3DOF DEBUG]   This may indicate PE detected wrong brick or yaw is ambiguous.")
+                print(f"[3DOF DEBUG]   Attempting to use 180° symmetric alternative...")
+                alt_grasp_yaw = grasp_yaw + np.pi if grasp_yaw < 0 else grasp_yaw - np.pi
+                alt_delta_rz = alt_grasp_yaw - cur_rz
+                print(f"[3DOF DEBUG]   Alternative: target={np.rad2deg(alt_grasp_yaw):.2f}°, delta={np.rad2deg(alt_delta_rz):.2f}°")
+                if abs(alt_delta_rz) < abs(delta_rz):
+                    print(f"[3DOF DEBUG]   Using alternative (smaller rotation).")
+                    grasp_yaw = alt_grasp_yaw
+                    delta_rz = alt_delta_rz
+            self.obs = self.go_to_rotation_z(self.obs, target_rz=grasp_yaw, max_step=np.deg2rad(3.0))
+            actual_rz_deg = np.rad2deg(self._current_rz())
+            print(f"3DOF: after yaw align: actual_rz={actual_rz_deg:.2f} deg (target={np.rad2deg(grasp_yaw):.2f} deg)")
+
+            # ---- 3DOF: hover above refined X-Y, then descend ------------ #
+            grasp_z = self.grasp_position_ground_truth[2]
+            # Apply calibrated TCP offset (object frame → world frame via grasp yaw).
+            # o_T_o_tcpgrasp_lavender encodes how far from the brick centroid the TCP
+            # was in the demo; rotating it by grasp_yaw gives the world-frame correction.
+            c, s = np.cos(grasp_yaw), np.sin(grasp_yaw)
+            Rz_grasp = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+            offset_world = Rz_grasp @ self.o_T_o_tcpgrasp_lavender
+            grasp_xy = refined_xy + offset_world[:2]
+            print(
+                f"3DOF: grasp XY offset: raw_centroid={refined_xy}, "
+                f"offset_world_xy={offset_world[:2]*1000} mm, corrected={grasp_xy}"
+            )
+            hover_xyz = np.array([grasp_xy[0], grasp_xy[1], grasp_z + 0.015])
+            w_T_w_tcpgrasp = np.array([grasp_xy[0], grasp_xy[1], grasp_z])
+            print(f"3DOF: pre-grasp hover = {hover_xyz}")
+            self.obs = self.go_to_cartesian(self.obs, target_cartesian=hover_xyz, fine_resolution=0.0005, max_settle_iter=50)
+            print(f"3DOF: descending to grasp = {w_T_w_tcpgrasp}")
+            self.obs = self.go_to_cartesian(self.obs, target_cartesian=w_T_w_tcpgrasp, fine_resolution=0.0002)
+            applied_alignment_rpy = np.array([0.0, 0.0, grasp_yaw])
+
+        else:
+            # ---- coarse hover above lavender -------------------------------- #
+            coarse_alignment_rpy = self.compute_alignment_rpy(wide_grasp)
+            # For 3DoF flows we only want to align yaw (Z). Zero roll/pitch so the
+            # robot's Z axis remains parallel to the original (no roll/pitch change).
+            coarse_alignment_yaw = coarse_alignment_rpy[2]
+            coarse_alignment_rpy = np.array([0.0, 0.0, coarse_alignment_yaw])
+            coarse_R_applied = euler_to_rot_matrix(*coarse_alignment_rpy)
+            print(f"coarse alignment rpy [deg] = {np.rad2deg(coarse_alignment_rpy)}")
+
+            coarse_grasp_world = (
+                wide_grasp[:3, 3] + wide_grasp[:3, :3] @ self.o_T_o_tcpgrasp_lavender
+            )
+            coarse_hover_world = (
+                coarse_grasp_world + wide_grasp[:3, :3] @ np.array([0.0, 0.0, 0.025])
+            )
+            current_xyz = self.obs["observation.state.cartesian"][:3]
+            safe_hover_z = max(
+                coarse_hover_world[2],
+                self.min_coarse_hover_z,
+                current_xyz[2] + self.coarse_hover_min_above_current,
+            )
+            if safe_hover_z != coarse_hover_world[2]:
+                print(
+                    f"[InsertionWrapper3DoFRotZPE] WARNING: clamping coarse hover z from "
+                    f"{coarse_hover_world[2]:.6f} to {safe_hover_z:.6f}"
+                )
+                coarse_hover_world[2] = safe_hover_z
+
+            print(f"Moving to coarse hover = {coarse_hover_world}")
+            self.obs = self.go_to_waypoint(
+                self.obs,
+                coarse_hover_world,
+                relative_pose_euler=coarse_alignment_rpy,
+                distance_err=0.0005,
+                is_via=False,
+                label="coarse_hover",
+            )
+
+            # ---- refined PE (lavender only) --------------------------------- #
+            print("Refined PE: estimating lavender...")
+            refined_grasp, refined_det = self._estimate_lego_world_single(self.grasp_color)
+            check_refined = self.validate_world_pose_transform(refined_grasp, f"refined_{self.grasp_color}")
+
+            # ---- Verify correct brick detected in refined PE ---- #
+            refined_grasp_check = self.validate_brick_detection(
+                refined_det, self.grasp_color, expected_xy=wide_grasp[:3, 3][:2], is_single=True
+            )
+            print(f"[BRICK VERIFY] Refined PE {self.grasp_color}: {refined_grasp_check['detection_reason']}")
+            if not refined_grasp_check["valid"]:
+                print(f"[BRICK VERIFY] ⚠️  WARNING: {self.grasp_color} detection may be incorrect!")
+                print(f"[BRICK VERIFY]    Expected near wide PE position: {wide_grasp[:3, 3][:2]}")
+                print(f"[BRICK VERIFY]    Detected position: {refined_grasp[:3, 3][:2]}")
+
+            # Cross-check: position should not jump too far between wide and refined PE
+            refined_wide_delta = np.linalg.norm(refined_grasp[:3, 3][:2] - wide_grasp[:3, 3][:2])
+            if refined_wide_delta > 0.06:  # > 6cm between wide and refined
+                print(f"[BRICK VERIFY] ⚠️  Position delta between wide and refined PE: {refined_wide_delta*100:.1f} cm")
+                print(f"[BRICK VERIFY]    This may indicate PE instability or different brick detected.")
+
+            est_R = refined_grasp[:3, :3]
+            w_T_w_tcpgrasp = refined_grasp[:3, 3] + est_R @ self.o_T_o_tcpgrasp_lavender
+
+            refined_alignment_rpy = self.compute_alignment_rpy(refined_grasp)
+            # Keep only yaw for refined alignment as well (prevent roll/pitch changes)
+            refined_alignment_yaw = refined_alignment_rpy[2]
+            refined_alignment_rpy = np.array([0.0, 0.0, refined_alignment_yaw])
+            refined_R = euler_to_rot_matrix(*refined_alignment_rpy)
+            delta_R = refined_R @ coarse_R_applied.T
+            delta_alignment_rpy = rot_matrix_to_euler_xyz(delta_R)
+            print(
+                f"refined alignment rpy [deg] = {np.rad2deg(refined_alignment_rpy)}, "
+                f"delta rpy [deg] = {np.rad2deg(delta_alignment_rpy)}"
+            )
+            # Attempt to save visualization (Gymnasium may block access to private methods)
+            try:
+                self._viz_save_single("refined_lavender", refined_det, f"refined {self.grasp_color}")
+            except (AttributeError, TypeError):
+                pass  # Visualization not available or blocked by Gymnasium wrapper
+
+            # ---- pre-grasp hover + descent ---------------------------------- #
+            hover_xyz = refined_grasp[:3, 3] + est_R @ (
+                self.o_T_o_tcpgrasp_lavender + np.array([0.0, 0.0, 0.015])
+            )
+            print(f"Moving to pre-grasp hover = {hover_xyz}")
+            self.obs = self.go_to_waypoint(
+                self.obs,
+                hover_xyz,
+                relative_pose_euler=delta_alignment_rpy,
+                distance_err=0.0005,
+                is_via=False,
+                label="pre_grasp_hover",
+            )
+            print(f"Descending to grasp = {w_T_w_tcpgrasp}")
+            self.obs = self.go_to_waypoint(
+                self.obs,
+                w_T_w_tcpgrasp,
+                relative_pose_euler=None,
+                distance_err=0.0002,
+                is_via=False,
+                label="descent_to_grasp",
+            )
+            applied_alignment_rpy = np.asarray(refined_alignment_rpy, dtype=np.float64)
+
+        # ---- grasp (shared) --------------------------------------------- #
         print("Grasping...")
-        self.env.unwrapped.gripper.set_target(0.5)  # type: ignore
-        time.sleep(2.0)
+        self.env.unwrapped.gripper.set_target(0.4)  # type: ignore
+        time.sleep(3.0)
         self.obs, *_ = self._step_zeros()
         self.actual_grasp_position = np.copy(self.obs["observation.state.cartesian"][:3])
 
-        # ---- lift + undo orientation ------------------------------------ #
+        # ---- lift + undo orientation ------------------------------------- #
         print("Lifting after grasp...")
         self.obs = self.go_delta(
             self.obs,
@@ -755,11 +1186,14 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             distance_err=0.001,
             is_via=False,
         )
-        applied_alignment_rot = euler_to_rot_matrix(*applied_alignment_rpy)
-        undo_alignment_rpy = rot_matrix_to_euler_xyz(applied_alignment_rot.T)
-        self.obs, *_ = self.env.step(
-            np.array([0.0, 0.0, 0.0, undo_alignment_rpy[0], undo_alignment_rpy[1], undo_alignment_rpy[2]])
-        )
+        if self.pe_3dof:
+            self.obs = self.go_to_rotation_z(self.obs, target_rz=0.0)
+        else:
+            applied_alignment_rot = euler_to_rot_matrix(*applied_alignment_rpy)
+            undo_alignment_rpy = rot_matrix_to_euler_xyz(applied_alignment_rot.T)
+            self.obs, *_ = self.env.step(
+                np.array([0.0, 0.0, 0.0, undo_alignment_rpy[0], undo_alignment_rpy[1], undo_alignment_rpy[2]])
+            )
 
         # ---- diagonal hover above target -------------------------------- #
         diag_hover = wide_target[:3, 3] + self.diagonal_hover_offset
@@ -778,25 +1212,75 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         place_grasp, place_target, place_det = self._estimate_lego_world_both()
         self.validate_world_pose_transform(place_grasp, f"place_{self.grasp_color}")
         self.validate_world_pose_transform(place_target, f"place_{self.target_color}")
-        self._viz_save_pair("place", place_det, place_det)
+
+        # ---- Verify correct bricks detected in place PE ---- #
+        place_grasp_check = self.validate_brick_detection(place_det, self.grasp_color)
+        place_target_check = self.validate_brick_detection(place_det, self.target_color)
+        print(f"[BRICK VERIFY] Place PE {self.grasp_color}: {place_grasp_check['detection_reason']}")
+        print(f"[BRICK VERIFY] Place PE {self.target_color}: {place_target_check['detection_reason']}")
+
+        # Attempt to save visualization (Gymnasium may block access to private methods)
+        try:
+            self._viz_save_pair("place", place_det, place_det)
+        except (AttributeError, TypeError):
+            pass  # Visualization not available or blocked by Gymnasium wrapper
 
         # ---- compute goal XY and goal_rotation_z ------------------------ #
         ee_now = self.obs["observation.state.cartesian"][:3].copy()
-        delta_world = (
-            place_target[:3, 3]
-            - place_grasp[:3, 3]
-            + np.array([0.0, 0.0, self.place_z_offset])
-        )
-        self.goal_position = ee_now + delta_world
+        place_grasp_xy = place_grasp[:3, 3][:2]
+        place_target_xy = place_target[:3, 3][:2]
+        print(f"[PLACEMENT DEBUG] Place PE positions:")
+        print(f"  Grasp ({self.grasp_color}): {place_grasp_xy}")
+        print(f"  Target ({self.target_color}): {place_target_xy}")
+        print(f"  Current EE XY: {ee_now[:2]}")
+
+        # ---- compute goal yaw first (needed to rotate tcp_to_lav below) --- #
+        # goal yaw = physically-corrected yaw of target brick (SAM3 X-axis = short axis → -90°).
+        # Pick nearest 180°-symmetric equivalent from current gripper yaw (near 0° here)
+        # to minimise pre-RL rotation. Gripper will physically rotate to this angle before RL.
+        raw_goal_yaw_uncorrected = np.arctan2(place_target[1, 0], place_target[0, 0])
+        raw_goal_yaw_corrected = raw_goal_yaw_uncorrected - np.pi / 2
+        current_rz_now = self._current_rz()
+        self.goal_rotation_z = self._nearest_symmetric_yaw(raw_goal_yaw_corrected, current_rz_now)
+
+        if self.pe_3dof:
+            # 3DOF: Goal XY places the lavender centroid over the yellow centroid at insertion.
+            # tcp_to_lav is measured now (current_rz), but the gripper rotates to goal_rz before
+            # RL starts. The brick rotates with the gripper, so rotate tcp_to_lav by
+            # (goal_rz - current_rz) to get the correct TCP position at insertion time.
+            tcp_to_lav = place_grasp_xy - ee_now[:2]
+            delta_rz = self.goal_rotation_z - current_rz_now
+            cos_d, sin_d = np.cos(delta_rz), np.sin(delta_rz)
+            R2 = np.array([[cos_d, -sin_d], [sin_d, cos_d]])
+            tcp_to_lav_at_goal = R2 @ tcp_to_lav
+            goal_xy = place_target_xy - tcp_to_lav_at_goal + self.place_xy_correction
+            self.goal_position = np.array([
+                goal_xy[0],
+                goal_xy[1],
+                ee_now[2] + self.place_z_offset,
+            ])
+            print(f"[PLACEMENT DEBUG] Goal XY (yaw-corrected): {self.goal_position[:2]}")
+            print(
+                f"[PLACEMENT DEBUG]   tcp_to_lav now={tcp_to_lav*1000} mm"
+                f"  at_goal={tcp_to_lav_at_goal*1000} mm"
+                f"  delta_rz={np.rad2deg(delta_rz):.2f} deg"
+                f"  xy_correction={self.place_xy_correction*1000} mm"
+            )
+        else:
+            delta_world = (
+                place_target[:3, 3]
+                - place_grasp[:3, 3]
+                + np.array([0.0, 0.0, self.place_z_offset])
+            )
+            self.goal_position = ee_now + delta_world
         estimated_grasp_delta = place_grasp[:3, 3] - self.actual_grasp_position
 
-        # goal yaw = world-frame yaw of target brick
-        self.goal_rotation_z = float(
-            Rotation.from_matrix(place_target[:3, :3]).as_euler("xyz")[2]
-        )
         print(
             f"goal_position = {self.goal_position}, "
-            f"goal_rotation_z = {np.rad2deg(self.goal_rotation_z):.2f} deg"
+            f"goal_rotation_z: raw_sam3={np.rad2deg(raw_goal_yaw_uncorrected):.2f} deg "
+            f"corrected={np.rad2deg(raw_goal_yaw_corrected):.2f} deg "
+            f"-> used={np.rad2deg(self.goal_rotation_z):.2f} deg "
+            f"(corrected, nearest symmetric from {np.rad2deg(current_rz_now):.2f} deg)"
         )
 
         # ---- sample start position and yaw ------------------------------ #
@@ -820,7 +1304,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                 )
         else:
             self.start_position = self.goal_position.copy()
-            self.start_rotation_z = self.goal_rotation_z
+            self.start_rotation_z = self.goal_rotation_z  # pre-align gripper to yellow's physical yaw
 
         # ---- move to start XY ------------------------------------------ #
         print("Moving to start position...")
@@ -832,11 +1316,12 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                 self.obs["observation.state.cartesian"][2],
             ]),
             fine_resolution=0.0005,
+            max_settle_iter=50,
         )
 
         # ---- rotate to start yaw --------------------------------------- #
         print(f"Rotating yaw to {np.rad2deg(self.start_rotation_z):.2f} deg...")
-        self.obs = self.go_to_rotation_z(self.obs, target_rz=self.start_rotation_z)
+        self.obs = self.go_to_rotation_z(self.obs, target_rz=self.start_rotation_z, max_step=np.deg2rad(3.0))
 
         # ---- establish FT contact --------------------------------------- #
         self.n_steps = 0
@@ -877,6 +1362,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         reset_info[f"reset.pose_estimation.place.{self.grasp_color}.matrix"] = place_grasp
         reset_info[f"reset.pose_estimation.place.{self.target_color}.matrix"] = place_target
         reset_info["reset.pose_estimation.alignment_rpy_applied"] = applied_alignment_rpy
+        reset_info["reset.pe_3dof"] = self.pe_3dof
 
         print("Reset complete.")
         self.obs = self.add_perfect_action_to_obs(self.obs)
@@ -909,6 +1395,12 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         self.obs, reward, terminated, truncated, info = self.env.step(action6)
         self.obs = self.add_perfect_action_to_obs(self.obs)
 
+        if (truncated or terminated) and self.n_steps + 1 < self.step_limit:
+            print(
+                f"[InsertionWrapper3DoFRotZPE] WARNING: base env returned "
+                f"{'truncated' if truncated else 'terminated'}=True on step "
+                f"{self.n_steps + 1} (limit={self.step_limit})"
+            )
         self.n_steps += 1
         if self.n_steps >= self.step_limit:
             truncated = True
@@ -926,8 +1418,8 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         pause_after: float = 2.0,
         reinforce: bool = False,
         reinforce_lift: float = 0.0150,
-        reinforce_push: float = 0.0200,
-        reinforce_post_lift: float = 0.0050,
+        reinforce_push: float = 0.0100,
+        reinforce_post_lift: float = 0.0100,
     ) -> None:
         """Push down push_distance m to seat the brick after success.
 
@@ -954,49 +1446,53 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         if not reinforce:
             return
 
+        # Record snap position as absolute baseline so all sub-targets are
+        # computed from a known-good Z, not chained relative offsets.
+        regrasp_target = self.obs["observation.state.cartesian"][:3].copy()
+        print(f"[InsertionWrapper3DoFRotZPE] snap_push: reinforce — snap pos Z={regrasp_target[2]*1e3:.1f} mm")
+
         print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce — opening gripper...")
         self.env.unwrapped.gripper.set_target(0.80)  # type: ignore
         time.sleep(1.0)
 
         print(f"[InsertionWrapper3DoFRotZPE] snap_push: reinforce — lifting {reinforce_lift*1e3:.1f} mm...")
-        lift1_target = self.obs["observation.state.cartesian"][:3] + np.array([0.0, 0.0, reinforce_lift])
+        lift1_target = regrasp_target + np.array([0.0, 0.0, reinforce_lift])
         t0 = time.time()
-        while time.time() - t0 < 1.5:
+        while time.time() - t0 < 3.0:
             err = lift1_target - self.obs["observation.state.cartesian"][:3]
             self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
 
         print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce — closing gripper...")
         self.env.unwrapped.gripper.set_target(0.4)  # type: ignore
-        time.sleep(1.4)
+        time.sleep(2.0)
 
         print(f"[InsertionWrapper3DoFRotZPE] snap_push: reinforce — pressing down {reinforce_push*1e3:.1f} mm...")
-        press_target = self.obs["observation.state.cartesian"][:3] + np.array([0.0, 0.0, -reinforce_push])
+        press_target = regrasp_target + np.array([0.0, 0.0, -(reinforce_push - reinforce_lift)])
         t0 = time.time()
-        while time.time() - t0 < 1.5:
+        while time.time() - t0 < 3.0:
             err = press_target - self.obs["observation.state.cartesian"][:3]
             self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
 
         print(f"[InsertionWrapper3DoFRotZPE] snap_push: reinforce — lifting {reinforce_post_lift*1e3:.1f} mm...")
-        lift2_target = self.obs["observation.state.cartesian"][:3] + np.array([0.0, 0.0, reinforce_post_lift])
+        lift2_target = regrasp_target + np.array([0.0, 0.0, reinforce_post_lift - (reinforce_push - reinforce_lift)])
         t0 = time.time()
-        while time.time() - t0 < 1.5:
+        while time.time() - t0 < 3.0:
             err = lift2_target - self.obs["observation.state.cartesian"][:3]
             self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
 
         print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce — opening gripper...")
         self.env.unwrapped.gripper.set_target(0.75)  # type: ignore
-        time.sleep(1.0)
+        time.sleep(2.0)
 
-        print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce — descending to goal position...")
-        grasp_target = self.goal_position.copy()
+        print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce — descending to re-grasp position...")
         t0 = time.time()
-        while time.time() - t0 < 1.5:
-            err = grasp_target - self.obs["observation.state.cartesian"][:3]
+        while time.time() - t0 < 3.0:
+            err = regrasp_target - self.obs["observation.state.cartesian"][:3]
             self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
 
         print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce — re-grasping lego...")
         self.env.unwrapped.gripper.set_target(0.5)  # type: ignore
-        time.sleep(1.0)
+        time.sleep(2.0)
         print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce done.")
 
     # ------------------------------------------------------------------ #

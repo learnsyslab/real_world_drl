@@ -350,6 +350,14 @@ def main():
         "lift 6mm → close → press down → lift → open → re-grasp lego → lift. "
         "Helps confirm full LEGO seating before reset.",
     )
+    argparse.add_argument(
+        "--3dof",
+        action="store_true",
+        dest="pe_3dof",
+        help="PE 3DOF mode: flat-lego assumption. Wide PE gives coarse X-Y hover; "
+        "close-up PE refines X-Y and extracts yaw; goal computed from target brick "
+        "X-Y + yaw only (Z from fixed offset). Gripper roll/pitch unchanged throughout.",
+    )
     args = argparse.parse_args()
     config = Config()
     config = _override_config_for_task(args, config)

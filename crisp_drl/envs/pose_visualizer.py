@@ -238,17 +238,35 @@ class PoseOverlayRenderer:
         rgb_refined: Optional[np.ndarray] = None,
         mask_refined: Optional[np.ndarray] = None,
         names: Optional[tuple[str, str]] = None,
+        stage: Optional[str] = None,
     ) -> dict[str, str]:
         """Save coarse/refined overlay pair.
 
-        If `names` is provided as (coarse_name, refined_name) the filenames and
-        labels will include those names (e.g. lavender_coarse, purple_refined).
+        If `names` is provided as (first_name, second_name), the filenames and
+        labels will include those names.
+
+        If `stage` is also provided, filenames are prefixed with that stage so
+        callers can distinguish wide/close-up/place passes without overloading
+        the coarse/refined terminology.
         """
         os.makedirs(out_dir, exist_ok=True)
         paths: dict[str, str] = {}
         timestamp = datetime.now().strftime("%m-%d-%H-%M")
 
-        name_coarse = f"{names[0]}_coarse" if names else "coarse"
+        if names:
+            if stage:
+                name_coarse = f"{stage}_{names[0]}"
+                name_refined = f"{stage}_{names[1]}"
+                side_name = f"{stage}_sidebyside_{names[0]}_{names[1]}"
+            else:
+                name_coarse = f"{names[0]}_coarse"
+                name_refined = f"{names[1]}_refined"
+                side_name = f"sidebyside_{names[0]}_{names[1]}"
+        else:
+            name_coarse = f"{stage}_coarse" if stage else "coarse"
+            name_refined = f"{stage}_refined" if stage else "refined"
+            side_name = f"{stage}_sidebyside" if stage else "sidebyside"
+
         coarse_label = f"ep{episode_idx} {name_coarse}"
         coarse_img = self.render(rgb, pose_cam_coarse, mask=mask, label=coarse_label)
         p_coarse = os.path.join(out_dir, f"ep{episode_idx:03d}_{name_coarse}_{timestamp}.png")
@@ -256,7 +274,6 @@ class PoseOverlayRenderer:
         paths["coarse"] = p_coarse
 
         if pose_cam_refined is not None:
-            name_refined = f"{names[1]}_refined" if names else "refined"
             refined_label = f"ep{episode_idx} {name_refined}"
             refined_rgb = rgb_refined if rgb_refined is not None else rgb
             refined_mask = mask_refined if mask_refined is not None else mask
@@ -268,7 +285,6 @@ class PoseOverlayRenderer:
             paths["refined"] = p_refined
 
             if refined_img.shape == coarse_img.shape:
-                side_name = f"sidebyside_{names[0]}_{names[1]}" if names else "sidebyside"
                 side = np.concatenate([coarse_img, refined_img], axis=1)
                 p_side = os.path.join(out_dir, f"ep{episode_idx:03d}_{side_name}_{timestamp}.png")
                 cv2.imwrite(p_side, side)

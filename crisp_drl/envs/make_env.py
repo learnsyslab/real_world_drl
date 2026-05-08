@@ -558,6 +558,7 @@ def create_real_env_v4_3dof_rz_pe(
         is_eval=is_eval,
         use_ft_controller=not no_ft,
         pose_viz_dir=getattr(args, "pose_viz_dir", None) if args is not None else None,
+        pe_3dof=getattr(args, "pe_3dof", False) if args is not None else False,
     )
 
     env = DinoImageEncoderWrapper(

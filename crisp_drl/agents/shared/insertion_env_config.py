@@ -80,6 +80,7 @@ class LegoConfig:
     """custom home position for the robot end-effector"""
     goal_position_ground_truth: np.ndarray = field(
         default_factory=lambda: np.array([0.5417, -0.031, 0.08956918])
+        #default_factory=lambda: np.array([0.54803634, -0.02683013,  0.08606622]) # 4x4 lego
     )  # 0.54262590, -0.030810941, 0.051836114 # 0.5422, -0.03125
     """the ground truth goal position in the real world"""
     grasp_position_ground_truth: np.ndarray = field(
@@ -141,6 +142,11 @@ class LegoConfig:
     Set to 0 first; if lavender lands too low/high after a successful PE,
     nudge in 1 mm steps."""
 
+    place_xy_correction: list = field(default_factory=lambda: [0.0, 0.0])
+    """[dx, dy] world-frame correction (m) added to goal_xy after PE to compensate
+    for systematic offset (gripper-occlusion bias or mesh-origin vs stud-center).
+    Measure actual contact error, then negate it here in 1 mm steps."""
+
     after_grasp_lift_height_pe: float = 0.016
     """vertical lift right after closing the gripper, before moving to the
     diagonal hover above purple. Mirrors InsertionWrapper.after_grasp_lift_height."""
@@ -157,28 +163,36 @@ class LegoConfig:
 
 @dataclass
 class LegoConfig2x4(LegoConfig):
-    """LegoConfig variant for 2x4 bricks.
-
-    Reuses 2x2 calibration for grasp/goal world poses and the diagonal-hover
-    offset; test bricks must be physically placed at the 2x2 calibration spots.
-
-    `demo_grasped_pose_lavender` is mesh-derived: the centroid of
-    `lego_2x4_lavender_up.obj` sits at the origin and the brick height (~11.5 mm)
-    matches 2x2, so a top-down centroid grasp produces the same world pose as
-    2x2. We inherit the 2x2 value unchanged.
-    """
+    """LegoConfig variant for 2x4 bricks. All poses calibrated from hardware PE."""
 
     brick_size: str = "2x4"
     demo_grasped_pose_lavender: np.ndarray = field(
         default_factory=lambda: np.array(
             [
-                [0.99956242, -0.01966487, -0.02209571, 0.51189277],
-                [0.02016189, 0.99954325, 0.02250109, -0.03525977],
-                [0.02164308, -0.02293679, 0.99950251, 0.05194422],
+                [-0.00693104, -0.97607478, 0.21732492, 0.51424590],
+                [0.99908202, 0.00242847, 0.04277024, -0.03207491],
+                [-0.04227472, 0.21742185, 0.97516190, 0.05184781],
                 [0.0, 0.0, 0.0, 1.0],
             ]
         )
     )
+    goal_position_ground_truth: np.ndarray = field(
+        # default_factory=lambda: np.array([0.5417, -0.031, 0.08956918])
+        default_factory=lambda: np.array([0.54803634, -0.02683013,  0.08606622]) # 4x4 lego
+    )  # 0.54262590, -0.030810941, 0.051836114 # 0.5422, -0.03125
+   
+    grasp_position_ground_truth: np.ndarray = field(
+        default_factory=lambda: np.array([0.51613176, -0.02726734, 0.07760019])
+        #default_factory=lambda: np.array([0.51668704, -0.02606872,  0.07762174]) # 4x4 lego
+        
+    )   
+    demo_goal_pose_estimation_euler: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [5.03124058e-01, -2.73581240e-02,  1.01464644e-01,
+             3.13255072e+00,  1.15732178e-02,  2.18608044e-03]
+        )
+    )
+
 
 
 LEGO_BRICK_CONFIGS = {

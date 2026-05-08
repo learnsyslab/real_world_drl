@@ -6,6 +6,9 @@ from gymnasium import Wrapper, spaces
 import numpy as np
 import logging
 
+# Module-level logger
+logger = logging.getLogger(__name__)
+
 from crisp_drl.agents.shared.insertion_env_config import SiemensConfig
 from crisp_drl.envs.pose_estimation_helper import PoseEstimationHelper
 from crisp_drl.agents.shared.algorithm_config import Config
@@ -208,16 +211,14 @@ class InsertionWrapper(Wrapper):
             )
 
             # go back to grasping position
+            ag = getattr(self, "actual_grasp_position", self.grasp_position_ground_truth)
             self.obs = self.go_to_cartesian(
                 self.obs,
-                target_cartesian=np.array(
-                    [
-                        self.actual_grasp_position[0],
-                        self.actual_grasp_position[1],
-                        self.obs["observation.state.cartesian"][2]
-                        - self.reset_lift_height,
-                    ]
-                ),
+                target_cartesian=np.array([
+                    ag[0],
+                    ag[1],
+                    self.obs["observation.state.cartesian"][2] - self.reset_lift_height,
+                ]),
             )
             # input(
             #     "Went to grasping position for reset. Enter to continue with pushing down..."
@@ -232,7 +233,7 @@ class InsertionWrapper(Wrapper):
                 < self.delta_z_push_reset
             ):
                 delta_xy = (
-                    self.actual_grasp_position[0:2]
+                    getattr(self, "actual_grasp_position", self.grasp_position_ground_truth)[0:2]
                     - self.obs["observation.state.cartesian"][0:2]
                 )
                 delta_z = (
@@ -240,7 +241,7 @@ class InsertionWrapper(Wrapper):
                     if self.obs["observation.velocity.cartesian"][2]
                     > -self.delta_z_push_reset_careful_threshold_velocity
                     or abs(
-                        self.actual_grasp_position[2]
+                        getattr(self, "actual_grasp_position", self.grasp_position_ground_truth)[2]
                         - self.obs["observation.state.cartesian"][2]
                     )
                     > self.delta_z_push_reset_careful_threshold_distance
@@ -416,7 +417,8 @@ class InsertionWrapper(Wrapper):
         self.obs, reset_info = self.env.reset()
         reset_info["reset.grasped.position"] = self.actual_grasp_position
         self.reset_grasp_delta = (
-            self.actual_grasp_position - self.grasp_position_ground_truth
+            getattr(self, "actual_grasp_position", self.grasp_position_ground_truth)
+            - self.grasp_position_ground_truth
         )
         reset_info["reset.grasped.delta_estimated"] = self.reset_grasp_delta
         goal_position_offset = self.goal_position - (
@@ -714,16 +716,10 @@ class InsertionWrapper3DoFRotZ(Wrapper):
             #time.sleep(2.0)
 
             # 3) go back to grasping position
+            ag = getattr(self, "actual_grasp_position", self.grasp_position_ground_truth)
             self.obs = self.go_to_cartesian(
                 self.obs,
-                target_cartesian=np.array(
-                    [
-                        self.actual_grasp_position[0],
-                        self.actual_grasp_position[1],
-                        self.obs["observation.state.cartesian"][2]
-                        - self.reset_lift_height,
-                    ]
-                ),
+                target_cartesian=np.array([ag[0], ag[1], self.obs["observation.state.cartesian"][2] - self.reset_lift_height]),
             )
 
             # push down
@@ -734,24 +730,20 @@ class InsertionWrapper3DoFRotZ(Wrapper):
                 )
                 < self.delta_z_push_reset
             ):
-                delta_xy = (
-                    self.actual_grasp_position[0:2]
-                    - self.obs["observation.state.cartesian"][0:2]
-                )
+                current_cart = self.obs["observation.state.cartesian"][0:2]
+                delta_xy = getattr(self, "actual_grasp_position", self.grasp_position_ground_truth)[0:2] - current_cart
                 delta_z = (
                     -self.delta_z_push_reset_step_size
                     if self.obs["observation.velocity.cartesian"][2]
                     > -self.delta_z_push_reset_careful_threshold_velocity
                     or abs(
-                        self.actual_grasp_position[2]
+                        getattr(self, "actual_grasp_position", self.grasp_position_ground_truth)[2]
                         - self.obs["observation.state.cartesian"][2]
                     )
                     > self.delta_z_push_reset_careful_threshold_distance
                     else 0.0
                 )
-                self.obs, *_ = self._step_translation(
-                    np.array([delta_xy[0], delta_xy[1], delta_z])
-                )
+                self.obs, *_ = self._step_translation(np.array([delta_xy[0], delta_xy[1], delta_z]))
 
             delta_z = abs(
                 self.obs["observation.state.cartesian"][2]
