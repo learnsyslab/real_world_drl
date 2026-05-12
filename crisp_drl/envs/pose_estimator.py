@@ -111,9 +111,18 @@ class PoseEstimator(Node):
         mesh_path = mesh_path_map[color]
         self._set_mesh_path(mesh_path)
 
+    ABUS_MESH_PATH = "/workspaces/isaac_ros-dev/abus/abus_key_centered.obj"
+
     def _set_mesh_file_siemens(self):
         mesh_path = "/workspaces/isaac_ros-dev/lego_assets/SiemensLid_centered.obj"
         self._set_mesh_path(mesh_path)
+
+    def estimate_abus(
+        self, image: np.ndarray, depth: np.ndarray, mask: np.ndarray
+    ) -> np.ndarray:
+        """Estimate 6DoF pose for the ABUS key."""
+        self._set_mesh_path(self.ABUS_MESH_PATH)
+        return self._estimate(image, depth, mask)
 
     def _set_mesh_path(self, mesh_path):
         # Create parameter client for the foundationpose node

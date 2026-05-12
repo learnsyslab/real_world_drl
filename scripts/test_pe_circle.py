@@ -94,11 +94,19 @@ def go_to_cartesian(
 # ── PE helper ────────────────────────────────────────────────────────────────
 
 
-def do_pe(pe_helper: PoseEstimationHelper, env, obs, grasp_color: str, target_color: str):
-    """Settle x2 then run SAM3 + FoundationPose for both brick colors.
+def do_pe(
+    pe_helper: PoseEstimationHelper,
+    env,
+    obs,
+    colors: list[str],
+    object_type: str = "lego",
+):
+    """Settle x2 then run SAM3 + FoundationPose.
 
-    Returns (obs, results) where results[color] = {pose_cam, world_pose, mask}
-    or None if that color was not detected / estimation failed.
+    For object_type="lego": segments two LEGO bricks by color.
+    For object_type="abus": segments the ABUS key (single object, key="abus").
+
+    Returns (obs, results) where results[key] = {pose_cam, world_pose, mask} or None.
     """
     obs = step_zeros(env)
     obs = step_zeros(env)
@@ -107,14 +115,33 @@ def do_pe(pe_helper: PoseEstimationHelper, env, obs, grasp_color: str, target_co
     depth_f32 = obs["observation.images.wrist_depth_camera"].astype(np.float32) / 1000.0
     tcp_cart = obs["observation.state.cartesian"]
 
+    results: dict = {"rgb": rgb.copy(), "tcp_cart": tcp_cart.copy()}
+
+    if object_type == "abus":
+        try:
+            mask = pe_helper.segmenter.segment_abus(rgb)
+        except Exception as exc:
+            log.error("segment_abus failed: %s", exc)
+            results["abus"] = None
+            return obs, results
+        try:
+            pose_cam = pe_helper.pose_estimator.estimate_abus(rgb, depth_f32, mask)
+            world_pose = pe_helper._compute_pose_in_world_frame(pose_cam, tcp_cart)
+            results["abus"] = {"pose_cam": pose_cam, "world_pose": world_pose, "mask": mask}
+            log.info("abus world xyz = [%.4f, %.4f, %.4f]", *world_pose[:3, 3])
+        except Exception as exc:
+            log.error("PE failed for abus: %s", exc)
+            results["abus"] = None
+        return obs, results
+
+    # lego path
     try:
-        masks = pe_helper.segmenter.segment_lego(rgb, colors=(grasp_color, target_color))
+        masks = pe_helper.segmenter.segment_lego(rgb, colors=tuple(colors))
     except Exception as exc:
         log.error("segment_lego failed: %s", exc)
-        return obs, {}
+        return obs, results
 
-    results: dict = {"rgb": rgb.copy(), "tcp_cart": tcp_cart.copy()}
-    for color in (grasp_color, target_color):
+    for color in colors:
         if color not in masks:
             log.warning("SAM3 did not return mask for %r (got %s)", color, list(masks))
             results[color] = None
@@ -127,11 +154,7 @@ def do_pe(pe_helper: PoseEstimationHelper, env, obs, grasp_color: str, target_co
                 "world_pose": world_pose,
                 "mask": masks[color],
             }
-            log.info(
-                "%s world xyz = [%.4f, %.4f, %.4f]",
-                color,
-                *world_pose[:3, 3],
-            )
+            log.info("%s world xyz = [%.4f, %.4f, %.4f]", color, *world_pose[:3, 3])
         except Exception as exc:
             log.error("PE failed for %r: %s", color, exc)
             results[color] = None
@@ -184,18 +207,26 @@ def make_composite(images_bgr: list, nrows: int = 2, ncols: int = 3, thumb_hw=(2
 # ── circle sweep ─────────────────────────────────────────────────────────────
 
 
+_SIL_COLORS = {
+    "lavender": (200, 0, 200),
+    "purple": (180, 0, 180),
+    "yellow": (0, 180, 255),
+    "abus": (0, 220, 100),
+}
+_DEFAULT_SIL = (180, 180, 180)
+
+
 def circle_sweep(
     env,
     obs,
     pe_helper: PoseEstimationHelper,
-    renderer_grasp: PoseOverlayRenderer,
-    renderer_target: PoseOverlayRenderer,
+    renderers: dict[str, PoseOverlayRenderer],
     center_xy: np.ndarray,
     z: float,
     radius: float,
     n_samples: int,
-    grasp_color: str,
-    target_color: str,
+    colors: list[str],
+    object_type: str,
     out_dir: str,
     sweep_label: str,
 ) -> dict:
@@ -204,7 +235,7 @@ def circle_sweep(
     Returns obs (after sweep) and saves individual PNGs + 2×n composite.
     """
     angles = np.linspace(0, 2 * np.pi, n_samples, endpoint=False)
-    overlays: dict[str, list] = {grasp_color: [], target_color: []}
+    overlays: dict[str, list] = {c: [] for c in colors}
 
     os.makedirs(out_dir, exist_ok=True)
 
@@ -219,29 +250,24 @@ def circle_sweep(
                  sweep_label, i + 1, n_samples, angle_deg, target_xyz)
 
         obs = go_to_cartesian(env, obs, target_xyz, fine_resolution=0.0005)
-        obs, results = do_pe(pe_helper, env, obs, grasp_color, target_color)
+        obs, results = do_pe(pe_helper, env, obs, colors, object_type=object_type)
         actual_xyz = obs["observation.state.cartesian"][:3]
         log.info("  EE actual xyz = %s", actual_xyz)
 
-        for role, color, renderer, sil_col in [
-            ("grasp", grasp_color, renderer_grasp, (200, 0, 200)),   # BGR magenta for lavender
-            ("target", target_color, renderer_target, (0, 180, 255)), # BGR gold/orange for yellow
-        ]:
-            label = f"{sweep_label}_{role}_{color} {angle_deg}"
+        for color in colors:
+            renderer = renderers[color]
+            sil_col = _SIL_COLORS.get(color, _DEFAULT_SIL)
+            label = f"{sweep_label}_{color} {angle_deg:.0f}°"
             bgr = render_result(renderer, results, color, label, sil_col)
             overlays[color].append(bgr)
-
-            # save individual overlay
-            fname = f"{sweep_label}_{role}_{color}_angle{int(angle_deg)}.png"
+            fname = f"{sweep_label}_{color}_angle{int(angle_deg)}.png"
             cv2.imwrite(os.path.join(out_dir, fname), bgr)
 
-    # save 2×3 (or n_samples layout) composites per color
     ncols = min(3, n_samples)
     nrows = (n_samples + ncols - 1) // ncols
-    for color in (grasp_color, target_color):
+    for color in colors:
         comp = make_composite(overlays[color], nrows=nrows, ncols=ncols)
-        role = "grasp" if color == grasp_color else "target"
-        fname = f"{sweep_label}_{role}_{color}_composite.png"
+        fname = f"{sweep_label}_{color}_composite.png"
         cv2.imwrite(os.path.join(out_dir, fname), comp)
         log.info("Saved composite: %s", os.path.join(out_dir, fname))
 
@@ -278,6 +304,14 @@ def _find_mesh(brick_size: str, color: str) -> str | None:
     return next((p for p in candidates if os.path.exists(p)), None)
 
 
+def _find_abus_mesh() -> str | None:
+    candidates = [
+        "/workspaces/isaac_ros-dev/abus/abus_key_centered.obj",
+        os.path.expanduser("~/workspaces/isaac_ros-dev/abus/abus_key_centered.obj"),
+    ]
+    return next((p for p in candidates if os.path.exists(p)), None)
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 
@@ -297,6 +331,8 @@ def main():
     ap.add_argument("--refined_z", type=float, default=None,
                     help="EE z for refined circle [m]. Default: grasp_z + 0.030.")
     ap.add_argument("--brick_size", default="2x4", choices=["2x2", "2x4"])
+    ap.add_argument("--object_type", default="lego", choices=["lego", "abus"],
+                    help="Object type: 'lego' (dual-brick, default) or 'abus' (single key).")
     args = ap.parse_args()
 
     cfg = LegoConfig2x4()
@@ -310,6 +346,7 @@ def main():
     refined_center_xy = (grasp_gt[:2] + goal_gt[:2]) / 2.0
     refined_z = args.refined_z if args.refined_z is not None else float(grasp_gt[2] + 0.030)
 
+    log.info("object_type=%s", args.object_type)
     log.info("Coarse sweep: center_xy=%s  z=%.4f  r=%.3f",
              coarse_center_xy, coarse_z, args.coarse_radius)
     log.info("Refined sweep: center_xy=%s  z=%.4f  r=%.3f",
@@ -326,16 +363,33 @@ def main():
         use_tracker=False,
     )
 
-    renderer_grasp = PoseOverlayRenderer(
-        camera_info_json_path="camera_parameters/realsense_d405_single.json",
-        mesh_path=_find_mesh(args.brick_size, args.grasp_color),
-        use_default_mesh_fallback=False,
-    )
-    renderer_target = PoseOverlayRenderer(
-        camera_info_json_path="camera_parameters/realsense_d405_single.json",
-        mesh_path=_find_mesh(args.brick_size, args.target_color),
-        use_default_mesh_fallback=False,
-    )
+    cam_info_path = "camera_parameters/realsense_d405_single.json"
+    if args.object_type == "abus":
+        colors = ["abus"]
+        abus_mesh = _find_abus_mesh()
+        if abus_mesh is None:
+            raise FileNotFoundError("ABUS mesh not found at /workspaces/isaac_ros-dev/abus/abus_key_centered.obj")
+        renderers = {
+            "abus": PoseOverlayRenderer(
+                camera_info_json_path=cam_info_path,
+                mesh_path=abus_mesh,
+                use_default_mesh_fallback=False,
+            )
+        }
+    else:
+        colors = [args.grasp_color, args.target_color]
+        renderers = {
+            args.grasp_color: PoseOverlayRenderer(
+                camera_info_json_path=cam_info_path,
+                mesh_path=_find_mesh(args.brick_size, args.grasp_color),
+                use_default_mesh_fallback=False,
+            ),
+            args.target_color: PoseOverlayRenderer(
+                camera_info_json_path=cam_info_path,
+                mesh_path=_find_mesh(args.brick_size, args.target_color),
+                use_default_mesh_fallback=False,
+            ),
+        }
 
     try:
         log.info("Resetting env...")
@@ -353,14 +407,13 @@ def main():
         obs = circle_sweep(
             env=env, obs=obs,
             pe_helper=pe_helper,
-            renderer_grasp=renderer_grasp,
-            renderer_target=renderer_target,
+            renderers=renderers,
             center_xy=coarse_center_xy,
             z=coarse_z,
             radius=args.coarse_radius,
             n_samples=args.n_samples,
-            grasp_color=args.grasp_color,
-            target_color=args.target_color,
+            colors=colors,
+            object_type=args.object_type,
             out_dir=args.out_dir,
             sweep_label="coarse",
         )
@@ -374,14 +427,13 @@ def main():
         obs = circle_sweep(
             env=env, obs=obs,
             pe_helper=pe_helper,
-            renderer_grasp=renderer_grasp,
-            renderer_target=renderer_target,
+            renderers=renderers,
             center_xy=refined_center_xy,
             z=refined_z,
             radius=args.refined_radius,
             n_samples=args.n_samples,
-            grasp_color=args.grasp_color,
-            target_color=args.target_color,
+            colors=colors,
+            object_type=args.object_type,
             out_dir=args.out_dir,
             sweep_label="refined",
         )

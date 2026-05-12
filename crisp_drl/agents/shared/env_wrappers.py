@@ -1815,7 +1815,7 @@ class SuccessClassificationWrapper(Wrapper):
 
         score = self._success_score(observation)
         self.max_val = max(score, self.max_val)
-        print(f"[CLASSIFIER SCORE]: {score:.3f}")
+        # print(f"[CLASSIFIER SCORE]: {score:.3f}")
         if score >= self.threshold or self.max_val > 8 and score < 6:
             self._snap_push()
             t = time.time()

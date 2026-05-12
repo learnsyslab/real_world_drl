@@ -90,6 +90,20 @@ class Sam3Detector:
 
         return result
 
+    def segment_abus(self, image: np.ndarray, prompt: str = "metal key") -> np.ndarray:
+        """Segment ABUS key using a text prompt. Returns binary mask (uint8, 0/255)."""
+        inference_state = self.processor.set_image(Image.fromarray(image))
+        output = self.processor.set_text_prompt(state=inference_state, prompt=prompt)
+        masks, _boxes, scores = output["masks"], output["boxes"], output["scores"]
+        scores = scores.cpu().numpy()
+        if len(masks) == 0:
+            raise ValueError(f"[SAM3] No mask found for prompt={prompt!r}")
+        mask_idx = np.argsort(scores)[-1]
+        if scores[mask_idx] < 0.5:
+            print(f"[SAM3] Warning: low confidence for abus key ({scores[mask_idx]:.3f})")
+        hw = (masks[0].shape[-2], masks[0].shape[-1])
+        return masks[mask_idx].cpu().numpy().reshape(*hw) * 255
+
     def segment_siemens(self, image: np.ndarray) -> np.ndarray:
         inference_state = self.processor.set_image(Image.fromarray(image))
         output = self.processor.set_text_prompt(

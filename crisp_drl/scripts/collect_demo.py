@@ -18,7 +18,7 @@ print("Env reset.")
 
 i_demo_img = 0
 
-exp_name = "siemens_pe_g"
+exp_name = "usb_test_pe_g"
 rot_deg = 1
 rot_deg_z = 0.25
 rot_deg_x = 0.25
