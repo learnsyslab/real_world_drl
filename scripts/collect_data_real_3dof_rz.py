@@ -22,9 +22,9 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 
 # Alternate between perfect goal-seeking action (with prob 1-p) and uniform random (p)
-p = 0.70 # 0.70 to start with
+p = 0.82 # 0.70 to start with
 # p = 0.0 # perfect action test
-N_ROLLOUTS = 31 # 10 to start with
+N_ROLLOUTS = 30 # 10 to start with
 
 # Translation magnitudes
 max_random_action_magnitude = 0.25e-3   # m / step
@@ -39,11 +39,12 @@ perfect_action_magnitude_rz = perfect_action_magnitude * pe_accuracy_ratio_rot_t
 ideal_goal_pos_rz = 0.0  # absolute world yaw target
 
 base_exp_name = "run_4_3dof_rz"
-start_time_tag = datetime.now().strftime("%m%d_%H_%M")
-exp_name = f"{base_exp_name}_{p}_{start_time_tag}"
+#start_time_tag = datetime.now().strftime("%m%d_%H_%M")
+#exp_name = f"{base_exp_name}_{p}_{start_time_tag}"
 
 # Continue from folder, eg. "run_4_3dof_rz_0.7_0501_10_57"
-exp_name = "run_4_3dof_rz_0.7_0501_11_48"
+#exp_name = "run_4_3dof_rz_0.82_0512_13_49"
+exp_name = "run_4_3dof_rz_0.8-0.82_0512"
 #exp_name = "run_4_3dof_rz_0.7_0501_11_48_images"  # with images
 
 repo_id = f"collect_data_real/{exp_name}"
@@ -55,8 +56,8 @@ config.actor_output_dim = 3
 config.actor_nonvision_input_dim = 18
 config.max_action = np.array(
     [
-        0.00025,
-        0.00025,
+        0.00025, # 0.00025
+        0.00025, # 0.00025
         np.deg2rad(0.5),
     ]
 )
@@ -224,6 +225,7 @@ try:
         goal_pos = config.goal_position_ground_truth[:2].copy()
         goal_pos[0] += grasp_delta[0]
         goal_position_delta = reset_info["reset.goal_position.offset"][:2]
+        # goal_pos += goal_position_delta
 
         # Wrapper-side noisy goal yaw (used for safety-box centering inside env)
         goal_rotation_z = float(reset_info["reset.goal_orientation.rotation_z"])
