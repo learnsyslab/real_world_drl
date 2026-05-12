@@ -169,26 +169,27 @@ class LegoConfig2x4(LegoConfig):
     demo_grasped_pose_lavender: np.ndarray = field(
         default_factory=lambda: np.array(
             [
-                [-0.00693104, -0.97607478, 0.21732492, 0.51424590],
-                [0.99908202, 0.00242847, 0.04277024, -0.03207491],
-                [-0.04227472, 0.21742185, 0.97516190, 0.05184781],
+                [-0.00843426, -0.99131857, 0.13121154, 0.51456070],
+                [0.99974499, -0.00561054, 0.02187522, -0.03193374],
+                [-0.02094914, 0.13136255, 0.99111303, 0.05239672],
                 [0.0, 0.0, 0.0, 1.0],
             ]
         )
     )
     goal_position_ground_truth: np.ndarray = field(
         # default_factory=lambda: np.array([0.5417, -0.031, 0.08956918])
-        default_factory=lambda: np.array([0.54803634, -0.02683013,  0.08606622]) # 4x4 lego
+        default_factory=lambda: np.array([0.54803634, -0.027500,  0.08606622]) # 4x4 lego        
     )  # 0.54262590, -0.030810941, 0.051836114 # 0.5422, -0.03125
    
     grasp_position_ground_truth: np.ndarray = field(
-        default_factory=lambda: np.array([0.51613176, -0.02726734, 0.07760019])
+        # default_factory=lambda: np.array([0.51613176, -0.02726734, 0.07760019])
+        default_factory=lambda: np.array([0.51668704, -0.027500,  0.07762174]) # 4x4 lego
         #default_factory=lambda: np.array([0.51668704, -0.02606872,  0.07762174]) # 4x4 lego
         
     )   
     demo_goal_pose_estimation_euler: np.ndarray = field(
         default_factory=lambda: np.array(
-            [5.03124058e-01, -2.73581240e-02,  1.01464644e-01,
+            [5.1669e-01, -2.7500e-02,  1.01464644e-01,
              3.13255072e+00,  1.15732178e-02,  2.18608044e-03]
         )
     )

@@ -358,6 +358,12 @@ def main():
         "close-up PE refines X-Y and extracts yaw; goal computed from target brick "
         "X-Y + yaw only (Z from fixed offset). Gripper roll/pitch unchanged throughout.",
     )
+    argparse.add_argument(
+        "--gt_target_goal",
+        action="store_true",
+        help="Use ground-truth goal position and zero yaw for the target (yellow) brick "
+        "instead of the PE estimate. Useful for isolating grasp-side PE errors.",
+    )
     args = argparse.parse_args()
     config = Config()
     config = _override_config_for_task(args, config)

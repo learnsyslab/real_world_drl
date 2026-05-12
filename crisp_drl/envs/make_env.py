@@ -349,13 +349,14 @@ def create_real_env_v4_3dof_rz(config: Config, args=None) -> gym.Env:
     env = InsertionWrapper3DoFRotZ(
         env,
         config=config,
-        grasp_randomisation_z_range=(0.0005, 0.0015) if is_eval else (0.00025, 0.00175),
-        grasp_randomisation_x_range=(-0.0015, 0.0015) if is_eval else (-0.002, 0.002),
-        safety_box_radius=0.004 if is_eval else 0.003,
+        grasp_randomisation_z_range=(0.0005, 0.0015) if is_eval else (0.00000, 0.00200),
+        grasp_randomisation_x_range=(-0.0015, 0.0015) if is_eval else (-0.0035, 0.0035),
+        goal_position_randomisation_xy_range=(-0.0028, 0.0028),
+        safety_box_radius=0.004 if is_eval else 0.005, # 0.003 originally
         safety_box_step_size=0.0005,
-        safety_box_angular_radius=np.deg2rad(4) if is_eval else np.deg2rad(3),
+        safety_box_angular_radius=np.deg2rad(4) if is_eval else np.deg2rad(5), # 3 originally
         safety_box_angular_step_size=np.deg2rad(0.5),
-        goal_orientation_randomisation_angle=np.deg2rad(1.5),
+        goal_orientation_randomisation_angle=np.deg2rad(2.5),
         minimal_start_goal_angle=np.deg2rad(1.0),
         step_limit=config.episode_length if not is_eval else 2 * config.episode_length,
         is_eval=is_eval,
@@ -559,6 +560,7 @@ def create_real_env_v4_3dof_rz_pe(
         use_ft_controller=not no_ft,
         pose_viz_dir=getattr(args, "pose_viz_dir", None) if args is not None else None,
         pe_3dof=getattr(args, "pe_3dof", False) if args is not None else False,
+        use_gt_target_goal=getattr(args, "gt_target_goal", False) if args is not None else False,
     )
 
     env = DinoImageEncoderWrapper(

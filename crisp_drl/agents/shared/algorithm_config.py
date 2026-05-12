@@ -51,7 +51,7 @@ class Config:
     """number of gradient steps for offline pre-training"""
     pre_train_gradient_steps_save_interval: int = 5_000
     """number of gradient steps between checkpoints for offline pre-training"""
-    episode_length: int = 150
+    episode_length: int = 180
     """the maximum length of an episode"""
     buffer_size: int = 200_000
     """the replay memory buffer size"""
@@ -139,12 +139,12 @@ class Config:
     """custom home position for the robot end-effector"""
     goal_position_ground_truth: np.ndarray = field(
         # default_factory=lambda: np.array([0.5417, -0.031, 0.08956918]) # 2x2 lego
-        default_factory=lambda: np.array([0.54803634, -0.02683013,  0.08606622]) # 4x4 lego
+        default_factory=lambda: np.array([0.54803634, -0.027500,  0.08606622]) # 4x4 lego
     )  # 0.54262590, -0.030810941, 0.051836114 # 0.5422, -0.03125
     """the ground truth goal position in the real world"""
     grasp_position_ground_truth: np.ndarray = field(
         # default_factory=lambda: np.array([0.5100313, -0.03166383, 0.07772372]) # 2x2 lego
-        default_factory=lambda: np.array([0.51668704, -0.02606872,  0.07762174]) # 4x4 lego
+        default_factory=lambda: np.array([0.51668704, -0.027500,  0.07762174]) # 4x4 lego
     )  # 0.5106526, -0.03026352, 0.04147444
     """the ground truth grasp position in the real world"""
     grasp_orientation_ground_truth_euler: np.ndarray = field(
