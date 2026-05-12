@@ -402,6 +402,7 @@ class InsertionWrapper(Wrapper):
             print("Establishing contact...")
             self.env.tare_ft_sensor(self.obs)  # pyright: ignore[reportAttributeAccessIssue]
             # [s.reset() for s in self.env.unwrapped.sensors]  # pyright: ignore[reportAttributeAccessIssue] # tare ft sensor
+            self.obs, *_ = self.env.step(np.zeros(3))  # flush stale pre-tare observation
             z_step, z_force_error = self.z_force_controller_dz(self.obs)
             while abs(z_force_error) > 0.1:  # wait until some contact
                 _check_stop()
@@ -485,11 +486,11 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         self,
         env,
         config: Config,
-        grasp_randomisation_x_range=(-0.002, 0.002),
-        grasp_randomisation_z_range=(0.0005, 0.002),
+        grasp_randomisation_x_range=(-0.0035, 0.0035), # -0.002, 0.002
+        grasp_randomisation_z_range=(0.0000, 0.0020), # -0.005, 0.002
         goal_position_randomisation_xy_range=(-0.0028, 0.0028),
         goal_orientation_randomisation_angle=np.deg2rad(3),
-        safety_box_radius=0.003,
+        safety_box_radius=0.005, # 0.003 originally
         safety_box_step_size=0.0005,
         safety_box_angular_radius=np.deg2rad(3),
         safety_box_angular_step_size=np.deg2rad(0.5),
@@ -795,8 +796,8 @@ class InsertionWrapper3DoFRotZ(Wrapper):
             fine_resolution=0.0002,
         )
         logger.info("Grasping...")
-        self.env.unwrapped.gripper.set_target(0.5)  # type: ignore
-        time.sleep(2.0)
+        self.env.unwrapped.gripper.set_target(0.48)  # type: ignore
+        time.sleep(2.8)
         self.obs, *_ = self._step_zeros()
         self.actual_grasp_position = np.copy(
             self.obs["observation.state.cartesian"][:3]
@@ -814,7 +815,7 @@ class InsertionWrapper3DoFRotZ(Wrapper):
             self.obs = self.go_to_cartesian(
                 self.obs,
                 target_cartesian=self.pose_estimation_position_euler[:3],
-                fine_resolution=0.0005,
+                fine_resolution=0.0002,
             )
             self.obs, *_ = self._step_zeros()
             self.actual_estimation_position = np.copy(
@@ -911,7 +912,9 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         self.obs, *_ = self._step_zeros()
         if self.use_ft_controller:
             print("Establishing contact...")
+            self.obs, *_ = self.env.step(np.zeros(6))
             self.env.tare_ft_sensor(self.obs)  # pyright: ignore[reportAttributeAccessIssue]
+            self.obs, *_ = self._step_zeros()  # flush stale pre-tare observation
             z_step, z_force_error = self.z_force_controller_dz(self.obs)
             while abs(z_force_error) > 0.1:
                 delta_xy = (
