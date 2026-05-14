@@ -364,6 +364,14 @@ def main():
         help="Use ground-truth goal position and zero yaw for the target (yellow) brick "
         "instead of the PE estimate. Useful for isolating grasp-side PE errors.",
     )
+    argparse.add_argument(
+        "--grasp_z_offset",
+        type=float,
+        default=None,
+        help="Additive Z offset on the final grasp height for the 3DOF PE branch "
+        "(metres; positive = gripper closes higher above the table). "
+        "If omitted, defaults to 2 mm in --eval and 0 mm otherwise.",
+    )
     args = argparse.parse_args()
     config = Config()
     config = _override_config_for_task(args, config)

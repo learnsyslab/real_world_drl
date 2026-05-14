@@ -23,7 +23,12 @@ from scipy.spatial.transform import Rotation
 from crisp_drl.agents.shared.algorithm_config import Config
 from crisp_drl.agents.shared.insertion_env_config import LegoConfig, LegoConfig2x4
 from crisp_drl.agents.shared.insertion_wrapper_s import rot_matrix_to_euler_xyz
-from crisp_drl.envs.pose_estimation_helper import PoseEstimationHelper, euler_to_rot_matrix
+from crisp_drl.envs.pose_estimation_helper import (
+    PoseEstimationHelper,
+    TCP_R_CAM,
+    TCP_T_TCP_CAM,
+    euler_to_rot_matrix,
+)
 from crisp_gym.envs.env_wrapper import LastObservationWrapper
 
 
@@ -65,6 +70,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         workspace_box: tuple = ((0.2, 0.85), (-0.4, 0.4), (-0.1, 0.7)),
         pe_3dof: bool = False,
         use_gt_target_goal: bool = False,
+        grasp_z_offset: float = 0.0,
     ):
         super().__init__(env)
         self.alg_config = alg_config
@@ -107,6 +113,10 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         self.is_eval = is_eval
         self.use_ft_controller = use_ft_controller
         self.workspace_box = workspace_box
+        # Additive Z offset on the final grasp height (3DOF branch). Positive
+        # → gripper closes higher above the table. Useful at eval to give the
+        # gripper some clearance for a soft re-grasp.
+        self.grasp_z_offset = float(grasp_z_offset)
 
         # FT constants (same as InsertionWrapper3DoFRotZ)
         self.z_force_target = -0.7
@@ -390,27 +400,48 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         current_obs,
         target_rz,
         tol=np.deg2rad(0.3),
-        max_drive_iter=200,
+        max_drive_iter=400,
         max_settle_iter=30,
         max_step=None,
+        accel_step=None,
+        decel_gain=0.5,
     ):
-        # Adaptive: step = min(max_step, |err|) — large steps far from target,
-        # proportionally smaller steps as error shrinks, final step is exact.
+        """Smooth yaw move with slew-rate-limited accel + proportional decel.
+
+        Per-cycle step magnitude is the minimum of:
+          - max_step:                cruise cap (default = safety_box_angular_step_size)
+          - prev + accel_step:       acceleration cap (ramp 0 → max_step)
+          - max(decel_gain*|err|,    proportional braking near target,
+                accel_step):        floored so we don't stall before tol
+          - |err|:                   never overshoot
+        """
         if max_step is None:
             max_step = self.safety_box_angular_step_size
+        if accel_step is None:
+            accel_step = max_step / 4.0   # ramp 0 → max_step over 4 cycles
         obs = current_obs
         raw_rot = obs["observation.state.cartesian"][3:6]
         rz_err = self._yaw_error_to(raw_rot, target_rz)
         print(
             f"[go_to_rotation_z] target={np.rad2deg(target_rz):.2f}° "
             f"initial_err={np.rad2deg(rz_err):.2f}° "
+            f"max_step={np.rad2deg(max_step):.2f}°/cyc "
+            f"accel={np.rad2deg(accel_step):.2f}°/cyc² "
             f"raw_obs[3:6]={np.round(np.rad2deg(raw_rot), 2)}"
         )
         n = 0
+        prev_drz_mag = 0.0
         while abs(rz_err) > tol and n < max_drive_iter:
-            drz = np.sign(rz_err) * min(max_step, abs(rz_err))
+            drz_mag = min(
+                max_step,
+                prev_drz_mag + accel_step,
+                max(decel_gain * abs(rz_err), accel_step),
+                abs(rz_err),
+            )
+            drz = np.sign(rz_err) * drz_mag
             obs, *_ = self._step_yaw(drz)
             rz_err = self._yaw_error_to(obs["observation.state.cartesian"][3:6], target_rz)
+            prev_drz_mag = drz_mag
             n += 1
         raw_rot_after = obs["observation.state.cartesian"][3:6]
         print(
@@ -621,6 +652,25 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         result = world_D_world_obj.copy()
         result[:3, :3] = Rotation.from_euler("z", yaw).as_matrix()
         return result
+
+    def _pose_world_to_cam(
+        self, world_pose: np.ndarray, tcp_cart: np.ndarray
+    ) -> np.ndarray:
+        """Inverse of PoseEstimationHelper._compute_pose_in_world_frame.
+
+        Maps a 4x4 world-frame object pose back into the wrist-cam frame
+        using the same TCP→cam extrinsics. Used so the PE visualization
+        overlay can render the 3DoF-projected pose instead of the raw
+        cam-frame pose returned by FoundationPose.
+        """
+        world_R_tcp = euler_to_rot_matrix(*tcp_cart[3:6])
+        world_R_cam = world_R_tcp @ TCP_R_CAM
+        world_T_world_cam = tcp_cart[:3] + world_R_tcp @ TCP_T_TCP_CAM
+        cam_R_world = world_R_cam.T
+        cam_pose = np.eye(4)
+        cam_pose[:3, :3] = cam_R_world @ world_pose[:3, :3]
+        cam_pose[:3, 3] = cam_R_world @ (world_pose[:3, 3] - world_T_world_cam)
+        return cam_pose
 
     def compute_alignment_rpy(self, world_D_world_lav: np.ndarray) -> np.ndarray:
         """Demo-relative orientation for the gripper at the lavender grasp."""
@@ -1047,12 +1097,12 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                     print(f"[3DOF DEBUG]   Using alternative (smaller rotation).")
                     grasp_yaw = alt_grasp_yaw
                     delta_rz = alt_delta_rz
-            self.obs = self.go_to_rotation_z(self.obs, target_rz=grasp_yaw, max_step=np.deg2rad(3.0))
+            self.obs = self.go_to_rotation_z(self.obs, target_rz=grasp_yaw, max_step=np.deg2rad(0.5))
             actual_rz_deg = np.rad2deg(self._current_rz())
             print(f"3DOF: after yaw align: actual_rz={actual_rz_deg:.2f} deg (target={np.rad2deg(grasp_yaw):.2f} deg)")
 
             # ---- 3DOF: hover above refined X-Y, then descend ------------ #
-            grasp_z = self.grasp_position_ground_truth[2]
+            grasp_z = self.grasp_position_ground_truth[2] + self.grasp_z_offset
             # Apply calibrated TCP offset (object frame → world frame via grasp yaw).
             # o_T_o_tcpgrasp_lavender encodes how far from the brick centroid the TCP
             # was in the demo; rotating it by grasp_yaw gives the world-frame correction.
@@ -1082,7 +1132,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             pe_view_xyz = np.array([
                 self.obs["observation.state.cartesian"][0],
                 self.obs["observation.state.cartesian"][1],
-                self.grasp_position_ground_truth[2] + final_pe_lift,
+                self.grasp_position_ground_truth[2] + self.grasp_z_offset + final_pe_lift,
             ])
             self.obs = self.go_to_cartesian(
                 self.obs, target_cartesian=pe_view_xyz,
@@ -1090,6 +1140,18 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             )
             try:
                 final_grasp, final_det = self._estimate_lego_world_single(self.grasp_color)
+                # Force flat-lego 3DoF projection (Z up, pure Rz(yaw)) on the
+                # estimated world pose. _estimate_lego_world_single already does
+                # this when pe_3dof=True; calling here is idempotent and makes
+                # the assumption explicit at the consumer site.
+                final_grasp = self._project_pose_to_3dof(final_grasp)
+                # Mirror the projection into pose_cam so the viz overlay shows
+                # the same flat-projected orientation as the world pose used
+                # downstream (otherwise the overlay would render the raw,
+                # tilted FoundationPose result).
+                final_det["pose_cam"] = self._pose_world_to_cam(
+                    final_grasp, final_det["tcp_cart"]
+                )
                 # Save visualization regardless of validation — most useful when PE jitters.
                 try:
                     self._viz_save_single(
@@ -1136,16 +1198,28 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                     f"delta_yaw={np.rad2deg(delta_yaw):.2f} deg "
                     f"(apply={apply_yaw})"
                 )
+                # Order: (1) XY translate at current hover Z, (2) rotate yaw,
+                # (3) descend to grasp_z. Translating before rotating avoids
+                # levering the brick on the fingers when off-center.
+                target_xy = final_grasp_xy if apply_xy else cur_xy
+                current_z = self.obs["observation.state.cartesian"][2]
+                if apply_xy:
+                    xy_hover_xyz = np.array([target_xy[0], target_xy[1], current_z])
+                    print(f"3DOF: XY translate at hover Z = {xy_hover_xyz}")
+                    self.obs = self.go_to_cartesian(
+                        self.obs, target_cartesian=xy_hover_xyz,
+                        fine_resolution=0.0005, max_settle_iter=30,
+                    )
                 if apply_yaw:
                     self.obs = self.go_to_rotation_z(
-                        self.obs, target_rz=final_yaw, max_step=np.deg2rad(2.0)
+                        self.obs, target_rz=final_yaw, max_step=np.deg2rad(1.0)
                     )
                     grasp_yaw = final_yaw  # update for applied_alignment_rpy below
-                target_xy = final_grasp_xy if apply_xy else cur_xy
                 refined_grasp_xyz = np.array([
-                    target_xy[0], target_xy[1], self.grasp_position_ground_truth[2]
+                    target_xy[0], target_xy[1],
+                    self.grasp_position_ground_truth[2] + self.grasp_z_offset,
                 ])
-                print(f"3DOF: re-descending to refined grasp = {refined_grasp_xyz}")
+                print(f"3DOF: descending to refined grasp = {refined_grasp_xyz}")
                 self.obs = self.go_to_cartesian(
                     self.obs, target_cartesian=refined_grasp_xyz,
                     fine_resolution=0.0002,
@@ -1265,6 +1339,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
 
         # ---- grasp (shared) --------------------------------------------- #
         print("Grasping...")
+        time.sleep(1.0)
         self.env.unwrapped.gripper.set_target(0.4)  # type: ignore
         time.sleep(3.0)
         self.obs, *_ = self._step_zeros()
@@ -1532,7 +1607,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         self,
         push_distance: float = 0.0030,
         pause_before: float = 1.0,
-        pause_after: float = 2.0,
+        pause_after: float = 1.0,
         reinforce: bool = False,
         reinforce_lift: float = 0.0150,
         reinforce_push: float = 0.0100,
@@ -1575,7 +1650,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         print(f"[InsertionWrapper3DoFRotZPE] snap_push: reinforce — lifting {reinforce_lift*1e3:.1f} mm...")
         lift1_target = regrasp_target + np.array([0.0, 0.0, reinforce_lift])
         t0 = time.time()
-        while time.time() - t0 < 3.0:
+        while time.time() - t0 < 2.0:
             err = lift1_target - self.obs["observation.state.cartesian"][:3]
             self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
 

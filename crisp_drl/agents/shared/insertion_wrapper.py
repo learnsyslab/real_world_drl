@@ -4,6 +4,7 @@ import time
 from typing import Any, Dict, Optional
 from gymnasium import Wrapper, spaces
 import numpy as np
+from scipy.spatial.transform import Rotation
 import logging
 
 # Module-level logger
@@ -488,6 +489,7 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         config: Config,
         grasp_randomisation_x_range=(-0.0035, 0.0035), # -0.002, 0.002
         grasp_randomisation_z_range=(0.0000, 0.0020), # -0.005, 0.002
+        grasp_randomisation_rz_range=(-np.deg2rad(6), np.deg2rad(6)),
         goal_position_randomisation_xy_range=(-0.0028, 0.0028),
         goal_orientation_randomisation_angle=np.deg2rad(3),
         safety_box_radius=0.005, # 0.003 originally
@@ -509,6 +511,7 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         self.goal_position_ground_truth = config.goal_position_ground_truth
         self.grasp_randomisation_x_range = grasp_randomisation_x_range
         self.grasp_randomisation_z_range = grasp_randomisation_z_range
+        self.grasp_randomisation_rz_range = grasp_randomisation_rz_range
         self.goal_position_randomisation_xy_range = goal_position_randomisation_xy_range
         self.goal_orientation_randomisation_angle = goal_orientation_randomisation_angle
         self.reset_grasp_delta = np.zeros(3)
@@ -611,17 +614,22 @@ class InsertionWrapper3DoFRotZ(Wrapper):
                 n += 1
         return obs
 
-    def _yaw_error_to(self, current_rotvec, target_rz):
-        """Robust yaw error via SO(3): goal=[0,0,target_rz] minus current rotvec.
+    def _world_yaw(self, current_orientation) -> float:
+        """World-frame yaw (rad) of the EE from cartesian[3:6].
 
-        Returns the z-component of the rotvec rotation error. Robust to small
-        rx/ry drift in ``current_rotvec`` (does not assume rx=ry=0).
+        cartesian[3:6] is intrinsic XYZ Euler (env default representation),
+        NOT a rotvec. Convert via Rotation.from_euler then read world yaw
+        as atan2(R[1,0], R[0,0]) - robust to the 180-deg x-flip at home.
         """
-        goal_rotvec = np.array([0.0, 0.0, float(target_rz)], dtype=np.float64)
-        rot_err = LastObservationWrapper._relative_rotation_error(
-            goal_rotvec, np.asarray(current_rotvec, dtype=np.float64)
-        )
-        return float(rot_err[2])
+        R = Rotation.from_euler(
+            "xyz", np.asarray(current_orientation, dtype=np.float64)
+        ).as_matrix()
+        return float(np.arctan2(R[1, 0], R[0, 0]))
+
+    def _yaw_error_to(self, current_orientation, target_rz):
+        """World-yaw error to ``target_rz`` (rad), wrapped to [-pi, pi]."""
+        err = float(target_rz) - self._world_yaw(current_orientation)
+        return float((err + np.pi) % (2 * np.pi) - np.pi)
 
     def go_to_rotation_z(
         self, current_obs, target_rz, tol=np.deg2rad(0.3), max_drive_iter=200, max_settle_iter=30
@@ -712,6 +720,7 @@ class InsertionWrapper3DoFRotZ(Wrapper):
             )            
 
             # 2) rotate yaw back to 0 in air — brick stand expects rz=0 brick
+            print("[InsertionWrapper3DoFRotZ] Reset yaw back to 0.00 deg")
             self.obs = self.go_to_rotation_z(self.obs, target_rz=0.0)
 
             #time.sleep(2.0)
@@ -783,24 +792,40 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         grasp_randomisation_z = np.random.uniform(
             self.grasp_randomisation_z_range[0], self.grasp_randomisation_z_range[1]
         )
+        grasp_randomisation_rz = np.random.uniform(
+            self.grasp_randomisation_rz_range[0], self.grasp_randomisation_rz_range[1]
+        )
         self.target_grasp_position[0] += grasp_randomisation_x
         self.target_grasp_position[2] += grasp_randomisation_z
-        
+        self.target_grasp_rotation_z = float(grasp_randomisation_rz)
+
         # self.env.unwrapped.gripper.set_target(0.8)  # type: ignore
         time.sleep(1.0)
-        
+
+        # Rotate gripper to randomised grasp yaw BEFORE descending so fingers
+        # close on the fixtured brick at a yaw offset (simulates PE yaw error).
+        print(
+            f"[InsertionWrapper3DoFRotZ] Grasp yaw randomisation: "
+            f"{np.rad2deg(self.target_grasp_rotation_z):+.2f} deg"
+        )
+        self.obs = self.go_to_rotation_z(self.obs, target_rz=self.target_grasp_rotation_z)
+
         logger.info("Moving to grasp position...")
         self.obs = self.go_to_cartesian(
             self.obs,
             target_cartesian=self.target_grasp_position,
             fine_resolution=0.0002,
         )
+
         logger.info("Grasping...")
         self.env.unwrapped.gripper.set_target(0.48)  # type: ignore
         time.sleep(2.8)
         self.obs, *_ = self._step_zeros()
         self.actual_grasp_position = np.copy(
             self.obs["observation.state.cartesian"][:3]
+        )
+        self.actual_grasp_rotation_z = float(
+            self.obs["observation.state.cartesian"][5]
         )
 
         # pick up quickly
@@ -899,7 +924,11 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         )
 
         # rotate yaw to start_rotation_z BEFORE establishing FT contact
-        logger.info("Rotating yaw to %.2f deg...", np.rad2deg(self.start_rotation_z))
+        print(
+            f"[InsertionWrapper3DoFRotZ] Start yaw (pre-contact): "
+            f"{np.rad2deg(self.start_rotation_z):+.2f} deg "
+            f"(goal_rz={np.rad2deg(self.goal_rotation_z):+.2f} deg)"
+        )
         self.obs = self.go_to_rotation_z(self.obs, target_rz=self.start_rotation_z)
 
         # Do NOT call env.reset() here: switch_to_default_controller() inside
@@ -932,6 +961,8 @@ class InsertionWrapper3DoFRotZ(Wrapper):
             self.actual_grasp_position - self.grasp_position_ground_truth
         )
         reset_info["reset.grasped.delta_estimated"] = self.reset_grasp_delta
+        reset_info["reset.grasped.rotation_z"] = self.actual_grasp_rotation_z
+        reset_info["reset.grasped.rotation_z_target"] = self.target_grasp_rotation_z
         goal_position_offset = self.goal_position - (
             self.goal_position_ground_truth + self.reset_grasp_delta
         )
@@ -1046,7 +1077,7 @@ class InsertionWrapper3DoFRotZ(Wrapper):
         )
         press_target = self.obs["observation.state.cartesian"][:3] + np.array([0.0, 0.0, -reinforce_push])
         t0 = time.time()
-        while time.time() - t0 < 1.5:
+        while time.time() - t0 < 1.0:
             err = press_target - self.obs["observation.state.cartesian"][:3]
             self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
 
