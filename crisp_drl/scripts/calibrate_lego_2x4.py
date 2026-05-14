@@ -49,7 +49,7 @@ print("Env created.")
 env.wait_until_ready()
 print("Env ready.")
 env.gripper.open()
-env.home()
+# env.home()
 env.reset()
 print("Env reset.")
 
