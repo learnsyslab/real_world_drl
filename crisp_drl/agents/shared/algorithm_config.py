@@ -43,19 +43,20 @@ class Config:
     """if true, use camera image observations"""
     total_timesteps: int = 199_000
     """total timesteps of the experiments"""
-    pre_train_save_interval: int = 1
-    """epochs between saving pre-training checkpoints"""
+    pre_train_save_interval: float = 0.5
+    """passes through the pre-train buffer between checkpoints once utd>=1
+    (e.g. 0.5 → save at 1.0, 1.5, 2.0, …; 1.0 → integer passes only)"""
     pre_train_save_interval_pre_1: float = 0.1
     """epochs between saving pre-training checkpoints before utd=1"""
     pre_train_gradient_steps: int = 250_000
     """number of gradient steps for offline pre-training"""
     pre_train_gradient_steps_save_interval: int = 5_000
     """number of gradient steps between checkpoints for offline pre-training"""
-    episode_length: int = 180
+    episode_length: int = 240 # 180
     """the maximum length of an episode"""
     buffer_size: int = 200_000
     """the replay memory buffer size"""
-    gamma: float = 0.97
+    gamma: float = 0.97 #  0.97
     """the discount factor gamma"""
     n_step_return: int = 1
     """the number of steps to look ahead for multi-step returns"""

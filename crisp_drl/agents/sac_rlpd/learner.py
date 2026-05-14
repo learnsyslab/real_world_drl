@@ -231,6 +231,7 @@ class SACLearner:
                 f"Learner starts training... (total steps: {int(self.replay_buffer.size() * self.config.utd_ratio)})"
             )
             last_save_pre_utd1 = 0.0
+            last_save_post_utd1 = 0.0
             for self.current_training_step in range(
                 int(self.replay_buffer.size() * self.config.utd_ratio)
             ):
@@ -238,7 +239,7 @@ class SACLearner:
                 n_pass_raw = (
                     self.current_training_step + 1
                 ) / self.replay_buffer.size()
-                # checkpoint for utd<1
+                # checkpoint for utd<1 (fine-grained, every pre_train_save_interval_pre_1)
                 if (
                     n_pass_raw < 1
                     and n_pass_raw // self.config.pre_train_save_interval_pre_1
@@ -253,15 +254,28 @@ class SACLearner:
                     )
                     self.save_model(n_pass_cleaned)
 
-                # checkpoints for utd >= 1
-                if (self.current_training_step + 1) % self.replay_buffer.size() == 0:
-                    n_pass = int(n_pass_raw)
-                    logging.info(
-                        f"{time.strftime('%Y-%m-%d %H:%M:%S')} Pass {n_pass} through the pre-train buffer completed."
+                # checkpoint for utd>=1 (crossing detection at every pre_train_save_interval —
+                # supports non-integer intervals like 0.5 to save at 1.0, 1.5, 2.0, …)
+                if (
+                    n_pass_raw >= 1
+                    and n_pass_raw // self.config.pre_train_save_interval
+                    != last_save_post_utd1 // self.config.pre_train_save_interval
+                ):
+                    last_save_post_utd1 = n_pass_raw
+                    n_pass_cleaned = (
+                        n_pass_raw // self.config.pre_train_save_interval
+                    ) * self.config.pre_train_save_interval
+                    # Preserve the legacy "pretrain_3" (int) directory name when
+                    # the pass count is whole; non-integer values get "pretrain_3.50".
+                    pass_label = (
+                        int(n_pass_cleaned)
+                        if float(n_pass_cleaned).is_integer()
+                        else n_pass_cleaned
                     )
-                    if n_pass % self.config.pre_train_save_interval == 0:
-                        # model checkpoint
-                        self.save_model(n_pass)
+                    logging.info(
+                        f"{time.strftime('%Y-%m-%d %H:%M:%S')} Pass {pass_label} through the pre-train buffer completed."
+                    )
+                    self.save_model(pass_label)
             print("Learner finished training.")
 
         except SystemExit:

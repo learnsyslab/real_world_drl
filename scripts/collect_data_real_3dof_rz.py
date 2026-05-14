@@ -22,7 +22,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 
 # Alternate between perfect goal-seeking action (with prob 1-p) and uniform random (p)
-p = 0.82 # 0.70 to start with
+p = 0.70 # 0.70 to start with
 # p = 0.0 # perfect action test
 N_ROLLOUTS = 30 # 10 to start with
 
@@ -39,12 +39,12 @@ perfect_action_magnitude_rz = perfect_action_magnitude * pe_accuracy_ratio_rot_t
 ideal_goal_pos_rz = 0.0  # absolute world yaw target
 
 base_exp_name = "run_4_3dof_rz"
-#start_time_tag = datetime.now().strftime("%m%d_%H_%M")
+start_time_tag = datetime.now().strftime("%m%d_%H_%M")
 #exp_name = f"{base_exp_name}_{p}_{start_time_tag}"
 
 # Continue from folder, eg. "run_4_3dof_rz_0.7_0501_10_57"
-#exp_name = "run_4_3dof_rz_0.82_0512_13_49"
-exp_name = "run_4_3dof_rz_0.8-0.82_0512"
+exp_name = "run_4_3dof_rz_0.7_0514_13_59"
+#exp_name = "run_4_3dof_rz_0.8-0.82_0512"
 #exp_name = "run_4_3dof_rz_0.7_0501_11_48_images"  # with images
 
 repo_id = f"collect_data_real/{exp_name}"
@@ -58,7 +58,7 @@ config.max_action = np.array(
     [
         0.00025, # 0.00025
         0.00025, # 0.00025
-        np.deg2rad(0.5),
+        np.deg2rad(0.8), # 0.5
     ]
 )
 
