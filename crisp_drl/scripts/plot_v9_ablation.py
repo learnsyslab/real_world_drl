@@ -132,6 +132,13 @@ def main():
     dataset_size_means = np.array(dataset_size_means)
     dataset_size_stds = np.array(dataset_size_stds)
 
+    # Print mean dataset size (number of transitions) per hyperparameter
+    print("\nMean dataset size (number of transitions) per hyperparameter:")
+    for hp, mean_sz, std_sz in zip(
+        hyperparams_sorted, dataset_size_means, dataset_size_stds
+    ):
+        print(f"  hp={hp}: mean={mean_sz:.1f}, std={std_sz:.1f} (transitions)")
+
     # Plot
     viridis = cm.get_cmap("viridis")
 
@@ -162,7 +169,7 @@ def main():
     fig_left.savefig("eval/v9_ablation_dataset_size.png", dpi=150, bbox_inches="tight")
 
     # Figure 2: success vs length.
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(8, 4))
 
     # Draw uncertainty ellipses unless disabled via CLI.
     if not args.no_variance_ellipses:
@@ -222,10 +229,25 @@ def main():
     ax.set_xlim(-0.05, 1.05)
     ax.set_ylim(-5, 125)
     ax.set_title(
-        "Dataset Mean Successful Rollout Length vs Success Rate by $p_{rand}$",
+        "Data collection $p_{rand}$ vs SR and dataset size",
         fontsize=14,
     )
     ax.grid(True, alpha=0.3)
+
+    # Add right-hand y-axis mapping MSRL (left y-axis) to dataset size (transitions).
+    # Mapping provided: MSRL=20 -> dataset=9000, MSRL=120 -> dataset=45000
+    # Linear map: dataset = a * MSRL + b -> a = 360, b = 1800
+    a = 360.0
+    b = 1800.0
+    ax_right = ax.twinx()
+    left_ylim = ax.get_ylim()
+    ax_right.set_ylim(a * left_ylim[0] + b, a * left_ylim[1] + b)
+    # Set two ticks corresponding to MSRL=20 and MSRL=120
+    r1 = int(a * 20.0 + b)
+    r2 = int(a * 120.0 + b)
+    ax_right.set_yticks([r1, r2])
+    ax_right.set_yticklabels([f"{r1}", f"{r2}"])
+    ax_right.set_ylabel("Dataset size (number of transitions)", fontsize=12)
 
     # Add colorbar for hyperparameter
     sm = cm.ScalarMappable(
@@ -233,10 +255,11 @@ def main():
         norm=Normalize(vmin=min(labels), vmax=max(labels)),
     )
     sm.set_array([])
-    cbar = plt.colorbar(sm, ax=ax, pad=0.02)
+    # Place the colorbar to the right and increase padding to avoid overlap with plot
+    cbar = fig.colorbar(sm, ax=ax, pad=0.12, fraction=0.05)
     cbar.set_label("$p_{rand}$", fontsize=12)
 
-    fig.tight_layout()
+    # fig.tight_layout()
     fig.savefig("eval/v9_ablation_success_vs_length.png", dpi=150, bbox_inches="tight")
     print(
         "\nSaved to eval/v9_ablation_dataset_size.png and eval/v9_ablation_success_vs_length.png"

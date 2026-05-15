@@ -183,6 +183,36 @@ def build_latex_table(hyperparameters, stats):
     return "\n".join(lines)
 
 
+def plot_max_stats_bar_chart(stats, output_path: Path, title: str = "Policy  SR"):
+    """Plot the maximum mean SR per hyperparameter with std error bars."""
+    available_hps = [hp for hp in HYPERPARAMETERS if hp in stats]
+    if not available_hps:
+        return
+
+    labels = [hp_to_str(hp) for hp in available_hps]
+    means = [stats[hp]["max_mean"] for hp in available_hps]
+    stds = [stats[hp]["std_at_max"] for hp in available_hps]
+    colors = [
+        HP_COLORS.get(hp, TAB10(i % TAB10.N)) for i, hp in enumerate(available_hps)
+    ]
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.8))
+    x = np.arange(len(available_hps))
+    ax.bar(
+        x, means, yerr=stds, capsize=5, color=colors, edgecolor="black", linewidth=0.6
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=12)
+    ax.set_xlabel("Policy", fontsize=13)
+    ax.set_ylabel("SR", fontsize=13)
+    ax.set_title(title, fontsize=16)
+    ax.tick_params(axis="y", labelsize=12)
+    ax.set_ylim(0.0, 1.05)
+    ax.grid(True, axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+
+
 def main():
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -207,6 +237,7 @@ def main():
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     fig.savefig(PLOTS_DIR / "pretrain_success_combined.png", dpi=150)
     stats = max_stats_by_hyperparameter(HYPERPARAMETERS, PASSES)
+    plot_max_stats_bar_chart(stats, PLOTS_DIR / "pretrain_success_max_stats_bar.png")
     latex_table = build_latex_table(HYPERPARAMETERS, stats)
     if latex_table:
         table_path = PLOTS_DIR / "pretrain_success_max_table.tex"

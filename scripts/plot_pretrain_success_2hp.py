@@ -226,15 +226,55 @@ def plot_combined(hp2_values: list[int], filename: str):
     fig.suptitle("Success Rate vs UTD", fontsize=16)
     fig.tight_layout()
     # fig.subplots_adjust(top=0.86)
-    fig.savefig(CHECKPOINTS_DIR.parent / "scripts" / filename, dpi=150)
+    fig.savefig(CHECKPOINTS_DIR.parent / "plots" / filename, dpi=150)
+
+
+def plot_sr_vs_sensors(hp1_values: list[str], hp2: int, filename: str):
+    """Bar chart of max SR (over passes) with std dev for a fixed HP2, comparing HP1."""
+    means = []
+    stds = []
+    labels = []
+
+    for hp1 in hp1_values:
+        entry = compute_sr_stats(hp1, hp2)
+        if entry is None:
+            means.append(0.0)
+            stds.append(0.0)
+        else:
+            mean, std, _ = entry
+            means.append(mean)
+            stds.append(std)
+        labels.append(hp1_to_str(hp1))
+
+    fig, ax = plt.subplots(figsize=(5, 5))
+    x = np.arange(len(labels))
+    cmap = plt.cm.tab10
+    colors = [cmap(i_to_cmap(i)) for i in range(len(labels))]
+
+    bars = ax.bar(x, means, yerr=stds, capsize=6, color=colors, alpha=0.9)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=14)
+    ax.set_ylabel("Success Rate", fontsize=14)
+    ax.set_ylim(0.95, 1.005)
+    ax.set_title("SR vs sensors", fontsize=18)
+    ax.grid(axis="y", alpha=0.3)
+    ax.tick_params(axis="both", which="major", labelsize=12)
+
+    for xi, m in zip(x, means):
+        ax.annotate(f"{m:.3f}", (xi, m + 0.002), ha="center", va="bottom", fontsize=12)
+
+    fig.tight_layout()
+    fig.savefig(CHECKPOINTS_DIR.parent / "plots" / filename, dpi=150)
 
 
 def main():
     plot_combined(COMBINED_HP2_VALUES, "pretrain_success_d400_d300_d200.png")
+    # Bar chart comparing HP1 choices for HP2=400
+    plot_sr_vs_sensors(HP1_VALUES, 400, "sr_vs_sensors_d400.png")
     latex_table = build_sensor_choice_table(TABLE_HP1_VALUES, COMBINED_HP2_VALUES)
     print(latex_table)
     with open(
-        CHECKPOINTS_DIR.parent / "scripts" / "pretrain_sensor_choice_table.tex", "w"
+        CHECKPOINTS_DIR.parent / "plots" / "pretrain_sensor_choice_table.tex", "w"
     ) as f:
         f.write(latex_table + "\n")
 
