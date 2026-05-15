@@ -398,6 +398,194 @@ def build_latex_table_pretrain_3hp() -> str:
     return "\n".join(lines)
 
 
+def compute_all_metrics() -> dict[str, dict[str, float | str]]:
+    """Compute dataset and performance metrics for every experiment.
+
+    Returns a mapping exp_name -> metrics dict (same keys as in
+    build_latex_table_pretrain_3hp's internal `metrics_by_exp`).
+    """
+    metrics_by_exp: dict[str, dict[str, float | str]] = {}
+
+    for group in TABLE_LAYOUT:
+        for block in group["blocks"]:
+            truncation = int(block["L"])
+            for exp_name in block["experiments"]:
+                dc_sr, msrl, avg_actions = compute_dataset_metrics(exp_name, truncation)
+                max_stats = compute_max_sr_stats(exp_name)
+                if max_stats is None:
+                    max_sr, corr_std, corr_utd = float("nan"), float("nan"), "--"
+                else:
+                    max_sr, corr_std, utd = max_stats
+                    corr_utd = format_utd(utd)
+                metrics_by_exp[exp_name] = {
+                    "dataset_size": float(extract_dataset_size(exp_name)),
+                    "dc_sr": dc_sr,
+                    "msrl": msrl,
+                    "avg_actions": avg_actions,
+                    "max_sr": max_sr,
+                    "corr_std": corr_std,
+                    "corr_utd": corr_utd,
+                }
+
+    return metrics_by_exp
+
+
+def plot_mean_max_sr_vs_dataset_size(metrics_by_exp: dict[str, dict[str, float | str]]):
+    """Scatter plot of mean max SR vs dataset size.
+
+    Marker selection based on the replay suffix base (15/20/25/30):
+    - _15 -> circle
+    - _20 -> x
+    - _25 -> horizontal line marker
+    - _30 -> vertical line marker
+
+    Different colors for full suffix variants (e.g. '20' vs '20_75'),
+    but the same symbol for variants sharing the same base.
+    """
+    # Build lists
+    xs = []
+    ys = []
+    suffixes = []
+    exp_names = []
+
+    for exp_name, m in metrics_by_exp.items():
+        max_sr = float(m.get("max_sr", float("nan")))
+        if math.isnan(max_sr):
+            continue
+        xs.append(float(m["dataset_size"]))
+        ys.append(max_sr)
+        suffix = extract_replay_suffix(exp_name)
+        suffixes.append(suffix)
+        exp_names.append(exp_name)
+
+    if len(xs) == 0:
+        print("No valid max SR values to plot.")
+        return
+
+    unique_suffixes = sorted(set(suffixes))
+
+    # assign colors to full suffix variants
+    # use a categorical colormap with as many distinct colors as needed
+    cmap = plt.cm.get_cmap("tab20", len(unique_suffixes))
+    colors = {s: cmap(i) for i, s in enumerate(unique_suffixes)}
+
+    # marker mapping by base (15/20/25/30)
+    marker_map = {"15": "o", "20": "x", "25": "_", "30": "|"}
+
+    # make fonts larger for readability
+    plt.rcParams.update({"font.size": 14})
+
+    # filter to dataset sizes between 300 and 700 (inclusive)
+    # and only keep exact suffixes '15','20','25','30'
+    allowed_suffixes = {"15", "20", "25", "30"}
+    filtered = [
+        (x, y, sfx, en)
+        for x, y, sfx, en in zip(xs, ys, suffixes, exp_names)
+        if 300 <= x <= 700 and sfx in allowed_suffixes
+    ]
+
+    if len(filtered) == 0:
+        print("No data in dataset-size range 300-700 to plot.")
+        return
+
+    fx, fy, fsfx, fen = map(list, zip(*filtered))
+
+    unique_suffixes_plot = sorted(set(fsfx))
+
+    # use a categorical colormap sized to the plotted suffix count
+    cmap = plt.cm.get_cmap("tab20", len(unique_suffixes_plot))
+    colors = {s: cmap(i) for i, s in enumerate(unique_suffixes_plot)}
+
+    # make the figure narrower
+    fig, ax = plt.subplots(figsize=(5.5, 5))
+
+    # plotting: thicker marker edges, larger markers
+    for x, y, sfx, en in zip(fx, fy, fsfx, fen):
+        base = sfx.split("_")[0]
+        marker = marker_map.get(base, "o")
+        # make '-' and '|' markers thicker and assign specific colors
+        lw = 3.0 if marker in ("_", "|") else 1.2
+        # override colors for horizontal and vertical line markers
+        if marker == "_":
+            marker_color = "green"
+        elif marker == "|":
+            marker_color = "orange"
+        else:
+            marker_color = colors[sfx]
+
+        ax.scatter(
+            x,
+            y,
+            marker=marker,
+            color=marker_color,
+            s=140,
+            edgecolors="k",
+            linewidths=lw,
+            zorder=3,
+        )
+
+    ax.set_xlabel("Dataset size (|D|)")
+    ax.set_ylabel("Mean max SR")
+    ax.set_title("Exploration region vs SR and dataset size")
+    ax.set_ylim(0.945, 1.005)
+
+    # build legend labels from suffix: e.g. base*0.4 -> mm, and p_rand from suffix
+    def suffix_label(s: str) -> str:
+        base = int(s.split("_")[0])
+        mm = int(round(base * 0.4))
+        return f"{mm}mm"
+
+    color_handles = []
+    for s in unique_suffixes_plot:
+        base = s.split("_")[0]
+        mk = marker_map.get(base, "o")
+        label = suffix_label(s)
+        mew = 3.0 if mk in ("_", "|") else 1.2
+        # ensure legend uses the same color overrides as points
+        if mk == "_":
+            legend_color = "green"
+        elif mk == "|":
+            legend_color = "orange"
+        else:
+            legend_color = colors[s]
+        color_handles.append(
+            Line2D(
+                [0],
+                [0],
+                marker=mk,
+                color=legend_color,
+                linestyle="None",
+                markersize=10,
+                label=label,
+                markeredgewidth=mew,
+            )
+        )
+
+    ax.legend(
+        handles=color_handles,
+        title="Exploration region",
+        loc="lower right",
+        fontsize=12,
+        title_fontsize=12,
+    )
+
+    # set x-ticks to the requested dataset sizes and limit x-axis
+    ax.set_xticks([300, 400, 500, 600, 700])
+    ax.set_xlim(280, 720)
+
+    ax.grid(True, linestyle="--", alpha=0.3)
+    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = PLOTS_DIR / "mean_max_sr_vs_dataset_size.png"
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    print(f"Saved plot to: {out_path}")
+
+
+if __name__ == "__main__":
+    metrics = compute_all_metrics()
+    plot_mean_max_sr_vs_dataset_size(metrics)
+
+
 def build_dataset_color_map() -> dict[int, str]:
     """Map each dataset size (e.g. d300) to a consistent color."""
     # Keep the first four colors and use more distinct colors for higher dataset sizes.

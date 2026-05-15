@@ -6,6 +6,7 @@ runs_actor/
 runs_learner/
 crisp_drl.egg-info
 checkpoints/
+checkpoints_eval/
 pixi.lock
 parquet/
 *parquet*
