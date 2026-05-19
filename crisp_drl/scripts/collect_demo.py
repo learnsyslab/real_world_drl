@@ -139,6 +139,7 @@ if not ARGS.no_viz:
 # Runtime state                                                          #
 # ---------------------------------------------------------------------- #
 exp_name = ARGS.exp_name
+exp_name = "oliver_baseplate"
 save_to_file = ARGS.save
 rot_deg = 1
 rot_deg_z = 0.25

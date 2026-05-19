@@ -43,7 +43,7 @@ def _cam_in_tcp():
     # offset to cam center
     tcp_T_tcp_cam += np.array(
         ##[0.0824748 - 0.0013, 0.0, 0.1034 - 0.0095955 - 0.035 + 0.04]
-        [0.0824748 - 0.0013, 0.0 - 0.0047, -0.1034 + 0.0095955] ### not sure?
+        [0.0824748 - 0.0013, 0.0 - 0.0030, -0.1034 + 0.0095955] ### not sure? -0.0047 added for Y offset to align with PE better
     )  # ? -35mm-z for camera adapter? + ? for aloha gripper instead of franka
     # aloha tcp is 1.3mm in front (x) of gripper center
     # rotate around Y by 155 degrees

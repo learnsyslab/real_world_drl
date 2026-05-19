@@ -125,7 +125,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         self.i_term_clip = 0.001 * 2
 
         # reset / motion constants
-        self.reset_lift_height = 0.020
+        self.reset_lift_height = 0.030
         self.after_grasp_lift_height = 0.016
         self.delta_z_push_reset = 0.003
         self.delta_z_push_reset_step_size = 0.0008
@@ -1612,6 +1612,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         reinforce_lift: float = 0.0150,
         reinforce_push: float = 0.0100,
         reinforce_post_lift: float = 0.0100,
+        reinforce_push_offset_x: float = -0.003,
     ) -> None:
         """Push down push_distance m to seat the brick after success.
 
@@ -1638,17 +1639,30 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         if not reinforce:
             return
 
-        # Record snap position as absolute baseline so all sub-targets are
-        # computed from a known-good Z, not chained relative offsets.
-        regrasp_target = self.obs["observation.state.cartesian"][:3].copy()
-        print(f"[InsertionWrapper3DoFRotZPE] snap_push: reinforce — snap pos Z={regrasp_target[2]*1e3:.1f} mm")
+        # Anchor reinforce sub-targets on the PE-estimated goal brick XY
+        # (TCP-corrected, see goal_position assignment at reset) instead of the
+        # policy-end EE XY. This recenters the closing/pressing/regrasp over
+        # the actual placed brick, so the reinforce push lands on-center even
+        # when the policy terminated a few mm off-axis.
+        snap_pos = self.obs["observation.state.cartesian"][:3].copy()
+        goal_xy_pe = np.asarray(self.goal_position[:2], dtype=np.float64).copy()
+        regrasp_target = np.array(
+            [float(goal_xy_pe[0]), float(goal_xy_pe[1]), float(snap_pos[2])]
+        )
+        xy_shift_mm = (goal_xy_pe - snap_pos[:2]) * 1e3
+        print(
+            f"[InsertionWrapper3DoFRotZPE] snap_push: reinforce — anchoring to PE "
+            f"goal XY=[{goal_xy_pe[0]*1e3:.1f}, {goal_xy_pe[1]*1e3:.1f}] mm "
+            f"(shift from snap XY = [{xy_shift_mm[0]:+.2f}, {xy_shift_mm[1]:+.2f}] mm), "
+            f"snap Z={snap_pos[2]*1e3:.1f} mm"
+        )
 
         print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce — opening gripper...")
         self.env.unwrapped.gripper.set_target(0.80)  # type: ignore
         time.sleep(1.0)
 
         print(f"[InsertionWrapper3DoFRotZPE] snap_push: reinforce — lifting {reinforce_lift*1e3:.1f} mm...")
-        lift1_target = regrasp_target + np.array([0.0, 0.0, reinforce_lift])
+        lift1_target = regrasp_target + np.array([reinforce_push_offset_x, 0.0, reinforce_lift]) # -0.003 m offset in X for better push
         t0 = time.time()
         while time.time() - t0 < 2.0:
             err = lift1_target - self.obs["observation.state.cartesian"][:3]
@@ -1659,14 +1673,14 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         time.sleep(2.0)
 
         print(f"[InsertionWrapper3DoFRotZPE] snap_push: reinforce — pressing down {reinforce_push*1e3:.1f} mm...")
-        press_target = regrasp_target + np.array([0.0, 0.0, -(reinforce_push - reinforce_lift)])
+        press_target = regrasp_target + np.array([reinforce_push_offset_x, 0.0, -(reinforce_push - reinforce_lift)])
         t0 = time.time()
         while time.time() - t0 < 2.0:
             err = press_target - self.obs["observation.state.cartesian"][:3]
             self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
 
         print(f"[InsertionWrapper3DoFRotZPE] snap_push: reinforce — lifting {reinforce_post_lift*1e3:.1f} mm...")
-        lift2_target = regrasp_target + np.array([0.0, 0.0, reinforce_post_lift - (reinforce_push - reinforce_lift)])
+        lift2_target = regrasp_target + np.array([reinforce_push_offset_x, 0.0, reinforce_post_lift - (reinforce_push - reinforce_lift)])
         t0 = time.time()
         while time.time() - t0 < 3.0:
             err = lift2_target - self.obs["observation.state.cartesian"][:3]
@@ -1683,7 +1697,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
 
         print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce — re-grasping lego...")
-        self.env.unwrapped.gripper.set_target(0.5)  # type: ignore
+        self.env.unwrapped.gripper.set_target(0.4)  # type: ignore
         time.sleep(2.0)
         print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce done.")
 

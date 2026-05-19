@@ -565,7 +565,7 @@ def create_real_env_v4_3dof_rz_pe(
         grasp_z_offset=(
             getattr(args, "grasp_z_offset", None)
             if (args is not None and getattr(args, "grasp_z_offset", None) is not None)
-            else (0.0018 if is_eval else 0.0)
+            else (0.0028 if is_eval else 0.0)
         ),
     )
 
