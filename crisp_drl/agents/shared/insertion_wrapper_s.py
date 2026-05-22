@@ -110,6 +110,9 @@ class InsertionWrapperSiemens(Wrapper):
         velocity_err=0.0005,
         is_via=True,
         is_rotated=False,
+        coarse_follow_err_tol=0.002,
+        coarse_velocity_tol=0.001,
+        coarse_max_steps=600,
     ):
         relative_pose = (
             [0.0, 0.0, 0.0] if relative_pose_euler is None else relative_pose_euler
@@ -122,21 +125,55 @@ class InsertionWrapperSiemens(Wrapper):
             )
         )
 
-        # coarse
+        # coarse — diagnostic prints + soft timeout so we never hang
+        # silently. Thresholds and max-steps are caller-configurable so
+        # non-critical waypoints (e.g. dropoff) can use looser tolerances
+        # and exit fast.
+        coarse_print_every = 50
+        coarse_step = 0
         while (
             np.any(
                 np.abs(
                     obs["observation.state.target"][:3]
                     - obs["observation.state.cartesian"][:3]
                 )
-                > 0.002
+                > coarse_follow_err_tol
             )
-            or np.linalg.norm(obs["observation.velocity.cartesian"][:3]) > 0.001
+            or np.linalg.norm(obs["observation.velocity.cartesian"][:3])
+            > coarse_velocity_tol
         ):
-            # print(
-            #     f"Waiting... (v={np.linalg.norm(obs['observation.velocity.cartesian'][:3])}, err={target[:3] - obs['observation.state.cartesian'][:3]}, controller err={obs['observation.state.target'][:3] - obs['observation.state.cartesian'][:3]})"
-            # )
             obs, *_ = self.env.step(np.zeros(6))
+            coarse_step += 1
+            if coarse_step % coarse_print_every == 0:
+                follow_err = (
+                    obs["observation.state.target"][:3]
+                    - obs["observation.state.cartesian"][:3]
+                )
+                world_err = target[:3] - obs["observation.state.cartesian"][:3]
+                vel = float(
+                    np.linalg.norm(obs["observation.velocity.cartesian"][:3])
+                )
+                print(
+                    f"  [go_to_waypoint] step {coarse_step}: "
+                    f"follow_err(mm)={np.round(follow_err * 1000, 2)}  "
+                    f"world_err(mm)={np.round(world_err * 1000, 2)}  "
+                    f"|v|(mm/s)={vel * 1000:.2f}"
+                )
+            if coarse_step >= coarse_max_steps:
+                follow_err = (
+                    obs["observation.state.target"][:3]
+                    - obs["observation.state.cartesian"][:3]
+                )
+                world_err = target[:3] - obs["observation.state.cartesian"][:3]
+                print(
+                    f"  [go_to_waypoint] TIMEOUT after {coarse_max_steps} steps. "
+                    f"target={np.round(target[:3], 4)}  "
+                    f"current={np.round(obs['observation.state.cartesian'][:3], 4)}  "
+                    f"follow_err(mm)={np.round(follow_err * 1000, 2)}  "
+                    f"world_err(mm)={np.round(world_err * 1000, 2)}.  "
+                    f"Robot may be at a joint limit, singularity, or safety-box clip."
+                )
+                break
         # fine for terminal points
         if not is_via:
             err = target[:3] - obs["observation.state.cartesian"][:3]
@@ -205,12 +242,36 @@ class InsertionWrapperSiemens(Wrapper):
             np.concatenate((delta, relative_pose))
         )
 
-        # coarse
+        # coarse — diagnostic prints + soft timeout (see go_to_waypoint)
+        coarse_max_steps = 600
+        coarse_print_every = 50
+        coarse_step = 0
         while (
             np.linalg.norm(target - obs["observation.state.cartesian"][:3]) > 0.002
             or np.linalg.norm(obs["observation.velocity.cartesian"][:3]) > 0.001
         ):
             obs, *_ = self.env.step(np.zeros(6))
+            coarse_step += 1
+            if coarse_step % coarse_print_every == 0:
+                world_err = target - obs["observation.state.cartesian"][:3]
+                vel = float(
+                    np.linalg.norm(obs["observation.velocity.cartesian"][:3])
+                )
+                print(
+                    f"  [go_delta] step {coarse_step}: "
+                    f"world_err(mm)={np.round(world_err * 1000, 2)}  "
+                    f"|v|(mm/s)={vel * 1000:.2f}"
+                )
+            if coarse_step >= coarse_max_steps:
+                world_err = target - obs["observation.state.cartesian"][:3]
+                print(
+                    f"  [go_delta] TIMEOUT after {coarse_max_steps} steps. "
+                    f"target={np.round(target, 4)}  "
+                    f"current={np.round(obs['observation.state.cartesian'][:3], 4)}  "
+                    f"world_err(mm)={np.round(world_err * 1000, 2)}.  "
+                    f"Robot may be at a joint limit, singularity, or safety-box clip."
+                )
+                break
         # fine for terminal points
         if not is_via:
             err = target[:3] - obs["observation.state.cartesian"][:3]
@@ -309,14 +370,53 @@ class InsertionWrapperSiemens(Wrapper):
                     pose[3:],
                     distance_err=res,
                 )
-            # dropoff location
+            # dropoff location — non-critical, just need to be roughly
+            # over the dropoff before opening the gripper. Use loose tols
+            # and a short step budget so we don't burn 40 s waiting for
+            # sub-mm convergence here.
             self.obs = self.go_to_waypoint(
                 self.obs,
                 self.env_config.dropoff_point,
+                coarse_follow_err_tol=0.005,  # 5 mm
+                coarse_velocity_tol=0.005,    # 5 mm/s
+                coarse_max_steps=50,
             )
+            # Drop the brick at the dropoff point before going home,
+            # rather than carrying it through the home sweep.
+            print("Opening gripper at dropoff...")
+            self.env.unwrapped.gripper.set_target(0.94)  # type: ignore
+            time.sleep(0.8)
 
         else:
             print("homing first time...")
+            # Robust safety lift on first reset (works from gravity-comp).
+            # We can't use go_delta here: the cartesian controller is not
+            # engaged yet and robot.target_pose is uninitialised, so
+            # go_delta's convergence loop hangs forever.
+            #
+            # Instead, use manipulator_env.move_to(), which is self-contained:
+            #   (a) reads the current EE pose from a ROS topic (does NOT
+            #       require an active controller),
+            #   (b) switches to the cartesian controller,
+            #   (c) opens the gripper,
+            #   (d) runs a planned trajectory at `speed` m/s,
+            #   (e) resets robot.target_pose to the reached pose,
+            #   (f) switches back to the default controller.
+            self.env.unwrapped.robot.wait_until_ready()  # type: ignore
+            current_xyz = np.array(
+                self.env.unwrapped.robot.end_effector_pose.position  # type: ignore
+            )
+            target_xyz = current_xyz + np.array([0.0, 0.0, 0.040])
+            print(f"  lift 40 mm:  {current_xyz}  ->  {target_xyz}")
+            try:
+                self.env.unwrapped.move_to(position=target_xyz, speed=0.03)  # type: ignore
+            except Exception as e:
+                # Don't trap the user at "homing first time..." if the lift
+                # fails (unreachable target, controller refused, etc.) —
+                # fall through to the home() call below, which uses the
+                # joint trajectory controller and is the original behaviour.
+                print(f"  WARNING: move_to lift failed ({e!r}); skipping lift.")
+            print("  homing to custom_first_home_position...")
             self.env.unwrapped.home(  # type: ignore
                 home_config=self.env_config.custom_first_home_position
             )
@@ -345,6 +445,9 @@ class InsertionWrapperSiemens(Wrapper):
 
         # print("Executing before-grasp motion")
         # self.obs, *_ = self.env.step(self.env_config.relative_motion_before_grasp)
+        print("Opening gripper...")
+        self.env.unwrapped.gripper.set_target(0.94)  # type: ignore
+        time.sleep(1.5)
 
         print("Moving to grasp position...")
         self.obs = self.go_to_waypoint(
@@ -355,8 +458,8 @@ class InsertionWrapperSiemens(Wrapper):
             is_via=False,
         )
         print("Grasping...")
-        self.env.unwrapped.gripper.set_target(0.2)  # type: ignore
-        time.sleep(1.0)
+        self.env.unwrapped.gripper.set_target(0.5)  # type: ignore
+        time.sleep(2.2)
         self.obs, *_ = self.env.step(np.zeros(6))
         self.actual_grasp_position = np.copy(
             self.obs["observation.state.cartesian"][:3]
@@ -675,6 +778,9 @@ class InsertionWrapperSiemensPE(Wrapper):
         velocity_err=0.0005,
         is_via=True,
         is_rotated=False,
+        coarse_follow_err_tol=0.002,
+        coarse_velocity_tol=0.001,
+        coarse_max_steps=600,
     ):
         relative_pose = (
             [0.0, 0.0, 0.0] if relative_pose_euler is None else relative_pose_euler
@@ -687,21 +793,55 @@ class InsertionWrapperSiemensPE(Wrapper):
             )
         )
 
-        # coarse
+        # coarse — diagnostic prints + soft timeout so we never hang
+        # silently. Thresholds and max-steps are caller-configurable so
+        # non-critical waypoints (e.g. dropoff) can use looser tolerances
+        # and exit fast.
+        coarse_print_every = 50
+        coarse_step = 0
         while (
             np.any(
                 np.abs(
                     obs["observation.state.target"][:3]
                     - obs["observation.state.cartesian"][:3]
                 )
-                > 0.002
+                > coarse_follow_err_tol
             )
-            or np.linalg.norm(obs["observation.velocity.cartesian"][:3]) > 0.001
+            or np.linalg.norm(obs["observation.velocity.cartesian"][:3])
+            > coarse_velocity_tol
         ):
-            # print(
-            #     f"Waiting... (v={np.linalg.norm(obs['observation.velocity.cartesian'][:3])}, err={target[:3] - obs['observation.state.cartesian'][:3]}, controller err={obs['observation.state.target'][:3] - obs['observation.state.cartesian'][:3]})"
-            # )
             obs, *_ = self.env.step(np.zeros(6))
+            coarse_step += 1
+            if coarse_step % coarse_print_every == 0:
+                follow_err = (
+                    obs["observation.state.target"][:3]
+                    - obs["observation.state.cartesian"][:3]
+                )
+                world_err = target[:3] - obs["observation.state.cartesian"][:3]
+                vel = float(
+                    np.linalg.norm(obs["observation.velocity.cartesian"][:3])
+                )
+                print(
+                    f"  [go_to_waypoint] step {coarse_step}: "
+                    f"follow_err(mm)={np.round(follow_err * 1000, 2)}  "
+                    f"world_err(mm)={np.round(world_err * 1000, 2)}  "
+                    f"|v|(mm/s)={vel * 1000:.2f}"
+                )
+            if coarse_step >= coarse_max_steps:
+                follow_err = (
+                    obs["observation.state.target"][:3]
+                    - obs["observation.state.cartesian"][:3]
+                )
+                world_err = target[:3] - obs["observation.state.cartesian"][:3]
+                print(
+                    f"  [go_to_waypoint] TIMEOUT after {coarse_max_steps} steps. "
+                    f"target={np.round(target[:3], 4)}  "
+                    f"current={np.round(obs['observation.state.cartesian'][:3], 4)}  "
+                    f"follow_err(mm)={np.round(follow_err * 1000, 2)}  "
+                    f"world_err(mm)={np.round(world_err * 1000, 2)}.  "
+                    f"Robot may be at a joint limit, singularity, or safety-box clip."
+                )
+                break
         # fine for terminal points
         if not is_via:
             err = target[:3] - obs["observation.state.cartesian"][:3]
@@ -770,12 +910,36 @@ class InsertionWrapperSiemensPE(Wrapper):
             np.concatenate((delta, relative_pose))
         )
 
-        # coarse
+        # coarse — diagnostic prints + soft timeout (see go_to_waypoint)
+        coarse_max_steps = 600
+        coarse_print_every = 50
+        coarse_step = 0
         while (
             np.linalg.norm(target - obs["observation.state.cartesian"][:3]) > 0.002
             or np.linalg.norm(obs["observation.velocity.cartesian"][:3]) > 0.001
         ):
             obs, *_ = self.env.step(np.zeros(6))
+            coarse_step += 1
+            if coarse_step % coarse_print_every == 0:
+                world_err = target - obs["observation.state.cartesian"][:3]
+                vel = float(
+                    np.linalg.norm(obs["observation.velocity.cartesian"][:3])
+                )
+                print(
+                    f"  [go_delta] step {coarse_step}: "
+                    f"world_err(mm)={np.round(world_err * 1000, 2)}  "
+                    f"|v|(mm/s)={vel * 1000:.2f}"
+                )
+            if coarse_step >= coarse_max_steps:
+                world_err = target - obs["observation.state.cartesian"][:3]
+                print(
+                    f"  [go_delta] TIMEOUT after {coarse_max_steps} steps. "
+                    f"target={np.round(target, 4)}  "
+                    f"current={np.round(obs['observation.state.cartesian'][:3], 4)}  "
+                    f"world_err(mm)={np.round(world_err * 1000, 2)}.  "
+                    f"Robot may be at a joint limit, singularity, or safety-box clip."
+                )
+                break
         # fine for terminal points
         if not is_via:
             err = target[:3] - obs["observation.state.cartesian"][:3]

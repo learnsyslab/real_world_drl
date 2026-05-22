@@ -567,6 +567,10 @@ def create_real_env_v4_3dof_rz_pe(
             if (args is not None and getattr(args, "grasp_z_offset", None) is not None)
             else (0.0028 if is_eval else 0.0)
         ),
+        pe_hand_z=getattr(args, "hand", False) if args is not None else False,
+        grasp_z_offset_pe=(
+            getattr(args, "grasp_z_offset_pe", 0.0) if args is not None else 0.0
+        ),
     )
 
     env = DinoImageEncoderWrapper(

@@ -117,6 +117,9 @@ def launch_actor(args, config, data_queue, parameters_queue, run_name):
             rew_fn,
             eval_json_path=args.eval_json,
             prompt_user=not args.no_user_prompt,
+            save_parquet=args.save_parquet,
+            parquet_dir=args.parquet_dir,
+            parquet_task_name=args.parquet_task_name,
         )
     except Exception as e:
         logging.error(f"Failed to initialize EvalSACActor: {e}", exc_info=True)
@@ -163,12 +166,14 @@ def launch_processes(args, config):
 def _resolve_eval_json(args) -> str:
     if args.eval_json:
         return args.eval_json
+    subdir = getattr(args, "eval_subdir", "eval") or "eval"
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     if args.load_policy:
+        policy_tag = args.load_policy.replace("/", "__")
         return os.path.join(
-            "checkpoints", args.load_policy, f"eval_results_{timestamp}.json"
+            "rollout_data", subdir, f"eval_results_{policy_tag}_{timestamp}.json"
         )
-    return os.path.join("checkpoints", f"eval_results_{timestamp}.json")
+    return os.path.join("rollout_data", subdir, f"eval_results_{timestamp}.json")
 
 
 def main():
@@ -210,13 +215,39 @@ def main():
         type=str,
         default=None,
         help="Output JSON path. Defaults to "
-        "checkpoints/<load_policy>/eval_results_<YYYYmmdd-HHMMSS>.json.",
+        "rollout_data/<eval_subdir>/eval_results_<load_policy>_<YYYYmmdd-HHMMSS>.json.",
+    )
+    parser.add_argument(
+        "--eval_subdir",
+        type=str,
+        default="eval",
+        help="Subdirectory under rollout_data/ for both the JSON results and "
+        "the parquet dataset. Default 'eval'; pass 'eval_ood' (or any other "
+        "name) to isolate runs without colliding with the main eval folder.",
     )
     parser.add_argument(
         "--no_user_prompt",
         action="store_true",
         help="Skip the s/u prompt at episode end. user_success is recorded as "
         "null; success_rate_user is computed only over labelled episodes.",
+    )
+    parser.add_argument(
+        "--save_parquet",
+        action="store_true",
+        help="Save each eval rollout as a LeRobotDataset episode (parquet).",
+    )
+    parser.add_argument(
+        "--parquet_dir",
+        type=str,
+        default=None,
+        help="Override the parquet output dir. Default: "
+        "rollout_data/eval/<load_policy>_<YYYYmmdd-HHMMSS>.",
+    )
+    parser.add_argument(
+        "--parquet_task_name",
+        type=str,
+        default="eval_data",
+        help="LeRobot dataset 'task' field stored per frame.",
     )
 
     # --- mirrored from scripts/run_sac.py (task + safety + PE flags) ---
@@ -258,6 +289,21 @@ def main():
         "--grasp_z_offset",
         type=float,
         default=None,
+    )
+    parser.add_argument(
+        "--hand",
+        action="store_true",
+        help="Use PE-estimated Z (from wrist-cam FoundationPose) for the grasp "
+        "instead of the fixed grasp_position_ground_truth[2]. Flat-laying "
+        "brick assumption is preserved via pe_3dof projection. Only effective "
+        "when --3dof is also set.",
+    )
+    parser.add_argument(
+        "--grasp_z_offset_pe",
+        type=float,
+        default=0.028,
+        help="Additive Z offset (m) applied on top of the PE-estimated brick Z "
+        "when --hand is set. Default 0.0 (use raw PE Z as TCP grasp Z).",
     )
 
     args = parser.parse_args()

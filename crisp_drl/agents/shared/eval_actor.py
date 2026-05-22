@@ -9,6 +9,7 @@ Ctrl+C. The full schema is documented at the bottom of this file.
 import json
 import logging
 import os
+import threading
 import time
 
 import numpy as np
@@ -58,6 +59,9 @@ class EvalSACActor(SACActor):
         rew_fn,
         eval_json_path: str,
         prompt_user: bool = True,
+        save_parquet: bool = False,
+        parquet_dir: "str | None" = None,
+        parquet_task_name: str = "eval_data",
     ):
         super().__init__(args, config, parameters_queue, run_name, env, rew_fn)
         self.eval_json_path = eval_json_path
@@ -70,6 +74,29 @@ class EvalSACActor(SACActor):
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
         logging.info(f"[eval] results will be written to: {self.eval_json_path}")
+
+        # Optional LeRobotDataset (parquet) writer for eval rollouts.
+        self.dataset = None
+        self.save_thread: "threading.Thread | None" = None
+        self.parquet_task_name = parquet_task_name
+        if save_parquet:
+            from pathlib import Path
+
+            from crisp_drl.data.eval_dataset import create_or_load_eval_dataset
+
+            if parquet_dir is None:
+                policy_tag = (
+                    getattr(args, "load_policy", None) or "policy"
+                ).replace("/", "_")
+                ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+                subdir = getattr(args, "eval_subdir", "eval") or "eval"
+                parquet_dir = os.path.join("rollout_data", subdir, f"{policy_tag}_{ts}")
+            parquet_root = Path(parquet_dir).resolve()
+            repo_id = "/".join(parquet_root.parts[-2:])
+            self.dataset = create_or_load_eval_dataset(
+                repo_id=repo_id, root=parquet_root, config=self.config
+            )
+            logging.info(f"[eval] parquet rollouts will be saved to: {parquet_root}")
 
         # GT references for pose-diff diagnostics.
         try:
@@ -84,6 +111,123 @@ class EvalSACActor(SACActor):
             ).reshape(-1)[:3]
         except (AttributeError, TypeError, ValueError):
             self.goal_gt_rpy = None
+
+    def _capture_reset_metadata(self, reset_info: dict) -> dict:
+        """Extract per-episode parquet metadata from a reset_info dict.
+
+        Tolerates the PE wrapper (no `reset.goal_position.offset`) by
+        falling back to `pe_goal - goal_position_ground_truth` when available.
+        """
+        grasp_delta = np.asarray(
+            reset_info.get("reset.grasped.delta_estimated", np.zeros(3)),
+            dtype=np.float32,
+        )
+        offset = reset_info.get("reset.goal_position.offset")
+        if offset is None:
+            pe_goal = reset_info.get("reset.goal_position")
+            if pe_goal is not None and self.goal_gt_xyz is not None:
+                offset = np.asarray(pe_goal, dtype=np.float32)[:2] - np.asarray(
+                    self.goal_gt_xyz, dtype=np.float32
+                )[:2]
+            else:
+                offset = np.zeros(2, dtype=np.float32)
+        goal_position_delta = np.asarray(offset, dtype=np.float32)[:2]
+        return {
+            "grasp_delta": grasp_delta,
+            "goal_position_delta": goal_position_delta,
+            "goal_rotation_z": float(
+                reset_info.get("reset.goal_orientation.rotation_z", 0.0)
+            ),
+            "start_rotation_z": float(
+                reset_info.get("reset.start_orientation.rotation_z", 0.0)
+            ),
+        }
+
+    def _save_eval_episode_async(
+        self,
+        ep_idx: int,
+        all_obs_dicts: list,
+        all_actions: list,
+        all_rewards: list,
+        successful: bool,
+        terminated: bool,
+        episode_meta: dict,
+    ) -> None:
+        """Spawn a background thread that writes one episode to the parquet
+        dataset (mirrors collect_data_real_3dof_rz.py:_save_episode_async).
+
+        action / reward lists are LOCAL copies — collector pads with a NaN
+        action and prepends NaN reward for the terminal frame.
+        """
+        if self.dataset is None:
+            return
+
+        # Pad action / prepend reward NaN for terminal frame (matches collector
+        # lines 328-329). Operate on copies so reward_fn/JSON aren't affected.
+        actions = list(all_actions)
+        rewards = list(all_rewards)
+        actions.append(np.full(3, np.nan, dtype=np.float32))
+        rewards = [float("nan")] + rewards
+
+        grasp_delta = episode_meta["grasp_delta"]
+        goal_position_delta = episode_meta["goal_position_delta"]
+        goal_rotation_z = episode_meta["goal_rotation_z"]
+        start_rotation_z = episode_meta["start_rotation_z"]
+        task_name = self.parquet_task_name
+        control_freq = self.config.control_frequency
+        n_frames = len(all_obs_dicts)
+        dataset = self.dataset
+
+        def _to_np(x, dtype=np.float32):
+            """Convert torch tensor (possibly on CUDA) or array-like to ndarray."""
+            if hasattr(x, "detach"):
+                return x.detach().cpu().numpy().astype(dtype, copy=False)
+            return np.asarray(x, dtype=dtype)
+
+        def _run(started_at: float):
+            for frame_idx in range(n_frames):
+                obs_f = all_obs_dicts[frame_idx]
+                formatted_np = _to_np(obs_f["observation.formatted"])
+                frame_data = {
+                    "observation.state.cartesian": _to_np(obs_f["observation.state.cartesian"]),
+                    "observation.state.joints": _to_np(obs_f["observation.state.joints"]),
+                    "observation.velocity.cartesian": _to_np(obs_f["observation.velocity.cartesian"]),
+                    "observation.velocity.angular": _to_np(obs_f["observation.velocity.angular"]),
+                    "observation.error.cartesian": _to_np(obs_f["observation.error.cartesian"]),
+                    "observation.error.angular": _to_np(obs_f["observation.error.angular"]),
+                    "observation.previous.action": _to_np(obs_f["observation.previous.action"]),
+                    "observation.previous.error.cartesian": _to_np(obs_f["observation.previous.error.cartesian"]),
+                    "observation.previous.error.angular": _to_np(obs_f["observation.previous.error.angular"]),
+                    "observation.state.sensors_bota_ft_sensor": _to_np(obs_f["observation.state.sensors_bota_ft_sensor"]),
+                    "observation.features.wrist_camera": _to_np(obs_f["observation.features.wrist_camera"]),
+                    "observation.formatted": formatted_np,
+                    "action": _to_np(actions[frame_idx]).reshape(-1)[:3],
+                    "perfect_action": np.zeros(3, dtype=np.float32),
+                    "reward": np.array([rewards[frame_idx]], dtype=np.float32),
+                    "success": np.array(
+                        [successful and frame_idx == n_frames - 1], dtype=bool,
+                    ),
+                    "is_terminal": np.array(
+                        [terminated and frame_idx == n_frames - 1], dtype=bool,
+                    ),
+                    "grasp_delta": grasp_delta,
+                    "goal_position_delta": goal_position_delta,
+                    "goal_rotation_z": np.array([goal_rotation_z], dtype=np.float32),
+                    "start_rotation_z": np.array([start_rotation_z], dtype=np.float32),
+                }
+                dataset.add_frame(
+                    frame=frame_data,
+                    task=task_name,
+                    timestamp=frame_idx / control_freq,
+                )
+            dataset.save_episode()
+            elapsed = time.time() - started_at
+            logging.info(f"[eval] saved parquet episode {ep_idx} in {elapsed:.2f}s")
+
+        if self.save_thread is not None:
+            self.save_thread.join()
+        self.save_thread = threading.Thread(target=_run, args=(time.time(),))
+        self.save_thread.start()
 
     @staticmethod
     def _ft_from_obs(obs_dict) -> "np.ndarray | None":
@@ -203,22 +347,31 @@ class EvalSACActor(SACActor):
         )
         return pd
 
-    def _ask_user_success(self, episode_idx: int):
+    def _ask_user_outcome(self, episode_idx: int):
+        """Ask the operator for the ground-truth outcome.
+
+        Returns:
+            'success' | 'partial' | 'fail' | None  (None if prompts disabled
+            or stdin closed)
+        """
         if not self.prompt_user:
             return None
         while True:
             try:
                 ans = input(
-                    f"\n[eval] Episode {episode_idx} — success? [s=success / n=not]: "
+                    f"\n[eval] Episode {episode_idx} — outcome? "
+                    f"[s=success / p=partial / f=fail]: "
                 ).strip().lower()
             except EOFError:
-                logging.warning("[eval] stdin closed; recording user_success=None")
+                logging.warning("[eval] stdin closed; recording user_outcome=None")
                 return None
             if ans == "s":
-                return True
-            if ans == "n":
-                return False
-            print("  please type 's' or 'n'.")
+                return "success"
+            if ans == "p":
+                return "partial"
+            if ans == "f":
+                return "fail"
+            print("  please type 's', 'p', or 'f'.")
 
     @staticmethod
     def _ft_stats(ft_log):
@@ -259,17 +412,28 @@ class EvalSACActor(SACActor):
         cycle_time_s,
         length,
         classifier_succ,
-        user_succ,
+        user_outcome,
         reset_info,
         start_cart,
     ) -> dict:
         force, torque = self._ft_stats(ft_log)
+        # Derived flags so JSON consumers can pick the view they want.
+        #   user_success         : strict (only "success" counts)
+        #   user_success_lenient : lenient (partial counted as success)
+        if user_outcome is None:
+            user_succ_strict = None
+            user_succ_lenient = None
+        else:
+            user_succ_strict = user_outcome == "success"
+            user_succ_lenient = user_outcome in ("success", "partial")
         rec = {
             "episode": len(self.episodes_data),
             "datetime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "length_steps": int(length),
             "cycle_time_s": float(cycle_time_s),
-            "user_success": user_succ,
+            "user_outcome": user_outcome,
+            "user_success": user_succ_strict,
+            "user_success_lenient": user_succ_lenient,
             "classifier_success": bool(classifier_succ),
             "force_N": force,
             "torque_Nm": torque,
@@ -308,12 +472,18 @@ class EvalSACActor(SACActor):
         if n == 0:
             return summary
 
-        user_arr = [e["user_success"] for e in eps if e["user_success"] is not None]
+        # Outcome labels: "success" / "partial" / "fail" (None → not labelled)
+        outcomes = [e.get("user_outcome") for e in eps]
+        n_labelled = sum(1 for o in outcomes if o is not None)
+        n_success = sum(1 for o in outcomes if o == "success")
+        n_partial = sum(1 for o in outcomes if o == "partial")
+        n_fail = sum(1 for o in outcomes if o == "fail")
         clf_arr = [bool(e["classifier_success"]) for e in eps]
+        # Agreement is computed against the strict label.
         agree = [
             int(bool(e["user_success"]) == bool(e["classifier_success"]))
             for e in eps
-            if e["user_success"] is not None
+            if e.get("user_success") is not None
         ]
 
         force_mean = np.array(
@@ -339,10 +509,21 @@ class EvalSACActor(SACActor):
                 "max": float(arr.max()),
             }
 
+        summary["n_user_labelled"] = n_labelled
+        summary["n_user_success"] = n_success
+        summary["n_user_partial"] = n_partial
+        summary["n_user_fail"] = n_fail
+        # Strict: only "success" counts. (Backwards-compat name.)
         summary["success_rate_user"] = (
-            (sum(user_arr) / len(user_arr)) if user_arr else None
+            (n_success / n_labelled) if n_labelled else None
         )
-        summary["n_user_labelled"] = len(user_arr)
+        # Lenient: "success" OR "partial" counts.
+        summary["success_rate_user_lenient"] = (
+            ((n_success + n_partial) / n_labelled) if n_labelled else None
+        )
+        summary["partial_rate_user"] = (
+            (n_partial / n_labelled) if n_labelled else None
+        )
         summary["success_rate_classifier"] = sum(clf_arr) / n
         summary["agreement_rate"] = (sum(agree) / len(agree)) if agree else None
         summary["force_N"] = {
@@ -385,10 +566,11 @@ class EvalSACActor(SACActor):
             "success": _bucket(lambda e: bool(e["classifier_success"])),
             "failure": _bucket(lambda e: not bool(e["classifier_success"])),
         }
-        if any(e["user_success"] is not None for e in eps):
+        if any(e.get("user_outcome") is not None for e in eps):
             summary["pose_diff_by_user"] = {
-                "success": _bucket(lambda e: e["user_success"] is True),
-                "failure": _bucket(lambda e: e["user_success"] is False),
+                "success": _bucket(lambda e: e.get("user_outcome") == "success"),
+                "partial": _bucket(lambda e: e.get("user_outcome") == "partial"),
+                "failure": _bucket(lambda e: e.get("user_outcome") == "fail"),
             }
         return summary
 
@@ -449,10 +631,12 @@ class EvalSACActor(SACActor):
             actual_grasp_pos = reset_info["reset.grasped.position"]
             current_reset_info = reset_info
             current_start_cart = start_cart
+            episode_meta = self._capture_reset_metadata(reset_info)
 
             all_actions: list = []
             all_rewards: list = []
             all_observations: list = [obs]
+            all_obs_dicts: list = [obs_dict]
             all_infos: list = [reset_info]
 
             ft_log: list = []
@@ -481,6 +665,7 @@ class EvalSACActor(SACActor):
 
                 obs = obs_dict["observation.formatted"]
                 all_observations.append(obs)
+                all_obs_dicts.append(obs_dict)
                 all_infos.append(info)
                 all_rewards.append(reward)
 
@@ -505,9 +690,11 @@ class EvalSACActor(SACActor):
                     actual_grasp_pos = reset_info["reset.grasped.position"]
                     current_reset_info = reset_info
                     current_start_cart = start_cart
+                    episode_meta = self._capture_reset_metadata(reset_info)
                     all_actions = []
                     all_rewards = []
                     all_observations = [obs]
+                    all_obs_dicts = [obs_dict]
                     all_infos = [reset_info]
                     ft_log = []
                     episode_length = 0
@@ -543,14 +730,14 @@ class EvalSACActor(SACActor):
                         f"classifier={'OK' if classifier_succ else 'FAIL'})."
                     )
 
-                user_succ = self._ask_user_success(self.episode_num)
+                user_outcome = self._ask_user_outcome(self.episode_num)
 
                 ep_record = self._make_episode_record(
                     ft_log,
                     cycle_time_s,
                     episode_length,
                     classifier_succ,
-                    user_succ,
+                    user_outcome,
                     current_reset_info,
                     current_start_cart,
                 )
@@ -560,7 +747,7 @@ class EvalSACActor(SACActor):
                 pd = ep_record["pose_diff"]
                 logging.info(
                     f"[eval] ep {self.episode_num}: classifier={classifier_succ}, "
-                    f"user={user_succ}, "
+                    f"user={user_outcome}, "
                     f"F_mean={ep_record['force_N']['mean']}, "
                     f"F_max={ep_record['force_N']['max']}, "
                     f"T_mean={ep_record['torque_Nm']['mean']}, "
@@ -581,6 +768,34 @@ class EvalSACActor(SACActor):
                     except Exception:
                         pass
 
+                if self.dataset is not None:
+                    last_events = [e[1] for e in all_infos[-1].get("custom_events", [])]
+                    if any(
+                        ev in last_events
+                        for ev in ("E_CONTROLLER_ISSUE", "E_TORQUE", "E_ROLLOUT_UNUSABLE")
+                    ):
+                        logging.info(
+                            f"[eval] skipping parquet save for ep {self.episode_num} "
+                            f"(events={last_events})"
+                        )
+                    else:
+                        try:
+                            self._save_eval_episode_async(
+                                ep_idx=self.episode_num,
+                                all_obs_dicts=all_obs_dicts,
+                                all_actions=all_actions,
+                                all_rewards=all_rewards,
+                                successful=bool(classifier_succ),
+                                terminated=bool(termination),
+                                episode_meta=episode_meta,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logging.error(
+                                f"[eval] parquet save failed for ep "
+                                f"{self.episode_num}: {exc}",
+                                exc_info=True,
+                            )
+
                 self.episode_num += 1
                 if max_eps > 0 and len(self.episodes_data) >= max_eps:
                     print(
@@ -594,9 +809,11 @@ class EvalSACActor(SACActor):
                 actual_grasp_pos = reset_info["reset.grasped.position"]
                 current_reset_info = reset_info
                 current_start_cart = start_cart
+                episode_meta = self._capture_reset_metadata(reset_info)
                 all_actions = []
                 all_rewards = []
                 all_observations = [obs]
+                all_obs_dicts = [obs_dict]
                 all_infos = [reset_info]
                 ft_log = []
                 episode_length = 0
@@ -618,6 +835,18 @@ class EvalSACActor(SACActor):
                 print("====================================\n")
             except Exception as e:
                 logging.error(f"[eval] failed to flush JSON: {e}", exc_info=True)
+            if self.save_thread is not None:
+                try:
+                    self.save_thread.join()
+                except Exception as e:
+                    logging.error(f"[eval] save_thread join failed: {e}")
+                self.save_thread = None
+            if self.dataset is not None:
+                try:
+                    self.dataset._wait_image_writer()
+                    self.dataset.stop_image_writer()
+                except Exception as e:
+                    logging.error(f"[eval] stop image writer failed: {e}")
             self.close()
 
 
@@ -633,7 +862,9 @@ class EvalSACActor(SACActor):
 #       "datetime": "YYYY-mm-dd HH:MM:SS",
 #       "length_steps": int,
 #       "cycle_time_s": float,
-#       "user_success": bool | null,
+#       "user_outcome": "success" | "partial" | "fail" | null,
+#       "user_success": bool | null,            # strict (only "success")
+#       "user_success_lenient": bool | null,    # lenient ("success" or "partial")
 #       "classifier_success": bool,
 #       "force_N":   {"mean", "max", "fx_mean", "fy_mean", "fz_mean",
 #                     "fx_max_abs", "fy_max_abs", "fz_max_abs"},
@@ -646,12 +877,16 @@ class EvalSACActor(SACActor):
 #   ],
 #   "summary": {
 #     "n_episodes", "n_unusable_skipped",
-#     "success_rate_user", "n_user_labelled",
+#     "n_user_labelled", "n_user_success", "n_user_partial", "n_user_fail",
+#     "success_rate_user",          # strict (partial = failure)
+#     "success_rate_user_lenient",  # lenient (partial = success)
+#     "partial_rate_user",
 #     "success_rate_classifier", "agreement_rate",
 #     "force_N":   {"episode_mean_stats": {mean,std,max},
 #                   "episode_max_stats":  {mean,std,max}},
 #     "torque_Nm": {"episode_mean_stats": {mean,std,max},
 #                   "episode_max_stats":  {mean,std,max}},
-#     "cycle_time_s": {mean, std, max}
+#     "cycle_time_s": {mean, std, max},
+#     "pose_diff_by_user": {"success": {...}, "partial": {...}, "failure": {...}}
 #   }
 # }

@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 import threading
 import time
@@ -11,12 +12,15 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 # Alternate between going to the goal position and moving randomly with probability p
 p = 0.82
-N_ROLLOUTS = 7
+#p = 0.0
+N_ROLLOUTS = 30
 max_random_action_magnitude = 0.25e-3
 perfect_action_magnitude = 0.25e-3
 
 base_exp_name = "run_s_1b"
-exp_name = f"{base_exp_name}_{p}"
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+#exp_name = f"{base_exp_name}_{p}_{timestamp}"
+exp_name = f"run_s_1b_0.82_20260521_175230"
 
 repo_id = f"collect_data_real/{exp_name}"
 data_dir = Path("rollout_data") / repo_id
@@ -25,6 +29,10 @@ config = Config()
 env_config = SiemensConfig()
 
 env = make_env.create_real_env_s1(config, env_config)
+
+# Open the gripper before anything moves, then settle.
+env.unwrapped.gripper.open()
+time.sleep(1.5)
 
 reward_fn = make_rew.create_real_reward_fn(
     config,
@@ -171,6 +179,7 @@ n_success = 0
 total_successful_length = 0
 i = 0
 try:
+    
     while i < N_ROLLOUTS:
         # new reset wrapper: automatically place brick back and pick it up again
         obs, reset_info = env.reset()

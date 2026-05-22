@@ -241,65 +241,79 @@ class SiemensConfig:
     custom_first_home_position: np.ndarray = field(
         default_factory=lambda: np.array(
             [
-                0.3649075,
-                0.29130843,
-                0.13225512,
-                -2.0765812,
-                -0.06310042,
-                2.3661199,
-                1.3285213,
-            ]
-        )
-    )
-    custom_home_position: np.ndarray = field(
-        default_factory=lambda: np.array(
-            [
-                0.40216795,
-                0.5880874,
-                0.05695235,
-                -1.9398501,
-                -0.11787688,
-                2.573576,
-                1.3399832,
+                0.19608684,
+                0.29807356,
+                0.10440909,
+                -2.31103373,
+                -0.07223369,
+                2.60629177,
+                1.15113580,
             ]
         )
     )
 
-    custom_home_position_pe: np.ndarray = field(
+    # prev: [0.3649075, 0.29130843, 0.13225512, -2.0765812, -0.06310042, 2.3661199, 1.3285213]
+    custom_home_position: np.ndarray = field(
         default_factory=lambda: np.array(
             [
-                0.3726598,
-                0.19371478,
-                0.22794928,
-                -1.9073441,
-                -0.06185328,
-                2.0956953,
-                1.4201956,
+                0.19660652,
+                0.35680208,
+                0.09793264,
+                -2.29952121,
+                -0.07232148,
+                2.65202379,
+                1.14548755,
             ]
         )
     )
+    # prev: [0.40216795, 0.5880874, 0.05695235, -1.9398501, -0.11787688, 2.573576, 1.3399832]
+
+    custom_home_position_pe: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [
+                0.19660971,
+                0.35680056,
+                0.09793022,
+                -2.29952002,
+                -0.07231974,
+                2.65202737,
+                1.14548635,
+            ]
+        )
+    )
+    # prev: [0.3726598, 0.19371478, 0.22794928, -1.9073441, -0.06185328, 2.0956953, 1.4201956]
     """custom home position for the robot end-effector"""
     goal_position_ground_truth: np.ndarray = field(
-        default_factory=lambda: np.array([0.510, 0.1997, 1.2374244e-01 + DELTA_Z_TEST])
-    )  # 0.54262590, -0.030810941, 0.051836114 # 0.5422, -0.03125
+        default_factory=lambda: np.array(
+            [0.52555341, -0.000, 0.12857927]
+        )
+    )
+    # prev: [0.52500522, -0.00301577, 0.13028786]; older: [0.510, 0.1997, 1.2374244e-01]
     """the ground truth goal position in the real world"""
     grasp_position_ground_truth: np.ndarray = field(
         default_factory=lambda: np.array(
-            [0.56637836, 0.2764249, 0.07775394 + DELTA_Z_TEST]
+            [0.516003445, 0.15649372, 0.07702135]
         )
-    )  # 0.5106526, -0.03026352, 0.04147444
+    )
+    # prev: [0.56637836, 0.2764249, 0.07775394]
     """the ground truth grasp position in the real world"""
     grasp_orientation_ground_truth_euler: np.ndarray = field(
-        default_factory=lambda: np.array([3.1398149, -0.00529997, 0.00330537])
+        default_factory=lambda: np.array(
+            [-3.14114428, 0.00215048, -0.00711133]
+        )
     )
+    # prev: [3.1398149, -0.00529997, 0.00330537]
     """the ground truth grasp orientation in roll, pitch, yaw"""
     demo_grasp_pose_estimation_pose_euler: np.ndarray = field(
         default_factory=lambda: np.array([])
     )
     """the position used during pose estimation for grasping during demo"""
     goal_orientation_ground_truth_euler: np.ndarray = field(
-        default_factory=lambda: np.array([-3.1412485, -0.00335749, 0.00383465])
+        default_factory=lambda: np.array(
+            [3.13331290, -0.00359125, -0.00325737]
+        )
     )
+    # prev: [-3.14082360, -0.00211094, -0.00701243]; older: [-3.1412485, -0.00335749, 0.00383465]
     """the ground truth goal orientation in roll, pitch, yaw"""
     pose_estimation_assumed_orientation: np.ndarray = field(
         default_factory=lambda: np.array([[]])
@@ -327,29 +341,40 @@ class SiemensConfig:
     """motion after grasping"""
     waypoints_after_grasp: list = field(
         default_factory=lambda: [
-            ([0.505, 0.26139268, 0.1362928 + DELTA_Z_TEST, 0.0, 0.0, 0.0], 0.002),
             (
                 [
-                    0.505,
-                    0.19800043,
-                    0.1336346 + DELTA_Z_TEST,
-                    0.0,
-                    np.deg2rad(+3),
-                    0.0,
+                    0.52082772,
+                    0.15709122,
+                    0.10043685,
+                    6.27520990,
+                    0.00381359,
+                    -0.00101191,
                 ],
                 0.001,
             ),
             (
                 [
-                    5.05e-01,
-                    1.9927530e-01,
-                    0.1255438 + DELTA_Z_TEST,  # 1.245438e-01 + DELTA_Z_TEST,
-                    0.0,
-                    0.0,
-                    0.0,
+                    0.52060835,
+                    0.07853190,
+                    0.13558331,
+                    6.27223349,
+                    np.deg2rad(5),  # +5° about Y,
+                    -0.00290716,
                 ],
-                0.0004,
+                0.001,
             ),
+            (
+                [
+                    0.52449388,
+                    0.000,
+                    0.13057927,
+                    0,
+                    0,
+                    0,
+                ],
+                0.001,
+            ),                        
+
         ]
     )
     """waypoints to go to after grasping, rotations are relative and open loop, positions closed loop and offset by delta grasp (xz) in global frame at identical orientation"""
@@ -360,24 +385,36 @@ class SiemensConfig:
     """motion to do after episode finishes"""
     waypoints_after_rl_train: list = field(
         default_factory=lambda: [
-            ([0.5222315, 0.26139268, 0.1362928 + DELTA_Z_TEST, 0.0, 0.0, 0.0], 0.002)
+            (
+                [
+                    0.49750429,
+                    0.15999970,
+                    0.09169126 + DELTA_Z_TEST,
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
+                0.002,
+            )
         ]
-    )
+    )  # prev: [0.5222315, 0.26139268, 0.1362928, 0,0,0] (old layout)
+       # set to waypoints_after_grasp[0] (the new lift-off above the brick) so
+       # the post-rollout sweep stays in-workspace before going to dropoff.
     """waypoints to go to after rl training (after that go to position after (relative motion after grasp), then undo relative motion after grasp)"""
 
     dropoff_point: list = field(
         default_factory=lambda: [
-            0.55748737,
-            0.2779482,
-            0.08486971 + DELTA_Z_TEST,
+            0.5195256882,
+            0.157009372,
+            0.07783166 + DELTA_Z_TEST,
         ]
-    )
+    )  # prev: [0.55748737, 0.2779482, 0.08486971]
 
     estimate_goal_position: bool = False
 
     insertion_axis_index: int = 0
     insertion_axis_sign: float = 1.0
-    insertion_forcetorque: float = -0.21  # Nm or N
+    insertion_forcetorque: float = -0.11  # Nm or N, default: -0.21
     insertion_forcetorque_index = 4
     ft_controller_lever_arm: float = 0.16  # set to 1 if force control
     ft_controller_k: float = (
@@ -388,9 +425,9 @@ class SiemensConfig:
     demo_w_D_w_o: np.ndarray = field(
         default_factory=lambda: np.array(
             [
-                [-0.0108812, -0.9968131, 0.07902758, 0.5531513],
-                [0.9999358, -0.0105985, 0.00399576, 0.27225485],
-                [-0.00314545, 0.07906599, 0.9968645, 0.049977],
+                [-0.01026209, -0.98135558, 0.19192652, 0.46707255],
+                [0.99860499, -0.00011593, 0.05280150, 0.15650718],
+                [-0.05179481, 0.19220061, 0.97998784, 0.07039935],
             ]
         )
     )
@@ -398,9 +435,9 @@ class SiemensConfig:
     demo_t_D_t_o: np.ndarray = field(
         default_factory=lambda: np.array(
             [
-                [-0.03220806, -0.98976707, 0.13900985, -0.01457414],
-                [-0.99935341, 0.02966688, -0.02031458, 0.00354214],
-                [0.0159827, -0.13957429, -0.9900825, 0.0273347],
+                [-0.01184618, -0.99333894, 0.11461804, -0.01245333],
+                [-0.99992973, 0.01181975, -0.00091017, 0.00156189],
+                [-0.00045065, -0.11462073, -0.99340919, 0.02711663],
             ]
         )
     )
