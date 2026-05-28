@@ -220,10 +220,14 @@ class SACActor:
                             os.O_WRONLY | os.O_APPEND | os.O_CREAT,
                             0o644,
                         )
-                        grasp_delta = (
-                            all_infos[0].get("reset.grasped.delta")
-                            or all_infos[0].get("reset.grasped.delta_estimated")
-                        )
+                        # Use explicit None check — Python's `or` calls
+                        # __bool__ on the LHS, which raises on numpy arrays
+                        # ("truth value ambiguous").
+                        grasp_delta = all_infos[0].get("reset.grasped.delta")
+                        if grasp_delta is None:
+                            grasp_delta = all_infos[0].get(
+                                "reset.grasped.delta_estimated"
+                            )
                         line = json.dumps(
                             {
                                 "reset.grasped.delta": grasp_delta.tolist() if grasp_delta is not None else None,

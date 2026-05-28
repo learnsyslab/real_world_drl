@@ -140,13 +140,43 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         self.z_force_clip = 0.003
         self.i_term_clip = 0.001 * 2
 
+        # Per-episode FT log captured by _logged_env_step (one sample per
+        # internal env.step), spanning the ENTIRE episode — reset (grasp,
+        # PE, contact) + policy steps + snap_push. Eval reads via
+        # pop_episode_ft_log() after termination. Cleared on every reset()
+        # so an aborted episode doesn't leak into the next one.
+        # ``_episode_ft_log_t`` holds per-sample timestamps in seconds since
+        # ``_ft_log_t0`` (set at reset start). ``_episode_ft_log_phase``
+        # holds a per-sample phase tag string ("reset"|"policy"|"snap_push")
+        # for the plot to mark phase boundaries. ``_current_ft_phase`` is
+        # mutated by the wrapper at known phase transitions.
+        self._episode_ft_log: list = []
+        self._episode_ft_log_t: list = []
+        self._episode_ft_log_phase: list = []
+        self._ft_log_t0: float = 0.0
+        self._current_ft_phase: str = "reset"
+        self._ft_logging_active: bool = False
+
         # reset / motion constants
         self.reset_lift_height = 0.030
         self.after_grasp_lift_height = 0.016
+        # ``delta_z_push_reset`` is now repurposed as the SAFETY CAP on max
+        # Z descent during the reseat push (was: impedance error threshold
+        # of the position-based push). The actual contact force is
+        # controlled by ``reset_reseat_force_n`` via z_force_controller_dz.
         self.delta_z_push_reset = 0.003
+        # Legacy constants — no longer used by the force-controlled reseat
+        # but kept for backward-compat (other callers reference them).
         self.delta_z_push_reset_step_size = 0.0008
         self.delta_z_push_reset_careful_threshold_distance = 0.003
         self.delta_z_push_reset_careful_threshold_velocity = 0.003
+        # Force target for inter-episode reseat push (-N = press down).
+        # ~3 N is plenty to seat a brick; the prior position-based push
+        # peaked at K_z × 3 mm ≈ 7.5 N, then jumped further when the
+        # gripper.home() squeezed the brick on calibration. With explicit
+        # force control + a safety cap the peak is bounded near the target.
+        self.reset_reseat_force_n = -3.0
+        self.reset_reseat_timeout_s = 2.0
         self.min_coarse_hover_z = 0.055
         self.coarse_hover_min_above_current = 0.005
 
@@ -297,19 +327,65 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             self._in_soft_rotation_mode = False
 
     # ------------------------------------------------------------------ #
+    # Episode-wide FT logging                                              #
+    # ------------------------------------------------------------------ #
+
+    def _logged_env_step(self, action):
+        """Drop-in replacement for ``self.env.step(action)`` that also
+        appends the resulting FT reading + timestamp + phase tag to the
+        per-episode logs when logging is active. Returns the same 5-tuple
+        as the inner step."""
+        out = self.env.step(action)
+        if self._ft_logging_active:
+            try:
+                ft = out[0].get("observation.state.sensors_bota_ft_sensor")
+                if ft is not None:
+                    self._episode_ft_log.append(
+                        np.asarray(ft, dtype=np.float64).copy()
+                    )
+                    self._episode_ft_log_t.append(
+                        time.perf_counter() - self._ft_log_t0
+                    )
+                    self._episode_ft_log_phase.append(self._current_ft_phase)
+            except Exception:
+                # Don't let logging failures break motion.
+                pass
+        return out
+
+    def pop_episode_ft_log(self) -> list:
+        """Return the accumulated per-episode FT log and clear all related
+        logs (timestamps + phases). Caller (eval) owns the returned list.
+        Backward-compat: returns the bare list of 6-arrays."""
+        ft, _, _ = self.pop_episode_ft_log_with_t()
+        return ft
+
+    def pop_episode_ft_log_with_t(self) -> tuple[list, list, list]:
+        """Return (ft_log, timestamps_log, phase_log) and clear them.
+        ``ft_log`` is a list of 6-element ndarrays, ``timestamps_log`` is
+        a list of floats (seconds since reset start), ``phase_log`` is a
+        list of strings ("reset"|"policy"|"snap_push")."""
+        ft = self._episode_ft_log
+        t = self._episode_ft_log_t
+        ph = self._episode_ft_log_phase
+        self._episode_ft_log = []
+        self._episode_ft_log_t = []
+        self._episode_ft_log_phase = []
+        return ft, t, ph
+
+    # ------------------------------------------------------------------ #
     # Low-level movement helpers (mirroring InsertionWrapper3DoFRotZ)      #
     # ------------------------------------------------------------------ #
 
     def _step_zeros(self):
-        return self.env.step(np.zeros(6))
+        return self._logged_env_step(np.zeros(6))
 
     def _step_translation(self, dxyz):
         action6 = np.array([dxyz[0], dxyz[1], dxyz[2], 0.0, 0.0, 0.0])
-        return self.env.step(action6)
+        return self._logged_env_step(action6)
 
     def _step_yaw(self, drz):
         action6 = np.array([0.0, 0.0, 0.0, 0.0, 0.0, drz])
-        return self.env.step(action6)
+        return self._logged_env_step(action6)
 
     def go_to_cartesian(
         self,
@@ -375,7 +451,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             f"target_xyz={target[:3]} rel_rpy={target[3:]} "
             f"current_xyz={current_obs['observation.state.cartesian'][:3]}"
         )
-        obs, *_ = self.env.step(
+        obs, *_ = self._logged_env_step(
             target - np.concatenate((current_obs["observation.state.cartesian"][:3], [0.0, 0.0, 0.0]))
         )
         n = 0
@@ -401,7 +477,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                 if np.any(np.abs(ctrl_err) > i_clip):
                     obs, *_ = self._step_zeros()
                 else:
-                    obs, *_ = self.env.step(
+                    obs, *_ = self._logged_env_step(
                         np.concatenate(
                             (np.clip(err + ctrl_err, -i_clip, i_clip) - ctrl_err, np.zeros(3))
                         )
@@ -514,7 +590,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                     prev_mag[i] = mag
                 else:
                     prev_mag[i] = 0.0
-            obs, *_ = self.env.step(np.concatenate((np.zeros(3), drpy)))
+            obs, *_ = self._logged_env_step(np.concatenate((np.zeros(3), drpy)))
             err = _rot_err(obs, eff)
             n += 1
         print(
@@ -703,7 +779,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                 drz = 0.0
                 prev_drz_mag = 0.0
             action6 = np.array([dxyz[0], dxyz[1], dxyz[2], 0.0, 0.0, drz])
-            obs, *_ = self.env.step(action6)
+            obs, *_ = self._logged_env_step(action6)
             cur_xyz = obs["observation.state.cartesian"][:3]
             cur_rpy = obs["observation.state.cartesian"][3:6]
             if do_xy:
@@ -771,7 +847,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
     ):
         target = np.array(delta_xyz) + current_obs["observation.state.target"][:3]
         relative = [0.0, 0.0, 0.0] if relative_pose_euler is None else list(relative_pose_euler)
-        obs, *_ = self.env.step(np.concatenate((delta_xyz, relative)))
+        obs, *_ = self._logged_env_step(np.concatenate((delta_xyz, relative)))
         while (
             np.linalg.norm(target - obs["observation.state.cartesian"][:3]) > 0.002
             or np.linalg.norm(obs["observation.velocity.cartesian"][:3]) > 0.001
@@ -790,7 +866,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                 if np.any(np.abs(ctrl_err) > i_clip):
                     obs, *_ = self._step_zeros()
                 else:
-                    obs, *_ = self.env.step(
+                    obs, *_ = self._logged_env_step(
                         np.concatenate(
                             (np.clip(err + ctrl_err, -i_clip, i_clip) - ctrl_err, np.zeros(3))
                         )
@@ -801,9 +877,16 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                 obs, *_ = self._step_zeros()
         return obs
 
-    def z_force_controller_dz(self, obs):
+    def z_force_controller_dz(self, obs, z_force_target=None):
+        """Returns (dz, z_force_error). Accepts an optional ``z_force_target``
+        override (negative = EE pressing down on the surface, sensor reads
+        the reaction). Defaults to ``self.z_force_target`` for backward
+        compatibility with the contact-establishment loop. snap_push's
+        reinforce press passes a larger magnitude for a firmer seat."""
+        if z_force_target is None:
+            z_force_target = self.z_force_target
         z_force_error = (
-            self.z_force_target - obs["observation.state.sensors_bota_ft_sensor"][2]
+            z_force_target - obs["observation.state.sensors_bota_ft_sensor"][2]
         )
         z_impedance_error = (
             obs["observation.state.target"][2] - obs["observation.state.cartesian"][2]
@@ -1136,6 +1219,17 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         env.reset() and everything after grasp closure run at original
         stiffness so the wrist has enough torque to overcome static friction.
         """
+        # Start a fresh per-episode FT log. Everything from here until the
+        # next reset (or pop_episode_ft_log call) is captured: grasp, PE,
+        # contact establishment, policy steps, snap_push. Timestamp clock
+        # starts at the top of reset so policy/snap_push are offset from
+        # cycle-start.
+        self._episode_ft_log = []
+        self._episode_ft_log_t = []
+        self._episode_ft_log_phase = []
+        self._ft_log_t0 = time.perf_counter()
+        self._current_ft_phase = "reset"
+        self._ft_logging_active = True
         try:
             return self._reset_body(seed=seed, options=options)
         finally:
@@ -1155,9 +1249,11 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                 self.obs["observation.state.cartesian"][2]
                 - self.obs["observation.state.target"][2]
             )
+            self._current_ft_phase = "reset_lift"
             self.obs = self.go_to_cartesian(
                 self.obs, delta=np.array([0.0, 0.0, self.reset_lift_height + delta_z])
             )
+            self._current_ft_phase = "reset_release_open"
             self.env.unwrapped.gripper.set_target(0.75)  # type: ignore
             print("Opening gripper...")
             time.sleep(2.0)
@@ -1172,6 +1268,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             # lego-on-lego contact (brick still wedged after insertion) and the
             # yaw axis never converges. Lifting first frees the gripper, then
             # the yaw move runs in clear air.
+            self._current_ft_phase = "reset_lift"
             self.obs = self.go_to_cartesian(
                 self.obs,
                 delta=np.array([0.0, 0.0, self.reset_lift_height + delta_z]),
@@ -1202,47 +1299,122 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                     self.actual_grasp_position[1],
                     self.obs["observation.state.cartesian"][2] - self.reset_lift_height,
                 ])
+            self._current_ft_phase = "reset_putback_hover"
             self.obs = self.go_to_cartesian(
                 self.obs,
                 target_cartesian=back_target,
             )
 
-            # 4) push down to re-seat brick
-            while (
-                abs(
-                    self.obs["observation.state.cartesian"][2]
-                    - self.obs["observation.state.target"][2]
+            # 4) push down to re-seat brick — FORCE-CONTROLLED.
+            # Targets ``reset_reseat_force_n`` on FT-Z (negative = press
+            # down). Stops when (a) target force reached, (b) safety cap
+            # ``delta_z_push_reset`` of descent hit, or (c) timeout. XY
+            # correction toward ``actual_grasp_position`` runs every step
+            # so the brick lands centred on its stand. Velocity gating
+            # mirrors the contact-establishment loop to avoid windup.
+            self._current_ft_phase = "reset_reseat_push"
+            reseat_start_z = float(self.obs["observation.state.cartesian"][2])
+            reseat_z_floor = reseat_start_z - self.delta_z_push_reset
+            if self.use_ft_controller:
+                try:
+                    self.env.tare_ft_sensor(self.obs)  # type: ignore
+                except Exception as e:
+                    print(f"  [reseat] tare_ft_sensor failed ({e}); continuing.")
+                print(
+                    f"Reseat push -Z to {self.reset_reseat_force_n:.1f} N "
+                    f"(max descent {self.delta_z_push_reset*1e3:.1f} mm, "
+                    f"timeout {self.reset_reseat_timeout_s:.1f} s)..."
                 )
-                < self.delta_z_push_reset
-            ):
-                delta_xy = (
-                    self.actual_grasp_position[0:2]
-                    - self.obs["observation.state.cartesian"][0:2]
-                )
-                delta_z_step = (
-                    -self.delta_z_push_reset_step_size
-                    if (
-                        self.obs["observation.velocity.cartesian"][2]
-                        > -self.delta_z_push_reset_careful_threshold_velocity
-                        or abs(
-                            self.actual_grasp_position[2]
-                            - self.obs["observation.state.cartesian"][2]
+                t0 = time.time()
+                while True:
+                    fz = float(self.obs["observation.state.sensors_bota_ft_sensor"][2])
+                    cur_z = float(self.obs["observation.state.cartesian"][2])
+                    if fz <= self.reset_reseat_force_n:
+                        print(
+                            f"  [reseat] reached target: fz={fz:.2f} N "
+                            f"after {(time.time()-t0):.2f}s"
                         )
-                        > self.delta_z_push_reset_careful_threshold_distance
+                        break
+                    if cur_z <= reseat_z_floor:
+                        print(
+                            f"  [reseat] hit max descent: descended "
+                            f"{(reseat_start_z - cur_z)*1e3:.2f} mm, fz={fz:.2f} N"
+                        )
+                        break
+                    if time.time() - t0 > self.reset_reseat_timeout_s:
+                        print(
+                            f"  [reseat] timeout: fz={fz:.2f} N, descended "
+                            f"{(reseat_start_z - cur_z)*1e3:.2f} mm"
+                        )
+                        break
+                    delta_xy = (
+                        self.actual_grasp_position[0:2]
+                        - self.obs["observation.state.cartesian"][0:2]
                     )
-                    else 0.0
+                    if np.linalg.norm(
+                        self.obs["observation.velocity.cartesian"]
+                    ) > 0.0015:
+                        # Hold XY but settle Z (zero Z action when moving fast).
+                        self.obs, *_ = self._step_translation(
+                            np.array([delta_xy[0], delta_xy[1], 0.0])
+                        )
+                    else:
+                        dz, _ = self.z_force_controller_dz(
+                            self.obs, z_force_target=self.reset_reseat_force_n
+                        )
+                        self.obs, *_ = self._step_translation(
+                            np.array([delta_xy[0], delta_xy[1], dz])
+                        )
+            else:
+                # FT controller disabled — fall back to the legacy
+                # impedance-based descent so behaviour is preserved.
+                print(
+                    "Reseat push: FT controller disabled, using "
+                    "legacy impedance-based descent."
                 )
-                self.obs, *_ = self._step_translation(
-                    np.array([delta_xy[0], delta_xy[1], delta_z_step])
-                )
+                while (
+                    abs(
+                        self.obs["observation.state.cartesian"][2]
+                        - self.obs["observation.state.target"][2]
+                    )
+                    < self.delta_z_push_reset
+                ):
+                    delta_xy = (
+                        self.actual_grasp_position[0:2]
+                        - self.obs["observation.state.cartesian"][0:2]
+                    )
+                    delta_z_step = (
+                        -self.delta_z_push_reset_step_size
+                        if (
+                            self.obs["observation.velocity.cartesian"][2]
+                            > -self.delta_z_push_reset_careful_threshold_velocity
+                            or abs(
+                                self.actual_grasp_position[2]
+                                - self.obs["observation.state.cartesian"][2]
+                            )
+                            > self.delta_z_push_reset_careful_threshold_distance
+                        )
+                        else 0.0
+                    )
+                    self.obs, *_ = self._step_translation(
+                        np.array([delta_xy[0], delta_xy[1], delta_z_step])
+                    )
 
             delta_z = abs(
                 self.obs["observation.state.cartesian"][2]
                 - self.obs["observation.state.target"][2]
             )
+            self._current_ft_phase = "reset_release_open"
             self.obs, *_ = self._step_translation(np.array([0.0, 0.0, delta_z * 0.8]))
+            # Gripper.home() runs a close→open calibration cycle that can
+            # squeeze the brick and produce a transient FT spike. Tag a
+            # dedicated phase and capture one env step AFTER the home +
+            # sleep so the spike actually gets sampled and the plot draws
+            # a vertical line exactly at the gripper-home event.
+            self._current_ft_phase = "reset_gripper_home"
             self.env.unwrapped.gripper.home()  # type: ignore
             time.sleep(0.5)
+            self.obs, *_ = self._step_zeros()
             self.n_since_last_home += 1
 
         if self.n_since_last_home >= 4 or self.first_reset:
@@ -1256,6 +1428,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                     f"n_since_last_home={self.n_since_last_home}, "
                     f"first_reset={self.first_reset}, homing..."
                 )
+                self._current_ft_phase = "reset_home_joint"
                 self.env.unwrapped.home(home_config=self.home_config)  # type: ignore
             self.n_since_last_home = 0
             self.first_reset = False
@@ -1278,6 +1451,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
 
         # ---- zero orientation before wide PE ----------------------------- #
         print("Zeroing orientation (symmetric) before wide PE...")
+        self._current_ft_phase = "reset_zero_orient"
         self.obs = self.go_to_rotation_xyz(self.obs, target_rx=0.0, target_ry=0.0, target_rz=0.0)
 
         # ---- wide PE -------------------------------------------------- #
@@ -1293,6 +1467,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             )
         else:
             print(f"Moving to wide PE pose = {wide_pe_target}")
+        self._current_ft_phase = "approach_pe_wide"
         self.obs = self.go_to_cartesian(
             self.obs,
             target_cartesian=wide_pe_target,
@@ -1300,6 +1475,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             max_settle_iter=50,
         )
         print("Wide PE: estimating both bricks...")
+        self._current_ft_phase = "pe_wide"
         wide_grasp, wide_target, wide_det = self._estimate_lego_world_both()
         check_wide_grasp = self.validate_world_pose_transform(wide_grasp, f"wide_{self.grasp_color}")
         check_wide_target = self.validate_world_pose_transform(wide_target, f"wide_{self.target_color}")
@@ -1331,6 +1507,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             hover_z = max(current_xyz[2], self.min_coarse_hover_z)
             hover_3dof = np.array([grasp_xy[0], grasp_xy[1], hover_z])
             print(f"3DOF: moving to hover above grasp XY = {hover_3dof} + yaw → 0° (concurrent)")
+            self._current_ft_phase = "approach_pe_refined"
             self.obs = self.go_to_cartesian_rotation_z(
                 self.obs,
                 target_cartesian=hover_3dof,
@@ -1342,6 +1519,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
 
             # ---- 3DOF: close-up PE for refined X-Y + yaw ---------------- #
             print("3DOF: close-up PE for refined X-Y + yaw...")
+            self._current_ft_phase = "pe_refined"
             refined_grasp, refined_det = self._estimate_lego_world_single(self.grasp_color)
             check_refined = self.validate_world_pose_transform(refined_grasp, f"refined_{self.grasp_color}")
 
@@ -1488,6 +1666,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                 f"3DOF: concurrent yaw align ({np.rad2deg(grasp_yaw):.2f}°) + "
                 f"pre-grasp hover = {hover_xyz}"
             )
+            self._current_ft_phase = "approach_grasp"
             self.obs = self.go_to_cartesian_rotation_z(
                 self.obs,
                 target_cartesian=hover_xyz,
@@ -1499,6 +1678,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                 label="grasp_yaw_align+hover",
             )
             print(f"3DOF: descending to grasp = {w_T_w_tcpgrasp}")
+            self._current_ft_phase = "descend_grasp"
             self.obs = self.go_to_cartesian(self.obs, target_cartesian=w_T_w_tcpgrasp, fine_resolution=0.0002)
 
             # ---- 3DOF: final PE refinement right before gripper closure ---- #
@@ -1509,6 +1689,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             final_pe_max_xy_delta = 0.025         # cap correction at 5 mm
             final_pe_max_yaw_delta = np.deg2rad(25)
             print("3DOF: final PE refinement before grasp closure...")
+            self._current_ft_phase = "pe_final"
             pe_view_xyz = np.array([
                 self.obs["observation.state.cartesian"][0],
                 self.obs["observation.state.cartesian"][1],
@@ -1617,12 +1798,14 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                     target_xy[0], target_xy[1], refined_z,
                 ])
                 print(f"3DOF: descending to refined grasp = {refined_grasp_xyz}")
+                self._current_ft_phase = "descend_grasp_refined"
                 self.obs = self.go_to_cartesian(
                     self.obs, target_cartesian=refined_grasp_xyz,
                     fine_resolution=0.0002,
                 )
             else:
                 print("3DOF: final PE invalid — re-descending to original target.")
+                self._current_ft_phase = "descend_grasp_refined"
                 self.obs = self.go_to_cartesian(
                     self.obs, target_cartesian=w_T_w_tcpgrasp,
                     fine_resolution=0.0002,
@@ -1743,6 +1926,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
 
         # ---- grasp (shared) --------------------------------------------- #
         print("Grasping...")
+        self._current_ft_phase = "grasp"
         time.sleep(1.0)
         self.env.unwrapped.gripper.set_target(0.4)  # type: ignore
         time.sleep(3.0)
@@ -1752,6 +1936,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         # ---- lift + undo orientation + go to diagonal hover -------------- #
         diag_hover = wide_target[:3, 3] + self.diagonal_hover_offset
         print("Lifting after grasp...")
+        self._current_ft_phase = "post_grasp_lift"
         if self.pe_3dof:
             if self.pe_hand_z:
                 # --hand: under OOD setups the diagonal trajectory from a low
@@ -1810,7 +1995,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             )
             applied_alignment_rot = euler_to_rot_matrix(*applied_alignment_rpy)
             undo_alignment_rpy = rot_matrix_to_euler_xyz(applied_alignment_rot.T)
-            self.obs, *_ = self.env.step(
+            self.obs, *_ = self._logged_env_step(
                 np.array([0.0, 0.0, 0.0, undo_alignment_rpy[0], undo_alignment_rpy[1], undo_alignment_rpy[2]])
             )
             print(f"Moving to diagonal hover above {self.target_color} = {diag_hover}")
@@ -1825,6 +2010,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
 
         # ---- PE both bricks at diagonal hover --------------------------- #
         print(f"PE both bricks at diagonal hover ({self.grasp_color} + {self.target_color})...")
+        self._current_ft_phase = "pe_place"
         place_grasp, place_target, place_det = self._estimate_lego_world_both()
         self.validate_world_pose_transform(place_grasp, f"place_{self.grasp_color}")
         self.validate_world_pose_transform(place_target, f"place_{self.target_color}")
@@ -1944,6 +2130,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             f"Moving to start XY={self.start_position[:2]} "
             f"+ yaw={np.rad2deg(self.start_rotation_z):.2f}° (concurrent)..."
         )
+        self._current_ft_phase = "approach_goal"
         self.obs = self.go_to_cartesian_rotation_z(
             self.obs,
             target_cartesian=np.array([
@@ -1963,6 +2150,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         self.obs, *_ = self._step_zeros()
         if self.use_ft_controller:
             print("Establishing contact...")
+            self._current_ft_phase = "contact"
             self.env.tare_ft_sensor(self.obs)  # pyright: ignore[reportAttributeAccessIssue]
             z_step, z_force_error = self.z_force_controller_dz(self.obs)
             while abs(z_force_error) > 0.1:
@@ -2009,6 +2197,9 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
 
         print("Reset complete.")
         self.obs = self.add_perfect_action_to_obs(self.obs)
+        # Reset prologue is over; subsequent _logged_env_step calls (from
+        # the outer RL loop via step()) are the policy phase.
+        self._current_ft_phase = "policy"
         return self.obs, reset_info
 
     # ------------------------------------------------------------------ #
@@ -2035,7 +2226,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         if abs(rz_err) > self.safety_box_angular_radius:
             action6[5] = np.sign(rz_err) * self.safety_box_angular_step_size
 
-        self.obs, reward, terminated, truncated, info = self.env.step(action6)
+        self.obs, reward, terminated, truncated, info = self._logged_env_step(action6)
         self.obs = self.add_perfect_action_to_obs(self.obs)
 
         if (truncated or terminated) and self.n_steps + 1 < self.step_limit:
@@ -2054,32 +2245,165 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
     # snap_push (for SuccessClassificationWrapper on E_SUCCESS_CLS)        #
     # ------------------------------------------------------------------ #
 
+    def _force_press_ramp_and_hold(
+        self,
+        tag: str,
+        force_target_n: float,
+        max_descent_m: float,
+        ramp_timeout_s: float,
+        hold_s: float,
+    ) -> None:
+        """Reusable force-controlled press: phase-1 ramp to ``force_target_n``
+        on FT-Z, phase-2 hold at force. Bounded by ``max_descent_m`` from
+        the press starting Z (safety cap) and ``ramp_timeout_s`` for the
+        ramp. Hold is skipped if the safety cap was hit in phase 1. Tares
+        the FT sensor at entry so the target is relative to no-contact
+        baseline. Velocity-gated to avoid windup while the arm settles.
+        Tag is used in prints to identify the caller."""
+        press_start_z = float(self.obs["observation.state.cartesian"][2])
+        press_z_floor = press_start_z - max_descent_m
+        try:
+            self.env.tare_ft_sensor(self.obs)  # type: ignore
+        except Exception as e:
+            print(f"  [{tag} press] tare_ft_sensor failed ({e}); continuing.")
+
+        def _press_step():
+            if np.linalg.norm(
+                self.obs["observation.velocity.cartesian"]
+            ) > 0.0015:
+                self.obs, *_ = self._step_zeros()
+            else:
+                dz, _ = self.z_force_controller_dz(
+                    self.obs, z_force_target=force_target_n
+                )
+                self.obs, *_ = self._step_translation(np.array([0.0, 0.0, dz]))
+
+        ramp_t0 = time.time()
+        reached = False
+        safety_hit = False
+        while True:
+            fz = float(self.obs["observation.state.sensors_bota_ft_sensor"][2])
+            cur_z = float(self.obs["observation.state.cartesian"][2])
+            if fz <= force_target_n:
+                print(
+                    f"  [{tag} press] phase 1 reached target: fz={fz:.2f} N "
+                    f"after {(time.time()-ramp_t0):.2f}s"
+                )
+                reached = True
+                break
+            if cur_z <= press_z_floor:
+                print(
+                    f"  [{tag} press] phase 1 hit max descent: descended "
+                    f"{(press_start_z - cur_z)*1e3:.2f} mm, fz={fz:.2f} N"
+                )
+                safety_hit = True
+                break
+            if time.time() - ramp_t0 > ramp_timeout_s:
+                print(
+                    f"  [{tag} press] phase 1 ramp timeout: fz={fz:.2f} N, "
+                    f"descended {(press_start_z - cur_z)*1e3:.2f} mm"
+                )
+                break
+            _press_step()
+
+        if hold_s > 0.0 and not safety_hit:
+            if not reached:
+                print(
+                    f"  [{tag} press] phase 2 holding (note: target force "
+                    f"not reached in phase 1)..."
+                )
+            else:
+                print(
+                    f"  [{tag} press] phase 2 holding {hold_s:.1f}s at "
+                    f"{force_target_n:.1f} N..."
+                )
+            hold_t0 = time.time()
+            while time.time() - hold_t0 < hold_s:
+                cur_z = float(self.obs["observation.state.cartesian"][2])
+                if cur_z <= press_z_floor:
+                    fz = float(
+                        self.obs["observation.state.sensors_bota_ft_sensor"][2]
+                    )
+                    print(
+                        f"  [{tag} press] phase 2 hit max descent during "
+                        f"hold: descended {(press_start_z - cur_z)*1e3:.2f} mm, "
+                        f"fz={fz:.2f} N"
+                    )
+                    break
+                _press_step()
+            fz_end = float(self.obs["observation.state.sensors_bota_ft_sensor"][2])
+            cur_z_end = float(self.obs["observation.state.cartesian"][2])
+            print(
+                f"  [{tag} press] hold done: fz={fz_end:.2f} N, total "
+                f"descent={(press_start_z - cur_z_end)*1e3:.2f} mm"
+            )
+
     def snap_push(
         self,
         push_distance: float = 0.0030,
         pause_before: float = 1.0,
         pause_after: float = 1.0,
+        push_force_n: float = -3.0,
+        push_ramp_timeout_s: float = 1.2,
+        push_hold_s: float = 0.5,
         reinforce: bool = False,
         reinforce_lift: float = 0.0130,
         reinforce_push: float = 0.0100,
         reinforce_post_lift: float = 0.0100,
         reinforce_push_offset_x: float = -0.003,
+        reinforce_press_force_n: float = -4.5,
+        reinforce_press_ramp_timeout_s: float = 1.0,
+        reinforce_press_hold_s: float = 1.5,
     ) -> None:
-        """Push down push_distance m to seat the brick after success.
+        """Seat the brick after the success classifier fires.
 
-        If ``reinforce=True``, executes a re-seat cycle afterward.
+        Phase 1 (always): force-controlled press to ``push_force_n`` on
+        FT-Z, ramped over up to ``push_ramp_timeout_s`` with a hard descent
+        cap of ``push_distance`` (which is now interpreted as a safety cap,
+        not a position target). Then holds at force for ``push_hold_s`` so
+        the brick seats rather than just touching and retreating. Falls
+        back to the original position-target descent when
+        ``use_ft_controller=False``.
+
+        Phase 2 (``reinforce=True``): open / lift / close / force-press /
+        lift / open / descend / re-grasp. Press is force-controlled with
+        ``reinforce_press_force_n`` — see the reinforce branch for details.
         """
+        # Tag all FT samples taken during snap_push so the plot can mark
+        # the policy→snap_push boundary.
+        self._current_ft_phase = "snap_push"
         print(f"[InsertionWrapper3DoFRotZPE] snap_push: pausing {pause_before}s...")
         t0 = time.time()
         while time.time() - t0 < pause_before:
             self.obs, *_ = self._step_zeros()
 
-        print(f"[InsertionWrapper3DoFRotZPE] snap_push: pushing down {push_distance*1e3:.1f} mm...")
-        self.obs = self.go_to_cartesian(
-            self.obs,
-            delta=np.array([0.0, 0.0, -push_distance]),
-            fine_resolution=push_distance * 0.3,
-        )
+        # Phase 1 press: force-controlled ramp + hold (same pattern as the
+        # reinforce press below). Falls back to the original position-based
+        # descent when the FT controller is disabled.
+        if not self.use_ft_controller:
+            print(
+                f"[InsertionWrapper3DoFRotZPE] snap_push: pushing down "
+                f"{push_distance*1e3:.1f} mm (position-based; FT disabled)..."
+            )
+            self.obs = self.go_to_cartesian(
+                self.obs,
+                delta=np.array([0.0, 0.0, -push_distance]),
+                fine_resolution=push_distance * 0.3,
+            )
+        else:
+            print(
+                f"[InsertionWrapper3DoFRotZPE] snap_push: pushing -Z to "
+                f"{push_force_n:.1f} N (max descent {push_distance*1e3:.1f} mm, "
+                f"ramp timeout {push_ramp_timeout_s:.1f} s, "
+                f"hold {push_hold_s:.1f} s)..."
+            )
+            self._force_press_ramp_and_hold(
+                tag="phase1",
+                force_target_n=push_force_n,
+                max_descent_m=push_distance,
+                ramp_timeout_s=push_ramp_timeout_s,
+                hold_s=push_hold_s,
+            )
 
         print(f"[InsertionWrapper3DoFRotZPE] snap_push: holding {pause_after}s...")
         t0 = time.time()
@@ -2123,12 +2447,27 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         self.env.unwrapped.gripper.set_target(0.4)  # type: ignore
         time.sleep(1.8)
 
-        print(f"[InsertionWrapper3DoFRotZPE] snap_push: reinforce — pressing down {reinforce_push*1e3:.1f} mm...")
-        press_target = regrasp_target + np.array([reinforce_push_offset_x, 0.0, -(reinforce_push - reinforce_lift)])
-        t0 = time.time()
-        while time.time() - t0 < 1.4:
-            err = press_target - self.obs["observation.state.cartesian"][:3]
-            self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
+        # Force-controlled press (replaces the old position-based loop).
+        if not self.use_ft_controller:
+            print(
+                "[InsertionWrapper3DoFRotZPE] snap_push: reinforce — FT "
+                "controller disabled, skipping press."
+            )
+        else:
+            print(
+                f"[InsertionWrapper3DoFRotZPE] snap_push: reinforce — "
+                f"pressing -Z to {reinforce_press_force_n:.1f} N "
+                f"(max descent {reinforce_push*1e3:.1f} mm, "
+                f"ramp timeout {reinforce_press_ramp_timeout_s:.1f} s, "
+                f"hold {reinforce_press_hold_s:.1f} s)..."
+            )
+            self._force_press_ramp_and_hold(
+                tag="reinforce",
+                force_target_n=reinforce_press_force_n,
+                max_descent_m=reinforce_push,
+                ramp_timeout_s=reinforce_press_ramp_timeout_s,
+                hold_s=reinforce_press_hold_s,
+            )
 
         print(f"[InsertionWrapper3DoFRotZPE] snap_push: reinforce — lifting {reinforce_post_lift*1e3:.1f} mm...")
         lift2_target = regrasp_target + np.array([reinforce_push_offset_x, 0.0, reinforce_post_lift - (reinforce_push - reinforce_lift)])

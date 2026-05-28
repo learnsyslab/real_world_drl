@@ -648,11 +648,11 @@ def create_real_env_s1(
         env,
         alg_config=alg_config,
         env_config=env_config,
-        grasp_randomisation_x_range=(-0.00175, 0.00175)
+        grasp_randomisation_x_range=(-0.00175 - 0.001, 0.00175 + 0.001)
         if not is_eval
         else (-0.0015, 0.0015),
-        grasp_randomisation_z_range=(-0.001, 0.001) if not is_eval else (-0.0, 0.0),
-        safety_box_radius=0.003,
+        grasp_randomisation_z_range=(-0.001-0.0005, 0.001+0.0005) if not is_eval else (-0.0010, -0.0001),
+        safety_box_radius=0.003+0.001 if not is_eval else 0.0015,
         safety_box_step_size=0.0004,
         minimal_start_goal_distance=0.002,
         step_limit=env_config.episode_length
@@ -694,6 +694,21 @@ def create_real_env_s1(
             ("observation.features.wrist_camera", (0, 512), 1.0),
         ],
     )
+    # Success classifier (mirrors create_real_env_s1_pe). Only adds the
+    # wrapper when a policy checkpoint is loaded — without --load_policy the
+    # critics have no weights to read.
+    if args is not None and getattr(args, "load_policy", None):
+        success_threshold = (
+            getattr(args, "no_ft_success_threshold", 4.0)
+            if no_ft
+            else getattr(args, "success_threshold", 8.0)
+        )
+        env = SuccessClassificationWrapper(
+            env,
+            args=args,
+            sac_config=alg_config,
+            threshold=success_threshold,
+        )
     return env
 
 
@@ -702,6 +717,7 @@ def create_real_env_s1_pe(
 ) -> gym.Env:
     no_ft = bool(args is not None and getattr(args, "no_ft_sensor", False))
     use_6dof_grasp = bool(args is not None and getattr(args, "use_6dof_grasp", False))
+    pe_align_6dof = bool(args is not None and getattr(args, "pe_align_6dof", False))
     dof_slice_end = 6 if getattr(alg_config, "actor_output_dim", 2) >= 5 else 3
     env = make_env("my_env_v4_no_ft" if no_ft else "my_env_v4")
     print("Env created.")
@@ -732,6 +748,7 @@ def create_real_env_s1_pe(
         else 2 * env_config.episode_length,
         use_ft_controller=not no_ft,
         use_6dof_grasp=use_6dof_grasp,
+        pe_align_6dof=pe_align_6dof,
         pose_viz_dir=getattr(args, "pose_viz_dir", None) if args is not None else None,
     )
 

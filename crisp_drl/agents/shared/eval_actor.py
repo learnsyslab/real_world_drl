@@ -11,11 +11,16 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import torch.multiprocessing as mp
 
 from crisp_drl.agents.shared.actor import SACActor
+from crisp_drl.agents.shared.insertion_wrapper_s import (
+    AbortEpisodeException,
+    _abort_episode_flag,
+)
 from crisp_drl.data import utils
 
 
@@ -164,9 +169,12 @@ class EvalSACActor(SACActor):
 
         # Pad action / prepend reward NaN for terminal frame (matches collector
         # lines 328-329). Operate on copies so reward_fn/JSON aren't affected.
+        # Action width follows config.actor_output_dim so Siemens 2-DoF,
+        # lego 3-DoF, and Siemens 6-DoF=5-DoF all serialize cleanly.
         actions = list(all_actions)
         rewards = list(all_rewards)
-        actions.append(np.full(3, np.nan, dtype=np.float32))
+        act_dim = int(self.config.actor_output_dim)
+        actions.append(np.full(act_dim, np.nan, dtype=np.float32))
         rewards = [float("nan")] + rewards
 
         grasp_delta = episode_meta["grasp_delta"]
@@ -200,9 +208,10 @@ class EvalSACActor(SACActor):
                     "observation.previous.error.angular": _to_np(obs_f["observation.previous.error.angular"]),
                     "observation.state.sensors_bota_ft_sensor": _to_np(obs_f["observation.state.sensors_bota_ft_sensor"]),
                     "observation.features.wrist_camera": _to_np(obs_f["observation.features.wrist_camera"]),
+                    "observation.images.wrist_camera": _to_np(obs_f["observation.images.wrist_camera"], dtype=np.uint8),
                     "observation.formatted": formatted_np,
-                    "action": _to_np(actions[frame_idx]).reshape(-1)[:3],
-                    "perfect_action": np.zeros(3, dtype=np.float32),
+                    "action": _to_np(actions[frame_idx]).reshape(-1)[:act_dim],
+                    "perfect_action": np.zeros(act_dim, dtype=np.float32),
                     "reward": np.array([rewards[frame_idx]], dtype=np.float32),
                     "success": np.array(
                         [successful and frame_idx == n_frames - 1], dtype=bool,
@@ -229,6 +238,44 @@ class EvalSACActor(SACActor):
         self.save_thread = threading.Thread(target=_run, args=(time.time(),))
         self.save_thread.start()
 
+    def _save_ft_log_npz(
+        self,
+        ep_idx: int,
+        ft_log: list,
+        ft_log_t: list,
+        ft_log_phase: list,
+    ) -> None:
+        """Dump the home-to-home FT log to
+        ``<parquet_root>/ft_log/episode_NNNNNN.npz`` with arrays
+        ``ft`` (T, 6 float64), ``timestamps`` (T, float64), and
+        ``phases`` (T, object/str). No-ops if there is no parquet root,
+        no FT samples, or no timestamps (i.e. the wrapper only exposes
+        the legacy untimed FT log API)."""
+        if self.dataset is None or not ft_log or not ft_log_t:
+            return
+        try:
+            root = Path(self.dataset.root)
+        except Exception:
+            return
+        out_dir = root / "ft_log"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        n = min(len(ft_log), len(ft_log_t))
+        ft_arr = np.stack(
+            [np.asarray(x, dtype=np.float64).reshape(-1)[:6] for x in ft_log[:n]],
+            axis=0,
+        )
+        t_arr = np.asarray(ft_log_t[:n], dtype=np.float64)
+        if ft_log_phase and len(ft_log_phase) >= n:
+            phase_arr = np.asarray(ft_log_phase[:n], dtype=object)
+        else:
+            phase_arr = np.asarray(["unknown"] * n, dtype=object)
+        out_path = out_dir / f"episode_{ep_idx:06d}.npz"
+        np.savez(out_path, ft=ft_arr, timestamps=t_arr, phases=phase_arr)
+        logging.info(
+            f"[eval] saved FT log NPZ for ep {ep_idx}: "
+            f"{n} samples, duration={float(t_arr[-1]):.2f}s -> {out_path}"
+        )
+
     @staticmethod
     def _ft_from_obs(obs_dict) -> "np.ndarray | None":
         if not isinstance(obs_dict, dict):
@@ -240,6 +287,45 @@ class EvalSACActor(SACActor):
         if arr.size < 6:
             return None
         return arr[:6].copy()
+
+    def _pop_wrapper_ft_log(self) -> list:
+        """Walk the wrapper chain (outermost env → inner) until an
+        InsertionWrapper that exposes pop_episode_ft_log() is found, and
+        return its accumulated per-episode FT samples (covers grasp, PE,
+        contact establishment, policy steps, snap_push). Returns [] if no
+        instrumented wrapper is found, so callers can fall back to their
+        own in-loop FT log."""
+        inner = self.env
+        while inner is not None:
+            if hasattr(inner, "pop_episode_ft_log"):
+                try:
+                    return inner.pop_episode_ft_log()
+                except Exception:
+                    return []
+            inner = getattr(inner, "env", None)
+        return []
+
+    def _pop_wrapper_ft_log_with_t(self) -> tuple[list, list, list]:
+        """Like ``_pop_wrapper_ft_log`` but also returns per-sample
+        timestamps (seconds since reset start) and phase tags
+        ("reset"|"policy"|"snap_push") when the wrapper supports it
+        (``pop_episode_ft_log_with_t``). Falls back to bare FT log with
+        empty timestamps/phases when only the legacy API is exposed.
+        Returns (ft_log, timestamps, phases)."""
+        inner = self.env
+        while inner is not None:
+            if hasattr(inner, "pop_episode_ft_log_with_t"):
+                try:
+                    return inner.pop_episode_ft_log_with_t()
+                except Exception:
+                    return [], [], []
+            if hasattr(inner, "pop_episode_ft_log"):
+                try:
+                    return inner.pop_episode_ft_log(), [], []
+                except Exception:
+                    return [], [], []
+            inner = getattr(inner, "env", None)
+        return [], [], []
 
     @staticmethod
     def _cartesian_from_obs(obs_dict) -> "np.ndarray | None":
@@ -351,8 +437,8 @@ class EvalSACActor(SACActor):
         """Ask the operator for the ground-truth outcome.
 
         Returns:
-            'success' | 'partial' | 'fail' | None  (None if prompts disabled
-            or stdin closed)
+            'success' | 'partial' | 'fail' | 'unusable' | None  (None if
+            prompts disabled or stdin closed)
         """
         if not self.prompt_user:
             return None
@@ -360,7 +446,7 @@ class EvalSACActor(SACActor):
             try:
                 ans = input(
                     f"\n[eval] Episode {episode_idx} — outcome? "
-                    f"[s=success / p=partial / f=fail]: "
+                    f"[s=success / p=partial / f=fail / u=unusable]: "
                 ).strip().lower()
             except EOFError:
                 logging.warning("[eval] stdin closed; recording user_outcome=None")
@@ -371,7 +457,25 @@ class EvalSACActor(SACActor):
                 return "partial"
             if ans == "f":
                 return "fail"
-            print("  please type 's', 'p', or 'f'.")
+            if ans == "u":
+                return "unusable"
+            print("  please type 's', 'p', 'f', or 'u'.")
+
+    def _safe_abort_wrapper(self) -> None:
+        """Clear the abort flag and call safe_abort() on the innermost wrapper
+        that supports it. Clearing the flag first prevents AbortEpisodeException
+        from being raised again inside safe_abort's go_delta / settle calls."""
+        _abort_episode_flag.clear()
+        inner = self.env
+        while inner is not None:
+            if hasattr(inner, "safe_abort"):
+                try:
+                    inner.safe_abort()
+                except Exception as e:
+                    logging.warning(f"[eval] safe_abort() failed: {e}")
+                return
+            inner = getattr(inner, "env", None)
+        logging.warning("[eval] no wrapper with safe_abort() found; skipping cleanup")
 
     @staticmethod
     def _ft_stats(ft_log):
@@ -624,7 +728,28 @@ class EvalSACActor(SACActor):
         rollouts are skipped and retried, matching SACActor.run behaviour)."""
         max_eps = max(int(getattr(self.args, "max_episodes", 0) or 0), 0)
 
+        # Background keyboard listener: sets _abort_episode_flag when 'u' is
+        # pressed anywhere during the pipeline (PE, grasp, waypoints, policy
+        # steps). The flag is checked at every _logged_env_step.
+        _abort_listener = None
         try:
+            from pynput import keyboard as _kb
+
+            def _on_abort_key(key):
+                if getattr(key, "char", None) == "u":
+                    _abort_episode_flag.set()
+                    print("\n[eval] 'u' pressed — aborting current episode...", flush=True)
+
+            _abort_listener = _kb.Listener(on_press=_on_abort_key)
+            _abort_listener.start()
+        except Exception as _e:
+            logging.warning(f"[eval] keyboard abort listener unavailable: {_e}")
+
+        try:
+            # Home-to-home timing: timer starts BEFORE env.reset(), so cycle
+            # covers the entire wrapper-driven prologue (grasp, PE, contact)
+            # in addition to the policy phase and (on success) snap_push.
+            t_episode_start = time.perf_counter()
             obs_dict, reset_info = self.env.reset(seed=self.config.seed)
             start_cart = self._cartesian_from_obs(obs_dict)
             obs = obs_dict["observation.formatted"]
@@ -641,10 +766,10 @@ class EvalSACActor(SACActor):
 
             ft_log: list = []
             episode_length = 0
-            t_episode_start = time.perf_counter()
             self.episode_num = 0
 
             while True:
+              try:
                 self.global_step += 1
                 obs_input = utils.shared_encode(
                     self.shared_encoder,
@@ -684,6 +809,10 @@ class EvalSACActor(SACActor):
                         f"(skipped={self.n_unusable_skipped})"
                     )
                     self.global_step -= episode_length
+                    # Discard any FT the wrapper logged during the aborted
+                    # attempt so it doesn't bleed into the retry's stats.
+                    self._pop_wrapper_ft_log()
+                    t_episode_start = time.perf_counter()
                     obs_dict, reset_info = self.env.reset()
                     start_cart = self._cartesian_from_obs(obs_dict)
                     obs = obs_dict["observation.formatted"]
@@ -698,10 +827,18 @@ class EvalSACActor(SACActor):
                     all_infos = [reset_info]
                     ft_log = []
                     episode_length = 0
-                    t_episode_start = time.perf_counter()
                     continue
 
                 cycle_time_s = time.perf_counter() - t_episode_start
+                # Pull the wrapper's home-to-home FT log; if instrumented,
+                # prefer it over the eval-loop's policy-step-only log.
+                # Also captures per-sample timestamps + phase tags
+                # ("reset"|"policy"|"snap_push") when the wrapper supports
+                # the timestamped API — used below to dump an NPZ alongside
+                # the parquet for offline FT-vs-time plotting.
+                wrapper_ft, wrapper_ft_t, wrapper_ft_phase = self._pop_wrapper_ft_log_with_t()
+                if wrapper_ft:
+                    ft_log = wrapper_ft
 
                 all_actions, all_observations, all_rewards, all_infos = self.reward_fn(
                     all_actions,
@@ -731,6 +868,31 @@ class EvalSACActor(SACActor):
                     )
 
                 user_outcome = self._ask_user_outcome(self.episode_num)
+
+                if user_outcome == "unusable":
+                    self.n_unusable_skipped += 1
+                    logging.warning(
+                        f"[eval] operator marked episode as unusable; running "
+                        f"safe_abort + retry (skipped={self.n_unusable_skipped})"
+                    )
+                    self._safe_abort_wrapper()
+                    self._pop_wrapper_ft_log()
+                    t_episode_start = time.perf_counter()
+                    obs_dict, reset_info = self.env.reset()
+                    start_cart = self._cartesian_from_obs(obs_dict)
+                    obs = obs_dict["observation.formatted"]
+                    actual_grasp_pos = reset_info["reset.grasped.position"]
+                    current_reset_info = reset_info
+                    current_start_cart = start_cart
+                    episode_meta = self._capture_reset_metadata(reset_info)
+                    all_actions = []
+                    all_rewards = []
+                    all_observations = [obs]
+                    all_obs_dicts = [obs_dict]
+                    all_infos = [reset_info]
+                    ft_log = []
+                    episode_length = 0
+                    continue
 
                 ep_record = self._make_episode_record(
                     ft_log,
@@ -795,6 +957,19 @@ class EvalSACActor(SACActor):
                                 f"{self.episode_num}: {exc}",
                                 exc_info=True,
                             )
+                        try:
+                            self._save_ft_log_npz(
+                                ep_idx=self.episode_num,
+                                ft_log=wrapper_ft,
+                                ft_log_t=wrapper_ft_t,
+                                ft_log_phase=wrapper_ft_phase,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logging.error(
+                                f"[eval] FT NPZ save failed for ep "
+                                f"{self.episode_num}: {exc}",
+                                exc_info=True,
+                            )
 
                 self.episode_num += 1
                 if max_eps > 0 and len(self.episodes_data) >= max_eps:
@@ -803,6 +978,18 @@ class EvalSACActor(SACActor):
                     )
                     break
 
+                # If the classifier did not fire, snap_push never ran, so the
+                # robot is in an unknown pose and the reset's re-grasp+push-down
+                # sweep is unsafe. safe_abort lifts, opens, homes, and sets the
+                # skip-reset-sweep flag so reset goes straight to the inner env.
+                if not classifier_succ:
+                    logging.info(
+                        "[eval] classifier did not fire — running safe_abort "
+                        "before reset (truncated/failed episode)."
+                    )
+                    self._safe_abort_wrapper()
+
+                t_episode_start = time.perf_counter()
                 obs_dict, reset_info = self.env.reset()
                 start_cart = self._cartesian_from_obs(obs_dict)
                 obs = obs_dict["observation.formatted"]
@@ -817,7 +1004,30 @@ class EvalSACActor(SACActor):
                 all_infos = [reset_info]
                 ft_log = []
                 episode_length = 0
+              except AbortEpisodeException:
+                self.n_unusable_skipped += 1
+                logging.warning(
+                    f"[eval] 'u' abort: safe_abort + retry "
+                    f"(skipped={self.n_unusable_skipped})"
+                )
+                self._safe_abort_wrapper()  # clears flag, lifts +Y+Z, homes
+                self._pop_wrapper_ft_log()
+                self.global_step -= episode_length
                 t_episode_start = time.perf_counter()
+                obs_dict, reset_info = self.env.reset()
+                start_cart = self._cartesian_from_obs(obs_dict)
+                obs = obs_dict["observation.formatted"]
+                actual_grasp_pos = reset_info["reset.grasped.position"]
+                current_reset_info = reset_info
+                current_start_cart = start_cart
+                episode_meta = self._capture_reset_metadata(reset_info)
+                all_actions = []
+                all_rewards = []
+                all_observations = [obs]
+                all_obs_dicts = [obs_dict]
+                all_infos = [reset_info]
+                ft_log = []
+                episode_length = 0
 
         except SystemExit:
             logging.info("[eval] quit requested. Saving partial results...")
@@ -847,6 +1057,11 @@ class EvalSACActor(SACActor):
                     self.dataset.stop_image_writer()
                 except Exception as e:
                     logging.error(f"[eval] stop image writer failed: {e}")
+            if _abort_listener is not None:
+                try:
+                    _abort_listener.stop()
+                except Exception:
+                    pass
             self.close()
 
 

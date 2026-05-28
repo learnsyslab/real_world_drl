@@ -1815,8 +1815,19 @@ class SuccessClassificationWrapper(Wrapper):
 
         score = self._success_score(observation)
         self.max_val = max(score, self.max_val)
-        # print(f"[CLASSIFIER SCORE]: {score:.3f}")
-        if score >= self.threshold or self.max_val > 8 and score < 6:
+        # Per-step classifier diagnostic so we can see why (or why not) the
+        # success branch fires. Trip condition is:
+        #   score >= threshold  OR  (max_val > 8 AND score < 6)
+        # i.e. either we crossed the threshold, or we previously peaked above
+        # 8 and the score subsequently fell below 6 (post-peak fallback).
+        peak_fallback = self.max_val > 8 and score < 6
+        will_fire = score >= self.threshold or peak_fallback
+        print(
+            f"[CLASSIFIER] score={score:+.3f}  thr={self.threshold:.3f}  "
+            f"max_val={self.max_val:+.3f}  peak_fallback={peak_fallback}  "
+            f"fire={will_fire}"
+        )
+        if will_fire:
             self._snap_push()
             t = time.time()
             append_or_insert(info, "custom_events", (t, "E_SUCCESS"))

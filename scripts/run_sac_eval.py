@@ -276,6 +276,16 @@ def main():
     parser.add_argument("--use_pose_estimation", action="store_true")
     parser.add_argument("--pe_align_gripper", action="store_true")
     parser.add_argument("--use_6dof_grasp", action="store_true")
+    parser.add_argument(
+        "--pe_align_6dof",
+        action="store_true",
+        help="Use 6DoF PE alignment for the grasp (wrist tilts to grab a "
+        "tilted brick) while keeping the policy action space at 2D. After "
+        "grasp the standard undo step rotates the wrist back to demo-neutral, "
+        "so a 2D-action policy sees the same observation distribution. "
+        "Useful with a 2D-trained policy when bricks aren't flat. Implied by "
+        "--use_6dof_grasp.",
+    )
     parser.add_argument("--pose_viz_dir", type=str, default=None)
     parser.add_argument("--snap_reinforce", action="store_true")
     parser.add_argument(

@@ -261,7 +261,22 @@ def on_press(key):
         print(f"step = {step_mm:.1f} mm")
     elif c == "r":
         obs, *_ = env.step(np.zeros(7))
-        print(obs["observation.state.cartesian"])
+        tcp = np.asarray(obs["observation.state.cartesian"], dtype=np.float64)
+        joints = np.asarray(obs.get("observation.state.joints"), dtype=np.float64)
+        print(f"[state] cartesian (x y z rx ry rz) = {tcp}")
+        if joints.ndim == 1 and joints.size >= 7:
+            print(f"[state] joints (q1..q{joints.size})    = {joints}")
+            # Paste-block for SiemensConfig home configs (custom_first_home_position /
+            # custom_home_position / custom_home_position_pe — all 7 joint values, rad).
+            print(
+                "    np.array(\n"
+                "        [\n"
+                + "".join(f"            {q:.8f},\n" for q in joints[:7])
+                + "        ]\n"
+                "    )"
+            )
+        else:
+            print("[state] joints obs not available (key 'observation.state.joints' missing)")
     elif c == "t":
         print(f"[servo] moving to REFINED_PE_HOVER {REFINED_PE_HOVER} ...")
         servo_to_xyz(REFINED_PE_HOVER)

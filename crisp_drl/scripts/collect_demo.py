@@ -18,7 +18,7 @@ print("Env reset.")
 
 i_demo_img = 0
 
-exp_name = "salt_linus"
+exp_name = "salt_linus_close_grasped"
 rot_deg = 1
 rot_deg_z = 0.25
 rot_deg_x = 0.25

@@ -11,16 +11,16 @@ from crisp_drl.envs import make_env, make_rew
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 # Alternate between going to the goal position and moving randomly with probability p
-p = 0.82
+p = 0.85
 #p = 0.0
-N_ROLLOUTS = 30
+N_ROLLOUTS = 20
 max_random_action_magnitude = 0.25e-3
 perfect_action_magnitude = 0.25e-3
 
 base_exp_name = "run_s_1b"
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 #exp_name = f"{base_exp_name}_{p}_{timestamp}"
-exp_name = f"run_s_1b_0.82_20260521_175230"
+exp_name = f"run_s_1b_0.85_20260523_133530"
 
 repo_id = f"collect_data_real/{exp_name}"
 data_dir = Path("rollout_data") / repo_id
