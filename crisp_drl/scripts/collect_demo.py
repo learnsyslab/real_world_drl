@@ -1,5 +1,5 @@
 import os
-import sys
+import argparse
 import cv2
 import tifffile
 from crisp_gym.envs.manipulator_env import ManipulatorCartesianEnv, make_env
@@ -7,7 +7,18 @@ import numpy as np
 from pynput import keyboard
 import imageio
 
-env = make_env("my_env_v3_grav_comp_xyz")
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--exp_name", required=True, help="Experiment name used for saved outputs"
+)
+parser.add_argument(
+    "--save", action="store_true", help="Write demo events to rollout_data/demos"
+)
+args = parser.parse_args()
+
+env = make_env("my_env_v3_grav_comp")
+# env = make_env("my_env_v3_grav_comp_xyz")
+# env = make_env("my_env_v4")
 print("Env created.")
 env.wait_until_ready()
 print("Env ready.")
@@ -18,23 +29,24 @@ print("Env reset.")
 
 i_demo_img = 0
 
-exp_name = "siemens_pe_g"
+exp_name = args.exp_name
 rot_deg = 1
 rot_deg_z = 0.25
-rot_deg_x = 0.25
+rot_deg_x = 5
+trans = 0.001
 
-save_to_file = len(sys.argv) > 1 and sys.argv[1] == "--save"
+save_to_file = args.save
 
 
 def print_and_write(line):
     line = str(line)
-    if save_to_file:
+    if save_to_file and "Executed:" not in line:
         fd = os.open(
             os.path.join("rollout_data/demos", f"{exp_name}.jsonl"),
             os.O_WRONLY | os.O_APPEND | os.O_CREAT,
             0o644,
         )
-        os.write(fd, (line + "\n").encode())
+        os.write(fd, (line.replace("\n", "") + "\n").encode())
         os.close(fd)
     print(line)
 
@@ -58,6 +70,24 @@ def on_press(key):
         if key.char == "l":
             env.step(np.array([0, 0, 0, 0, 0, np.deg2rad(-rot_deg_z), 0.0]))
             print_and_write(f"Executed: rotate -z {rot_deg_z:.2f}°")
+        if key.char == "1":
+            env.step(np.array([0, 0, -trans, 0, 0, 0, 0.0]))
+            print_and_write(f"Executed: down -z {-trans:.2f}°")
+        if key.char == "2":
+            env.step(np.array([0, 0, +trans, 0, 0, 0, 0.0]))
+            print_and_write(f"Executed: up +z {trans:.2f}°")
+        if key.char == "3":
+            env.step(np.array([0, -trans, 0, 0, 0, 0, 0.0]))
+            print_and_write(f"Executed: left -y {-trans:.2f}°")
+        if key.char == "4":
+            env.step(np.array([0, +trans, 0, 0, 0, 0, 0.0]))
+            print_and_write(f"Executed: right +y {trans:.2f}°")
+        if key.char == "5":
+            env.step(np.array([-trans, 0, 0, 0, 0, 0, 0.0]))
+            print_and_write(f"Executed: back -x {-trans:.2f}°")
+        if key.char == "6":
+            env.step(np.array([+trans, 0, 0, 0, 0, 0, 0.0]))
+            print_and_write(f"Executed: front +x {trans:.2f}°")
         if key.char == "m":
             env.step(np.array([0, 0, 0, np.deg2rad(rot_deg_x), 0, 0, 0.0]))
             print_and_write(f"Executed: rotate +x {rot_deg_x:.2f}°")
@@ -76,6 +106,7 @@ def on_press(key):
             print_and_write([k for k in obs if "image" in k])
         elif key.char == "i":
             obs, *_ = env.step(np.zeros(7))
+            # print(obs["observation.images.wrist_camera"])
             tifffile.imwrite(
                 f"test_images/demo_img_color_{i_demo_img}_{exp_name}.tiff",
                 obs["observation.images.wrist_camera"],

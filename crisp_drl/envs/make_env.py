@@ -9,11 +9,16 @@ import time
 import random
 import numpy as np
 
-from crisp_drl.agents.shared.insertion_env_config import SiemensConfig
+from crisp_drl.agents.shared.insertion_env_config import ShelfBoxConfig, SiemensConfig
 from crisp_drl.agents.shared.insertion_wrapper_s import (
     InsertionWrapperSiemens,
     InsertionWrapperSiemensPE,
 )
+from crisp_drl.agents.shared.insertion_wrapper_b import (
+    InsertionWrapperBox,
+    InsertionWrapperBoxRotZ,
+)
+from crisp_drl.agents.shared.insertion_wrapper_b_pe import InsertionWrapperBoxPE
 from crisp_gym.envs.manipulator_env_config import NoCamFrankaEnvConfig, FrankaEnvConfig
 from crisp_py.camera.camera_config import CameraConfig
 from crisp_py.gripper.gripper import GripperConfig
@@ -50,6 +55,7 @@ from crisp_drl.agents.shared.env_wrappers import (
     NoGripperActionWrapper,
     NoRotationNoGripperWrapperSim,
     ObservationFormatterWrapper,
+    RotatedObservationKeysWrapper,
     SafetyBoxWrapperXY,
     StepLimitEnforcerWrapper,
     SuccessClassificationWrapper,
@@ -58,6 +64,7 @@ from crisp_drl.agents.shared.env_wrappers import (
     observation_has_z_pressure_or_below,
 )
 from crisp_drl.agents.shared.insertion_wrapper import (
+    ForceTorqueMeasurementWrapper,
     InsertionWrapper,
     SensorTareWrapper,
 )
@@ -426,6 +433,317 @@ def create_real_env_s1_pe(
         threshold=getattr(args, "success_threshold", 8.0),
     )
     env = CLIWrapper(env)
+    return env
+
+
+def create_real_env_b1(
+    alg_config: Config, env_config: ShelfBoxConfig, args=None
+) -> gym.Env:
+    env = make_env("my_env_v4")
+    print("Env created.")
+    env.wait_until_ready()
+    print("Env ready.")
+
+    env = ActionTimeStampWrapper(env)
+    env = NoGripperActionWrapper(env)
+    env = LastObservationWrapper(env)
+    # env = ContainerWatcherWrapper(env, ctx=multiprocessing.get_context("spawn"))
+    env = SensorTareWrapper(
+        env,
+        sensor_key="observation.state.sensors_bota_ft_sensor",
+        sensor_data_shape=(6,),
+    )
+    is_eval = False if args is None else args.eval
+    env = InsertionWrapperBox(
+        env,
+        alg_config=alg_config,
+        env_config=env_config,
+        grasp_randomisation_x_range=(-0.002, 0.002)
+        if not is_eval
+        else (-0.0015, 0.0015),
+        grasp_randomisation_z_range=(-0.002, 0.002)
+        if not is_eval
+        else (-0.0015, 0.0015),
+        goal_position_randomisation_plane_x_range=(-0.0025, 0.0025),
+        goal_position_randomisation_plane_y_range=(-0.004, 0.004)
+        if not is_eval
+        else (-0.003, 0.003),
+        safety_box_radius=0.004,
+        safety_box_step_size=0.0004,
+        minimal_start_goal_distance=0.004,
+        step_limit=env_config.episode_length
+        if not is_eval
+        else 2 * env_config.episode_length,
+        is_eval=is_eval,
+    )
+
+    # obs["observation.state.cartesian"][2] < 0.049)
+    #  # functools.partial(observation_has_z_pressure_or_below, error_threshold=0.005, previous_error_threshold=0.003,
+    #  # min_z_height=0.055, terminate_z_height = 0.0475))
+    # maybe something with z velocity
+    env = CLIWrapper(env)
+    env = DinoImageEncoderWrapper(
+        env,
+        n_cameras=env_config.n_cameras,
+        image_keys=["observation.images.wrist_camera"],
+        image_size=(256, 256),
+        crops={"observation.images.wrist_camera": (8, 8 + 2 * 224, 276, 276 + 2 * 224)},
+    )
+
+    env = RotatedObservationKeysWrapper(
+        env,
+        keys=[
+            "observation.previous.action",
+            "observation.previous.error.cartesian",
+            "observation.velocity.cartesian",
+            "observation.error.cartesian",
+        ],
+        rotation_axis=np.array([0.0, 1.0, 0.0]),
+        rotation_angle=np.deg2rad(30.0),
+    )
+
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
+    env = ObservationFormatterWrapper(
+        env,
+        "cuda",
+        keys_ranges_scales=[
+            ("observation.rotated.previous.action", (0, 2), 1000.0),
+            ("observation.rotated.previous.error.cartesian", (0, 2), 1000.0),
+            ("observation.rotated.velocity.cartesian", (0, 2), 1000.0),
+            ("observation.rotated.error.cartesian", (0, 2), 1000.0),
+            ("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1),
+            ("observation.features.wrist_camera", (0, 512), 1.0),
+        ],
+    )
+    return env
+
+
+def create_real_env_b1_pe(
+    alg_config: Config, env_config: ShelfBoxConfig, args=None
+) -> gym.Env:
+    env = make_env("my_env_v4")
+    print("Env created.")
+    env.wait_until_ready()
+    print("Env ready.")
+    is_eval = False if args is None else args.eval
+
+    env = ActionTimeStampWrapper(env)
+    env = NoGripperActionWrapper(env)
+    env = LastObservationWrapper(env)
+    # env = ContainerWatcherWrapper(env, ctx=multiprocessing.get_context("spawn"))
+    if is_eval:
+        env = ForceTorqueMeasurementWrapper(
+            env, sensor_key="observation.state.sensors_bota_ft_sensor", args=args
+        )
+    env = SensorTareWrapper(
+        env,
+        sensor_key="observation.state.sensors_bota_ft_sensor",
+        sensor_data_shape=(6,),
+    )
+    env = InsertionWrapperBoxPE(
+        env,
+        alg_config=alg_config,
+        env_config=env_config,
+        grasp_randomisation_x_range=(-0.002, 0.002)
+        if not is_eval
+        else (-0.0015, 0.0015),
+        grasp_randomisation_z_range=(-0.002, 0.002)
+        if not is_eval
+        else (-0.0015, 0.0015),
+        goal_position_randomisation_plane_x_range=(-0.0025, 0.0025),
+        goal_position_randomisation_plane_y_range=(-0.004, 0.004)
+        if not is_eval
+        else (-0.003, 0.003),
+        safety_box_radius=0.004,
+        safety_box_step_size=0.0004,
+        minimal_start_goal_distance=0.004,
+        step_limit=env_config.episode_length,
+        is_eval=is_eval,
+    )
+
+    # obs["observation.state.cartesian"][2] < 0.049)
+    #  # functools.partial(observation_has_z_pressure_or_below, error_threshold=0.005, previous_error_threshold=0.003,
+    #  # min_z_height=0.055, terminate_z_height = 0.0475))
+    # maybe something with z velocity#
+
+    env = DinoImageEncoderWrapper(
+        env,
+        n_cameras=env_config.n_cameras,
+        image_keys=["observation.images.wrist_camera"],
+        image_size=(256, 256),
+        crops={"observation.images.wrist_camera": (8, 8 + 2 * 224, 276, 276 + 2 * 224)},
+    )
+
+    env = RotatedObservationKeysWrapper(
+        env,
+        keys=[
+            "observation.previous.action",
+            "observation.previous.error.cartesian",
+            "observation.velocity.cartesian",
+            "observation.error.cartesian",
+        ],
+        rotation_axis=np.array([0.0, 1.0, 0.0]),
+        rotation_angle=np.deg2rad(30.0),
+    )
+
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
+    env = ObservationFormatterWrapper(
+        env,
+        "cuda",
+        keys_ranges_scales=[
+            ("observation.rotated.previous.action", (0, 2), 1000.0),
+            ("observation.rotated.previous.error.cartesian", (0, 2), 1000.0),
+            ("observation.rotated.velocity.cartesian", (0, 2), 1000.0),
+            ("observation.rotated.error.cartesian", (0, 2), 1000.0),
+            ("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1),
+            ("observation.features.wrist_camera", (0, 512), 1.0),
+        ],
+    )
+    env = SuccessClassificationWrapper(
+        env,
+        args=args,
+        sac_config=alg_config,
+        threshold=getattr(args, "success_threshold", 7.5),
+    )
+    env = CLIWrapper(env)
+    return env
+
+
+def create_real_env_b1_rotz(
+    alg_config: Config, env_config: ShelfBoxConfig, args=None
+) -> gym.Env:
+    env = make_env("my_env_v4")
+    print("Env created.")
+    env.wait_until_ready()
+    print("Env ready.")
+
+    env = ActionTimeStampWrapper(env)
+    env = NoGripperActionWrapper(env)
+    env = LastObservationWrapper(env)
+    env = SensorTareWrapper(
+        env,
+        sensor_key="observation.state.sensors_bota_ft_sensor",
+        sensor_data_shape=(6,),
+    )
+    is_eval = False if args is None else args.eval
+    env = InsertionWrapperBoxRotZ(
+        env,
+        alg_config=alg_config,
+        env_config=env_config,
+        grasp_randomisation_x_range=(-0.002, 0.002)
+        if not is_eval
+        else (-0.0015, 0.0015),
+        grasp_randomisation_z_range=(-0.002, 0.002)
+        if not is_eval
+        else (-0.0015, 0.0015),
+        safety_box_radius=0.004,
+        safety_box_step_size=0.0004,
+        minimal_start_goal_distance=0.003,
+        step_limit=env_config.episode_length
+        if not is_eval
+        else 2 * env_config.episode_length,
+        is_eval=is_eval,
+    )
+
+    env = CLIWrapper(env)
+    env = DinoImageEncoderWrapper(
+        env,
+        n_cameras=env_config.n_cameras,
+        image_keys=["observation.images.wrist_camera"],
+        image_size=(256, 256),
+        crops={"observation.images.wrist_camera": (8, 8 + 2 * 224, 276, 276 + 2 * 224)},
+    )
+
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
+    env = ObservationFormatterWrapper(
+        env,
+        "cuda",
+        keys_ranges_scales=[
+            ("observation.previous.action", (1, 3), 1000.0),
+            ("observation.previous.action", (3, 6), 40.0),
+            ("observation.previous.error.cartesian", (1, 3), 1000.0),
+            ("observation.previous.error.angular", (0, 3), 40.0),
+            ("observation.velocity.cartesian", (1, 3), 1000.0),
+            ("observation.velocity.angular", (0, 3), 40.0),
+            ("observation.error.cartesian", (1, 3), 1000.0),
+            ("observation.error.angular", (0, 3), 40.0),
+            ("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1),
+            ("observation.features.wrist_camera", (0, 512), 1.0),
+        ],
+    )
+    return env
+
+
+def create_real_env_b3(
+    alg_config: Config, env_config: ShelfBoxConfig, args=None
+) -> gym.Env:
+    env = make_env("my_env_v4_rotation")
+    print("Env created.")
+    env.wait_until_ready()
+    print("Env ready.")
+
+    env = ActionTimeStampWrapper(env)
+    env = NoGripperActionWrapper(env)
+    env = LastObservationWrapper(env)
+    env = SensorTareWrapper(
+        env,
+        sensor_key="observation.state.sensors_bota_ft_sensor",
+        sensor_data_shape=(6,),
+    )
+    is_eval = False if args is None else args.eval
+    env = InsertionWrapperBoxRotZ(
+        env,
+        alg_config=alg_config,
+        env_config=env_config,
+        grasp_randomisation_x_range=(-0.002, 0.002)
+        if not is_eval
+        else (-0.0015, 0.0015),
+        grasp_randomisation_z_range=(-0.002, 0.002)
+        if not is_eval
+        else (-0.0015, 0.0015),
+        safety_box_radius=0.004,
+        safety_box_step_size=0.0004,
+        minimal_start_goal_distance=0.003,
+        step_limit=env_config.episode_length
+        if not is_eval
+        else 2 * env_config.episode_length,
+        is_eval=is_eval,
+    )
+
+    env = CLIWrapper(env)
+    env = DinoImageEncoderWrapper(
+        env,
+        n_cameras=env_config.n_cameras,
+        image_keys=["observation.images.wrist_camera"],
+        image_size=(256, 256),
+        crops={"observation.images.wrist_camera": (8, 8 + 2 * 224, 276, 276 + 2 * 224)},
+    )
+
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
+    env = ObservationFormatterWrapper(
+        env,
+        "cuda",
+        keys_ranges_scales=[
+            ("observation.previous.action", (1, 3), 1000.0),
+            ("observation.previous.action", (3, 6), 40.0),
+            ("observation.previous.error.cartesian", (1, 3), 1000.0),
+            ("observation.previous.error.angular", (0, 3), 40.0),
+            ("observation.velocity.cartesian", (1, 3), 1000.0),
+            ("observation.velocity.angular", (0, 3), 40.0),
+            ("observation.error.cartesian", (1, 3), 1000.0),
+            ("observation.error.angular", (0, 3), 40.0),
+            ("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1),
+            ("observation.features.wrist_camera", (0, 512), 1.0),
+        ],
+    )
     return env
 
 

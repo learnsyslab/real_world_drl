@@ -312,3 +312,166 @@ class SiemensConfig:
             ]
         )
     )
+
+
+@dataclass
+class ShelfBoxConfig:
+    # Algorithm specific arguments
+    env_name: str = "FrankaCartesianEnv"
+    # env_name: str = "Pendulum-v1"
+    """the environment id of the task"""
+    use_cameras: bool = True
+    """if true, use camera image observations"""
+    episode_length: int = 150
+    """the maximum length of an episode"""
+    control_frequency: int = 15
+    """the frequency at which the control commands are sent to the robot"""
+
+    n_cameras: int = 1
+    """the number of cameras to use for observations"""
+
+    # whether to zoom in after cropping and how far
+
+    # positions / relative rotations for
+    # * first PE pos
+    # * grasping,
+    # * n waypoints after grasping with tolerances when to go to next
+    # * n points after second pose estimation (if n=0, do not do second PE)
+    # * goal position (demo)
+
+    # insertion axis / controlled dof
+
+    # poses:
+    # * demo grasped object pose (optionally: make estimate better with multiple images)
+    # * pose estimation uncertainty
+
+    # ?? Allow for relative x / z rotations within small tolerance?
+
+    custom_first_home_position: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [
+                -0.16125268,
+                -0.19791204,
+                -0.32023647,
+                -2.4182775,
+                -0.08884472,
+                2.2305312,
+                0.36234158,
+            ]
+        )
+    )
+    custom_home_position: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [
+                -0.29983243,
+                0.38195968,
+                -0.15804778,
+                -2.2734513,
+                0.08058647,
+                2.640415,
+                0.26108682,
+            ]
+        )
+    )
+
+    custom_home_position_pe: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [
+                # -1.6601315e-01,
+                # 7.1060816e-03,
+                # -2.8422508e-01,
+                # -2.0143490e00,
+                # 1.0296288e-03,
+                # 2.0213308e00,
+                # 3.2737154e-01,
+                ##
+                # 0.00895363,
+                # -0.2211075,
+                # 0.08787364,
+                # -2.2996998,
+                # 0.02361965,
+                # 2.0857165,
+                # 0.84811467,
+                -0.36450416,
+                0.17809568,
+                -0.16299678,
+                -1.7158662,
+                0.03090358,
+                1.889031,
+                0.24577244,
+            ]
+        )
+    )
+    """custom home position for the robot end-effector"""
+    goal_position_ground_truth: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [0.339, -0.242, 0.168]
+        )  # trained with y=0.2445, z=0.166 eval uses -0.244, yellow grasp eval -0.242y 0.168z
+    )  # 0.54262590, -0.030810941, 0.051836114 # 0.5422, -0.03125
+    """the ground truth goal position in the real world"""
+    goal_position_from_barcode_offset_world: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [0.008, 0.0482, 0.0535]  # [0.011, 0.056, 0.061]  # before 0.008 / 0.056
+        )
+        + np.array(
+            [-np.sqrt(2 / 3) * 0.0015 - 0.001, 0.0, 1 / np.sqrt(3) * 0.0015]
+        )  # works for RL w/o approach: np.array([0.007, 0.051, 0.056])
+    )  # works for 0.065 final blue distance 0.009, 0.048, 0.054
+    """offset to add to the position obtained from the barcode for the goal position in the world frame"""
+    grasp_position_ground_truth: np.ndarray = field(
+        default_factory=lambda: np.array([0.475, -0.242, 0.085])
+    )  # 0.5106526, -0.03026352, 0.04147444
+    """the ground truth grasp position in the real world"""
+    grasp_position_offset_from_barcode_local: np.ndarray = field(
+        default_factory=lambda: np.array([0.0505, 0.001, -0.015])
+    )
+    """offset to add to the position obtained from the barcode for the grasp position in the local frame of the barcode"""
+    gripper_grasp_position: float = 0.52
+    """gripper position during grasping"""
+    relative_motions_after_grasp: list = field(
+        default_factory=lambda: [
+            np.array([-0.01, 0.0, 0.1, 0.0, 0.0, 0.0]),
+            np.array([0.0, 0.0, 0.0, 0.0, 0.0, np.deg2rad(-1)]),
+            np.array([0.0, 0.0, 0.0, 0.0, np.deg2rad(30), 0.0]),
+        ]
+    )
+    relative_motion_after_grasp_pe: list = field(
+        default_factory=lambda: [
+            np.array([0.0, 0.0, 0.05, 0.0, 0.0, 0.0]),
+            np.array([0.0, 0.0, 0.0, 0.0, 0.0, np.deg2rad(-1)]),
+            np.array([0.0, 0.0, 0.0, 0.0, np.deg2rad(30), 0.0]),
+        ],
+    )
+    """motion after grasping"""
+    relative_motion_after_rl_train: list = field(
+        default_factory=lambda: [0.05 * 0.5, 0.0, 0.05 * 0.7071, 0.0, 0.0, 0.0]
+    )
+    """motion to do after episode finishes; in tilted plane -> z-axis is tilted"""
+    waypoints_after_rl_train: list = field(
+        default_factory=lambda: [
+            ([0.475 - 0.01, -0.242, 0.085 + 0.1, 0.0, 0.0, 0.0], 0.002),
+            ([0.475 - 0.01, -0.242, 0.085 + 0.1, 0.0, -np.deg2rad(30), 0.0], 0.002),
+            ([0.475 - 0.01, -0.242, 0.085 + 0.1, 0.0, 0.0, np.deg2rad(1)], 0.002),
+        ]
+    )
+    """waypoints to go to after rl training (after that go to position after (relative motion after grasp), then undo relative motion after grasp)"""
+
+    dropoff_point: list = field(
+        default_factory=lambda: [0.475 - 0.01, -0.242, 0.085 + 0.01]
+    )
+
+    insertion_forcetorque: float = -1.0  # Nm or N # trained with -0.66
+    ft_controller_lever_arm: float = 1.0  # set to 1 if force control
+    ft_controller_k: float = (
+        5000 / 1.5
+    )  # use value smaller than real k to overcome friction
+
+    demo_yellow_grasped_pose_tcp: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [
+                0.051413118839263916,
+                -0.002239066641777754,
+                -0.020148837938904762,
+            ]
+        )
+    )

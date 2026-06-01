@@ -170,6 +170,40 @@ def append_or_insert(dictionary, key, value):
         dictionary[key] = [value]
 
 
+def _rotation_matrix_from_axis_angle(axis: np.ndarray, angle: float) -> np.ndarray:
+    axis = np.asarray(axis, dtype=float)
+    if axis.shape != (3,):
+        raise ValueError(f"rotation axis must be a 3D vector, got shape {axis.shape}")
+
+    norm = float(np.linalg.norm(axis))
+    if norm < 1e-8:
+        raise ValueError("rotation axis must be non-zero")
+
+    x, y, z = axis / norm
+    c = float(np.cos(angle))
+    s = float(np.sin(angle))
+    one_minus_c = 1.0 - c
+    return np.array(
+        [
+            [
+                c + x * x * one_minus_c,
+                x * y * one_minus_c - z * s,
+                x * z * one_minus_c + y * s,
+            ],
+            [
+                y * x * one_minus_c + z * s,
+                c + y * y * one_minus_c,
+                y * z * one_minus_c - x * s,
+            ],
+            [
+                z * x * one_minus_c - y * s,
+                z * y * one_minus_c + x * s,
+                c + z * z * one_minus_c,
+            ],
+        ]
+    )
+
+
 class ImageEncoderWrapper(ObservationWrapper):
     # def __init__(self, env):
     #     self.device = 'cuda:0'
@@ -644,6 +678,16 @@ class DinoImageEncoderWrapper(ObservationWrapper):
                 img = img[crop[0] : crop[1], crop[2] : crop[3]]
             if img.shape[0] == 256 and img.shape[1] == 256:
                 img = img[16:240, 16:240]
+            elif img.shape[0] == 448 and img.shape[1] == 448:
+                img = cv2.resize(
+                    img,
+                    dsize=(
+                        224,
+                        224,
+                    ),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+
             elif img.shape[0] != 224 or img.shape[1] != 224:
                 raise ValueError(
                     f"Unexpected image size {img.shape[:2]}, expected 224x224 or 256x256"
@@ -782,6 +826,37 @@ class ObservationFormatterWrapper(ObservationWrapper):
             )
             obs_list.append(extracted if scale == 1.0 else extracted * scale)
         observation["observation.formatted"] = torch.concatenate(obs_list)
+        return observation
+
+
+class RotatedObservationKeysWrapper(ObservationWrapper):
+    def __init__(
+        self,
+        env,
+        keys: list[str],
+        rotation_axis: np.ndarray,
+        rotation_angle: float,
+        output_prefix: str = "observation.rotated",
+    ):
+        super().__init__(env)
+        self.keys = keys
+        self.rotation_matrix = _rotation_matrix_from_axis_angle(
+            rotation_axis, rotation_angle
+        )
+        self.output_prefix = output_prefix.rstrip(".")
+
+    def observation(self, observation):
+        rotation = self.rotation_matrix.T
+        for key in self.keys:
+            value = np.asarray(observation[key], dtype=float)
+            if value.shape[0] < 3:
+                raise ValueError(
+                    f"{key} must contain at least 3 values to rotate, got shape {value.shape}"
+                )
+            rotated_value = value.copy()
+            rotated_value[:3] = rotation @ value[:3]
+            suffix = key.removeprefix("observation.")
+            observation[f"{self.output_prefix}.{suffix}"] = rotated_value
         return observation
 
 
@@ -1686,7 +1761,7 @@ class SuccessClassificationWrapper(Wrapper):
         score = self._success_score(observation)
         self.max_val = max(score, self.max_val)
         print(f"[CLASSIFIER SCORE]: {score:.3f}")
-        if score >= self.threshold or self.max_val > 8 and score < 6:
+        if score >= self.threshold or self.max_val > 7 and score < 5:
             t = time.time()
             append_or_insert(info, "custom_events", (t, "E_SUCCESS"))
             append_or_insert(info, "custom_events", (t, "E_SUCCESS_CLS"))
@@ -1720,6 +1795,9 @@ class StepLimitEnforcerWrapper(Wrapper):
         )
         self.current_step += 1
         if self.current_step >= self.max_steps:
+            print(
+                f"[StepLimitEnforcerWrapper] Step limit of {self.max_steps} reached, truncating episode."
+            )
             truncated = True
 
         return observation, reward, terminated, truncated, info

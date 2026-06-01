@@ -2,23 +2,26 @@ import os
 from typing import Dict, Tuple
 
 import numpy as np
+import matplotlib.pyplot as plt
 from PIL import Image
 import tifffile
-import pyvista as pv
 
 from crisp_drl.envs.pose_estimator import PoseEstimator
-from crisp_drl.envs.pose_tracker import PoseTracker
 from crisp_drl.envs.sam3_detector import Sam3Detector
 
-exp_name = "siemens_test_2"
-poses_file = "test_images/siemens_test_2_poses.txt"
+exp_name = "sugar"
+sam3_prompt = "yellow white cardboard box with label"  # "black cover with circular grille"  # "small grey plastic rectangle with gear"
+MESH_FILE_NAME = "ycb_sugar.obj"
+
+poses_file = f"rollout_data/demos/{exp_name}.jsonl"
+# poses_file = f"test_images/{exp_name}_poses.txt"
 estimated_poses_file = f"test_images/{exp_name}_estimates.txt"
-MESH_FILE_NAME = "SiemensLid_centered.obj"
+mask_figure_file = f"test_images/masks_{exp_name}.png"
+depth_figure_file = f"test_images/masked_depth_{exp_name}.png"
 # Path to mesh used for ABUS key
 MESH_PATH_CONTAINER = (
     f"/workspaces/isaac_ros-dev/foundation_pose_meshes/{MESH_FILE_NAME}"
 )
-MESH_PATH_LOCAL = f"~/workspaces/isaac_ros-dev/lego_assets/{MESH_FILE_NAME}"
 
 
 def r_x(phi: float) -> np.ndarray:
@@ -149,37 +152,123 @@ def save_estimated_poses(path: str, poses_world: Dict[int, np.ndarray]) -> None:
     np.savetxt(path, data, fmt="%.8f", header=header)
 
 
-def show_3d(poses_world: Dict[int, np.ndarray], mesh_path: str):
-    plotter = pv.Plotter()
-    base_mesh = pv.read(mesh_path)
-    base_mesh.points = base_mesh.points.copy()
+def save_mask_figure(
+    path: str,
+    items: Dict[int, Tuple[np.ndarray, np.ndarray]],
+) -> None:
+    """Save one subplot per image with masked pixels over a light red background."""
+    if not items:
+        return
 
-    n = len(poses_world)
-    cmap = pv.LookupTable("coolwarm", n_values=max(n, 2))
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
-    for i, (idx, w_pose) in enumerate(sorted(poses_world.items())):
-        R = w_pose[:3, :3]
-        t = w_pose[:3, 3]
-        mesh_obj = base_mesh.copy(deep=True)
-        mesh_obj.points = (R @ mesh_obj.points.T).T + t
+    ordered_items = sorted(items.items())
+    num_items = len(ordered_items)
+    num_cols = min(3, num_items)
+    num_rows = int(np.ceil(num_items / num_cols))
+    fig, axes = plt.subplots(
+        num_rows,
+        num_cols,
+        figsize=(5 * num_cols, 5 * num_rows),
+        squeeze=False,
+    )
 
-        # Map index to a distinct colour and normalize to 0-1
-        color = cmap.map_value(i / max(n - 1, 1))[:3]
-        color_f = [c for c in color]
+    light_red = np.array([255, 230, 230], dtype=np.uint8)
+    flat_axes = axes.ravel()
+    for ax in flat_axes[num_items:]:
+        ax.axis("off")
 
-        plotter.add_mesh(mesh_obj, opacity=0.7, color=color_f, label=f"img {idx}")
+    for ax, (idx, (image, mask)) in zip(flat_axes, ordered_items):
+        mask_bool = mask > 0
+        masked_background = np.full_like(image, light_red)
+        masked_image = np.where(mask_bool[..., None], image, masked_background)
 
-        # axes at pose (slightly darker versions of the mesh colour)
-        arrow_x = pv.Arrow(start=t, direction=R[:, 0], scale=0.01)
-        plotter.add_mesh(arrow_x, color="red")
-        arrow_y = pv.Arrow(start=t, direction=R[:, 1], scale=0.01)
-        plotter.add_mesh(arrow_y, color="green")
-        arrow_z = pv.Arrow(start=t, direction=R[:, 2], scale=0.01)
-        plotter.add_mesh(arrow_z, color="blue")
+        ax.imshow(masked_image)
+        ax.set_title(f"{idx}")
+        ax.axis("off")
 
-    plotter.add_axes()
-    plotter.add_legend()
-    plotter.show()
+    fig.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_depth_figure(
+    path: str,
+    items: Dict[int, Tuple[np.ndarray, np.ndarray]],
+) -> None:
+    """Save one subplot per image with depth values inside mask using viridis colormap.
+
+    Filters out 0-values (no depth) and shows only masked regions without background.
+    All subplots use the same color scale.
+    """
+    if not items:
+        return
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+    # Compute global min/max across all masked depth values
+    all_valid_depths = []
+    for depth, mask in items.values():
+        mask_bool = mask > 0
+        depth_masked = depth.copy()
+        depth_masked[~mask_bool | (depth_masked == 0)] = np.nan
+        valid = depth_masked[~np.isnan(depth_masked)]
+        if len(valid) > 0:
+            all_valid_depths.extend(valid)
+
+    if not all_valid_depths:
+        print(f"Warning: No valid depth values found in {path}")
+        return
+
+    vmin = np.min(all_valid_depths)
+    vmax = min(np.max(all_valid_depths), 0.20)
+
+    ordered_items = sorted(items.items())
+    num_items = len(ordered_items)
+    num_cols = min(3, num_items)
+    num_rows = int(np.ceil(num_items / num_cols))
+    fig, axes = plt.subplots(
+        num_rows,
+        num_cols,
+        figsize=(5 * num_cols, 5 * num_rows),
+        squeeze=False,
+    )
+
+    flat_axes = axes.ravel()
+    for ax in flat_axes[num_items:]:
+        ax.axis("off")
+
+    for ax, (idx, (depth, mask)) in zip(flat_axes, ordered_items):
+        mask_bool = mask > 0
+        # Create masked depth array, keeping only non-zero values inside mask
+        depth_masked = depth.copy()
+        depth_masked[~mask_bool | (depth_masked == 0)] = np.nan
+
+        # Find bounding box of non-NaN values and crop
+        valid_mask = ~np.isnan(depth_masked)
+        if not np.any(valid_mask):
+            ax.set_title(f"{idx}")
+            ax.axis("off")
+            continue
+
+        rows = np.any(valid_mask, axis=1)
+        cols = np.any(valid_mask, axis=0)
+        rmin, rmax = np.where(rows)[0][[0, -1]]
+        cmin, cmax = np.where(cols)[0][[0, -1]]
+
+        # Crop to bounding box
+        depth_cropped = depth_masked[rmin : rmax + 1, cmin : cmax + 1]
+
+        # Plot with viridis, NaN values will not be displayed
+        im = ax.imshow(depth_cropped, cmap="viridis", vmin=vmin, vmax=vmax)
+        ax.set_title(f"{idx}")
+        ax.axis("off")
+        if idx == ordered_items[0][0]:  # Add colorbar only to the first subplot
+            plt.colorbar(im, ax=ax, label="depth (m)")
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
 
 def main():
@@ -192,14 +281,12 @@ def main():
     estimator = PoseEstimator(
         camera_info_json_path="camera_parameters/realsense_d405_single.json"
     )
-    tracker = PoseTracker(
-        camera_info_json_path="camera_parameters/realsense_d405_single.json"
-    )
 
     t_R_c, t_T_t_c = get_t_R_c_and_t_T_t_c()
 
     estimated_world = {}
-    tracked_world = {}
+    mask_visualizations = {}
+    depth_visualizations = {}
 
     for idx, (w_T_w_t, w_rpy) in sorted(poses.items()):
         color_path = f"test_images/demo_img_color_{idx}_{exp_name}.tiff"
@@ -216,7 +303,7 @@ def main():
         # Segment with SAM3 using prompt "key"
         inference_state = segmenter.processor.set_image(Image.fromarray(image))
         output = segmenter.processor.set_text_prompt(
-            state=inference_state, prompt="black cover with circular grille"
+            state=inference_state, prompt=sam3_prompt
         )
         masks = output.get("masks", [])
         scores = output.get("scores", None)
@@ -237,6 +324,9 @@ def main():
             * 255
         )
 
+        mask_visualizations[idx] = (image, mask)
+        depth_visualizations[idx] = (depth_m, mask)
+
         # Set the ABUS mesh path in foundationpose and run estimation
         try:
             estimator._set_mesh_path(MESH_PATH_CONTAINER)
@@ -251,29 +341,17 @@ def main():
         estimated_world[idx] = w_D_w_o
 
         print(f"  Estimated world translation: {w_D_w_o[:3, 3]}")
-        # Run tracking refinement with 4 passes if tracker is available
-        n_passes = 4
-        print(f"  Running tracking refinement with {n_passes} passes...")
-        # refined_pose_cam = tracker._track(image, depth_m, pose_cam, passes=n_passes)
-        # refined_w_D_w_o = to_world_pose(
-        #     refined_pose_cam, w_R_t, w_T_w_t, t_R_c, t_T_t_c
-        # )
-        # tracked_world[idx] = refined_w_D_w_o
-        # print(f"  Tracked world translation: {refined_w_D_w_o[:3, 3]}")
 
     if not estimated_world:
         print("No world poses estimated")
         return
 
     save_estimated_poses(estimated_poses_file, estimated_world)
+    save_mask_figure(mask_figure_file, mask_visualizations)
+    save_depth_figure(depth_figure_file, depth_visualizations)
     print(f"Saved {len(estimated_world)} estimated poses to {estimated_poses_file}")
-
-    # Show first 3D plot with estimated poses
-    print("\n[Visualization 1] Showing estimated poses in 3D...")
-    show_3d(estimated_world, MESH_PATH_LOCAL)
-
-    # print("\n[Visualization 2] Showing tracked poses in 3D...")
-    # show_3d(tracked_world, MESH_PATH_LOCAL)
+    print(f"Saved mask figure to {mask_figure_file}")
+    print(f"Saved depth figure to {depth_figure_file}")
 
 
 if __name__ == "__main__":

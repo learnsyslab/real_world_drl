@@ -383,6 +383,7 @@ class SACActor:
         # for _ in range(self.args.max_episodes):
         #     obs, reset_info = self.env.reset(seed=self.config.seed)
         # return
+        print(f"[SACActor] Starting run_pe")
 
         try:
             # reset the episode variables
