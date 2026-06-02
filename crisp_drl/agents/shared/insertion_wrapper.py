@@ -1,3 +1,5 @@
+import json
+import os
 import signal
 import threading
 import time
@@ -72,6 +74,49 @@ class SensorTareWrapper(Wrapper):
 
     def observation(self, obs):
         obs[self.sensor_key] = obs[self.sensor_key] - self.sensor_offset
+        return obs
+
+
+class ForceTorqueMeasurementWrapper(Wrapper):
+    def __init__(
+        self,
+        env,
+        sensor_key: str = "observation.state.sensors_bota_ft_sensor",
+        args=None,
+    ):
+        super().__init__(env)
+        self.sensor_key = sensor_key
+        self.args = args
+        self.obs_list = []
+        self.sensor_offset = None
+        self.checkpoint_path = os.path.join("checkpoints", self.args.run_name)
+
+    def step(self, action: Any) -> tuple[Any, Any, bool, bool, dict[str, Any]]:
+        obs, reward, terminated, truncated, info = super().step(action)
+        return self.observation(obs), reward, terminated, truncated, info
+
+    def tare_ft_measurement_wrapper(self, obs):
+        self.sensor_offset = obs[self.sensor_key]
+        self.observation(obs)
+
+    def save_obs_and_reset_ft_measurement_wrapper(self):
+        fd = os.open(
+            os.path.join(self.checkpoint_path, "force_torque_measurements.jsonl"),
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+            0o644,
+        )
+        line = json.dumps(
+            {
+                "observations": self.obs_list,
+                "datetime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            }
+        )
+        os.write(fd, (line + "\n").encode())
+        os.close(fd)
+        self.obs_list = []
+
+    def observation(self, obs):
+        self.obs_list.append((obs[self.sensor_key] - self.sensor_offset).tolist())
         return obs
 
 

@@ -385,6 +385,7 @@ class SACActor:
     def run_pe(self, data_queue: mp.Queue):
         """Main process loop for the SAC actor.
         This method will execture actions in the environment"""
+        print(f"[SACActor] Starting run_pe")
 
         try:
             # reset the episode variables

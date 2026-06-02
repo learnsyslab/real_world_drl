@@ -14,9 +14,12 @@ from crisp_drl.agents.shared.algorithm_config import Config
 import signal
 from contextlib import contextmanager
 
-from crisp_drl.agents.shared.insertion_env_config import SiemensConfig
+from crisp_drl.agents.shared.insertion_env_config import ShelfBoxConfig, SiemensConfig
 from crisp_drl.agents.shared.insertion_wrapper import install_stop_handler
 from crisp_drl.envs import make_env, make_rew
+
+ROLLOUT_LENGTH = 150
+ROLLOUT_LENGTH_EVAL = 30
 
 
 def _override_config_for_task(args, config):
@@ -167,6 +170,17 @@ def launch_actor(
             env = make_env.create_real_env_v4_3dof_rz_pe(config, args=args)
         elif task == "lego":
             env = make_env.create_real_env_v4(config, args=args)
+        elif task in ("b1", "b1_pe"):
+            env_config = ShelfBoxConfig(
+                episode_length=ROLLOUT_LENGTH if not args.eval else ROLLOUT_LENGTH_EVAL
+            )
+            env = (
+                make_env.create_real_env_b1(config, env_config=env_config, args=args)
+                if not args or not args.use_pose_estimation
+                else make_env.create_real_env_b1_pe(
+                    alg_config=config, env_config=env_config, args=args
+                )
+            )
         else:
             env = (
                 make_env.create_real_env_s1(
@@ -303,7 +317,7 @@ def main():
     argparse.add_argument(
         "--task",
         type=str,
-        choices=["siemens", "lego", "lego_3dof_rz", "lego_3dof_rz_pe"],
+        choices=["siemens", "lego", "lego_3dof_rz", "lego_3dof_rz_pe", "b1", "b1_pe"],
         default="siemens",
         help="Which task/env builder to use. 'siemens' keeps the current default "
         "(create_real_env_s1[_pe]). 'lego' switches to create_real_env_v4. "

@@ -71,6 +71,8 @@ class PoseEstimator(Node):
         self.last_pose = None
         self.pose_ready = Event()
 
+        self._setup(0.05, 1.0, 5)  # Set default parameters
+
     def _pose_callback(self, msg: TensorList):
         """Handle pose output from FoundationPose."""
         try:
@@ -165,6 +167,55 @@ class PoseEstimator(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to set mesh file: {e}")
             raise
+
+    def _setup(self, min_depth: float, max_depth: float, refine_iterations: int):
+        # Create parameter client for the foundationpose node
+        param_client = AsyncParameterClient(self, "/foundationpose")
+
+        for param_name, param_value, param_type in [
+            ("min_depth", min_depth, rclpy.Parameter.Type.DOUBLE),  # pyright: ignore[reportPrivateImportUsage]
+            ("max_depth", max_depth, rclpy.Parameter.Type.DOUBLE),  # pyright: ignore[reportPrivateImportUsage]
+            ("refine_iterations", refine_iterations, rclpy.Parameter.Type.INTEGER),  # pyright: ignore[reportPrivateImportUsage]
+        ]:
+            try:
+                # Set the parameter
+                future = param_client.set_parameters(
+                    [
+                        rclpy.parameter.Parameter(
+                            param_name,
+                            param_type,
+                            param_value,
+                        )
+                    ]
+                )
+
+                # Spin briefly to process the set request
+                rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)  # pyright: ignore[reportPrivateImportUsage]
+
+                if future.done():
+                    result = future.result()
+                    if result is None:
+                        raise RuntimeError("Parameter set returned None")
+                    # SetParametersResult has a 'results' list attribute
+                    if hasattr(result, "results") and len(result.results) > 0:
+                        param_result = result.results[0]
+                        if param_result.successful:
+                            self.get_logger().info(
+                                f"Set {param_name} to: {param_value}"
+                            )
+                        else:
+                            raise RuntimeError(
+                                f"Failed to set parameter: {param_result.reason}"
+                            )
+                    else:
+                        # Fallback: assume success if no results attribute
+                        self.get_logger().info(f"Set {param_name} to: {param_value}")
+                else:
+                    raise TimeoutError("Parameter set request timed out")
+
+            except Exception as e:
+                self.get_logger().error(f"Failed to set {param_name}: {e}")
+                raise
 
     def estimate_lego(
         self, image: np.ndarray, depth: np.ndarray, mask: np.ndarray, color: str

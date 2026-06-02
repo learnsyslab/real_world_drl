@@ -57,16 +57,19 @@ def iter_episodes(dataset: LeRobotDataset) -> Iterable[Episode]:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Load a LeRobot dataset (local repo_id/root) and export it to a"
+            "Load one or more local LeRobot datasets and export them to a"
             " ReplayBufferGpu joblib."
         )
     )
     parser.add_argument(
         "--repo_id",
+        nargs="+",
         type=str,
+        required=True,
+        metavar="REPO_ID",
         help=(
-            "Local repo_id inside the root directory (e.g."
-            " collect_data_real/env_v0_0.8)."
+            "Local repo_id(s) inside the root directory (e.g."
+            " collect_data_real/env_v0_0.8 collect_data_real/env_v0_0.9)."
         ),
     )
     parser.add_argument(
@@ -99,28 +102,36 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    dataset = LeRobotDataset(repo_id=args.repo_id, root=args.root / args.repo_id)
     config = Config()
 
     episodes: list[Episode] = []
     total_obs = 0
     total_transitions = 0
 
-    for i, episode in enumerate(iter_episodes(dataset)):
-        observations, actions, rewards, terminals = episode
-        if len(observations) < 2:
-            print(f"[WARNING] Skipping episode {i} with less than 2 frames.")
-            continue
+    for repo_id in args.repo_id:
+        dataset = LeRobotDataset(repo_id=repo_id, root=args.root / repo_id)
 
-        episodes.append(episode)
-        total_obs += len(observations)
-        total_transitions += len(observations) - 1
+        for i, episode in enumerate(iter_episodes(dataset)):
+            observations, actions, rewards, terminals = episode
+            if len(observations) < 2:
+                print(
+                    f"[WARNING] Skipping episode {i} in {repo_id} with less"
+                    " than 2 frames."
+                )
+                continue
+
+            episodes.append(episode)
+            total_obs += len(observations)
+            total_transitions += len(observations) - 1
+
+            if args.max_episodes is not None and len(episodes) >= args.max_episodes:
+                break
 
         if args.max_episodes is not None and len(episodes) >= args.max_episodes:
             break
 
     if not episodes:
-        raise RuntimeError("No complete episodes found in dataset.")
+        raise RuntimeError("No complete episodes found in the selected datasets.")
 
     obs_dim = episodes[0][0][0].size
     action_dim = episodes[0][1][0].size
@@ -165,7 +176,10 @@ def main() -> None:
             terminated=terminated,
         )
 
-    default_output = args.root / args.repo_id / "replay_buffer.joblib"
+    if len(args.repo_id) == 1:
+        default_output = args.root / args.repo_id[0] / "replay_buffer.joblib"
+    else:
+        default_output = args.root / "replay_buffer.joblib"
     if args.output is None:
         output_path = default_output
     else:

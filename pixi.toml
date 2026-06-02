@@ -134,3 +134,7 @@ cuda = "12.0"
 pycocotools = "*"
 sam3 = { path = "./sam3", editable = true }
 pyvista = "*"
+scipy = "*"
+trimesh = "*"
+opencv-python = "*"
+pillow = "*"
