@@ -1250,13 +1250,13 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
                 - self.obs["observation.state.target"][2]
             )
             self._current_ft_phase = "reset_lift"
-            self.obs = self.go_to_cartesian(
-                self.obs, delta=np.array([0.0, 0.0, self.reset_lift_height + delta_z])
-            )
-            self._current_ft_phase = "reset_release_open"
+            #self.obs = self.go_to_cartesian(
+            #    self.obs, delta=np.array([0.0, 0.0, self.reset_lift_height + delta_z])
+            #)
+            #self._current_ft_phase = "reset_release_open"
             self.env.unwrapped.gripper.set_target(0.75)  # type: ignore
-            print("Opening gripper...")
-            time.sleep(2.0)
+            #print("Opening gripper...")
+            #time.sleep(2.0)
         else:
             # 1) lift (gripper may still be in contact at episode end)
             self.obs, *_ = self._step_zeros()
@@ -1282,160 +1282,161 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             # the policy can leave the gripper at a Z far from the grasp
             # stand; anchoring keeps the put-back consistent across episodes.
             # Default (no --hand): keep the legacy current-Z-minus-lift formula.
-            if self.pe_hand_z:
-                back_target = np.array([
-                    self.actual_grasp_position[0],
-                    self.actual_grasp_position[1],
-                    self.actual_grasp_position[2] + self.reset_lift_height,
-                ])
-                print(
-                    f"3DOF[--hand]: put-back hover anchored to actual grasp Z = "
-                    f"{self.actual_grasp_position[2]:.5f} + {self.reset_lift_height:.5f} "
-                    f"= {back_target[2]:.5f}"
-                )
-            else:
-                back_target = np.array([
-                    self.actual_grasp_position[0],
-                    self.actual_grasp_position[1],
-                    self.obs["observation.state.cartesian"][2] - self.reset_lift_height,
-                ])
-            self._current_ft_phase = "reset_putback_hover"
-            self.obs = self.go_to_cartesian(
-                self.obs,
-                target_cartesian=back_target,
-            )
+        #     if self.pe_hand_z:
+        #         back_target = np.array([
+        #             self.actual_grasp_position[0],
+        #             self.actual_grasp_position[1],
+        #             self.actual_grasp_position[2] + self.reset_lift_height,
+        #         ])
+        #         print(
+        #             f"3DOF[--hand]: put-back hover anchored to actual grasp Z = "
+        #             f"{self.actual_grasp_position[2]:.5f} + {self.reset_lift_height:.5f} "
+        #             f"= {back_target[2]:.5f}"
+        #         )
+        #     else:
+        #         back_target = np.array([
+        #             self.actual_grasp_position[0],
+        #             self.actual_grasp_position[1],
+        #             self.obs["observation.state.cartesian"][2] - self.reset_lift_height,
+        #         ])
+        #     ### COMMENTED OUT FOR FULL # TASK PIPELINE
+        #     self._current_ft_phase = "reset_putback_hover"
+        #     self.obs = self.go_to_cartesian(
+        #         self.obs,
+        #         target_cartesian=back_target,
+        #     )
 
-            # 4) push down to re-seat brick — FORCE-CONTROLLED.
-            # Targets ``reset_reseat_force_n`` on FT-Z (negative = press
-            # down). Stops when (a) target force reached, (b) safety cap
-            # ``delta_z_push_reset`` of descent hit, or (c) timeout. XY
-            # correction toward ``actual_grasp_position`` runs every step
-            # so the brick lands centred on its stand. Velocity gating
-            # mirrors the contact-establishment loop to avoid windup.
-            self._current_ft_phase = "reset_reseat_push"
-            reseat_start_z = float(self.obs["observation.state.cartesian"][2])
-            reseat_z_floor = reseat_start_z - self.delta_z_push_reset
-            if self.use_ft_controller:
-                try:
-                    self.env.tare_ft_sensor(self.obs)  # type: ignore
-                except Exception as e:
-                    print(f"  [reseat] tare_ft_sensor failed ({e}); continuing.")
-                print(
-                    f"Reseat push -Z to {self.reset_reseat_force_n:.1f} N "
-                    f"(max descent {self.delta_z_push_reset*1e3:.1f} mm, "
-                    f"timeout {self.reset_reseat_timeout_s:.1f} s)..."
-                )
-                t0 = time.time()
-                while True:
-                    fz = float(self.obs["observation.state.sensors_bota_ft_sensor"][2])
-                    cur_z = float(self.obs["observation.state.cartesian"][2])
-                    if fz <= self.reset_reseat_force_n:
-                        print(
-                            f"  [reseat] reached target: fz={fz:.2f} N "
-                            f"after {(time.time()-t0):.2f}s"
-                        )
-                        break
-                    if cur_z <= reseat_z_floor:
-                        print(
-                            f"  [reseat] hit max descent: descended "
-                            f"{(reseat_start_z - cur_z)*1e3:.2f} mm, fz={fz:.2f} N"
-                        )
-                        break
-                    if time.time() - t0 > self.reset_reseat_timeout_s:
-                        print(
-                            f"  [reseat] timeout: fz={fz:.2f} N, descended "
-                            f"{(reseat_start_z - cur_z)*1e3:.2f} mm"
-                        )
-                        break
-                    delta_xy = (
-                        self.actual_grasp_position[0:2]
-                        - self.obs["observation.state.cartesian"][0:2]
-                    )
-                    if np.linalg.norm(
-                        self.obs["observation.velocity.cartesian"]
-                    ) > 0.0015:
-                        # Hold XY but settle Z (zero Z action when moving fast).
-                        self.obs, *_ = self._step_translation(
-                            np.array([delta_xy[0], delta_xy[1], 0.0])
-                        )
-                    else:
-                        dz, _ = self.z_force_controller_dz(
-                            self.obs, z_force_target=self.reset_reseat_force_n
-                        )
-                        self.obs, *_ = self._step_translation(
-                            np.array([delta_xy[0], delta_xy[1], dz])
-                        )
-            else:
-                # FT controller disabled — fall back to the legacy
-                # impedance-based descent so behaviour is preserved.
-                print(
-                    "Reseat push: FT controller disabled, using "
-                    "legacy impedance-based descent."
-                )
-                while (
-                    abs(
-                        self.obs["observation.state.cartesian"][2]
-                        - self.obs["observation.state.target"][2]
-                    )
-                    < self.delta_z_push_reset
-                ):
-                    delta_xy = (
-                        self.actual_grasp_position[0:2]
-                        - self.obs["observation.state.cartesian"][0:2]
-                    )
-                    delta_z_step = (
-                        -self.delta_z_push_reset_step_size
-                        if (
-                            self.obs["observation.velocity.cartesian"][2]
-                            > -self.delta_z_push_reset_careful_threshold_velocity
-                            or abs(
-                                self.actual_grasp_position[2]
-                                - self.obs["observation.state.cartesian"][2]
-                            )
-                            > self.delta_z_push_reset_careful_threshold_distance
-                        )
-                        else 0.0
-                    )
-                    self.obs, *_ = self._step_translation(
-                        np.array([delta_xy[0], delta_xy[1], delta_z_step])
-                    )
+        #     # 4) push down to re-seat brick — FORCE-CONTROLLED.
+        #     # Targets ``reset_reseat_force_n`` on FT-Z (negative = press
+        #     # down). Stops when (a) target force reached, (b) safety cap
+        #     # ``delta_z_push_reset`` of descent hit, or (c) timeout. XY
+        #     # correction toward ``actual_grasp_position`` runs every step
+        #     # so the brick lands centred on its stand. Velocity gating
+        #     # mirrors the contact-establishment loop to avoid windup.
+        #     self._current_ft_phase = "reset_reseat_push"
+        #     reseat_start_z = float(self.obs["observation.state.cartesian"][2])
+        #     reseat_z_floor = reseat_start_z - self.delta_z_push_reset
+        #     if self.use_ft_controller:
+        #         try:
+        #             self.env.tare_ft_sensor(self.obs)  # type: ignore
+        #         except Exception as e:
+        #             print(f"  [reseat] tare_ft_sensor failed ({e}); continuing.")
+        #         print(
+        #             f"Reseat push -Z to {self.reset_reseat_force_n:.1f} N "
+        #             f"(max descent {self.delta_z_push_reset*1e3:.1f} mm, "
+        #             f"timeout {self.reset_reseat_timeout_s:.1f} s)..."
+        #         )
+        #         t0 = time.time()
+        #         while True:
+        #             fz = float(self.obs["observation.state.sensors_bota_ft_sensor"][2])
+        #             cur_z = float(self.obs["observation.state.cartesian"][2])
+        #             if fz <= self.reset_reseat_force_n:
+        #                 print(
+        #                     f"  [reseat] reached target: fz={fz:.2f} N "
+        #                     f"after {(time.time()-t0):.2f}s"
+        #                 )
+        #                 break
+        #             if cur_z <= reseat_z_floor:
+        #                 print(
+        #                     f"  [reseat] hit max descent: descended "
+        #                     f"{(reseat_start_z - cur_z)*1e3:.2f} mm, fz={fz:.2f} N"
+        #                 )
+        #                 break
+        #             if time.time() - t0 > self.reset_reseat_timeout_s:
+        #                 print(
+        #                     f"  [reseat] timeout: fz={fz:.2f} N, descended "
+        #                     f"{(reseat_start_z - cur_z)*1e3:.2f} mm"
+        #                 )
+        #                 break
+        #             delta_xy = (
+        #                 self.actual_grasp_position[0:2]
+        #                 - self.obs["observation.state.cartesian"][0:2]
+        #             )
+        #             if np.linalg.norm(
+        #                 self.obs["observation.velocity.cartesian"]
+        #             ) > 0.0015:
+        #                 # Hold XY but settle Z (zero Z action when moving fast).
+        #                 self.obs, *_ = self._step_translation(
+        #                     np.array([delta_xy[0], delta_xy[1], 0.0])
+        #                 )
+        #             else:
+        #                 dz, _ = self.z_force_controller_dz(
+        #                     self.obs, z_force_target=self.reset_reseat_force_n
+        #                 )
+        #                 self.obs, *_ = self._step_translation(
+        #                     np.array([delta_xy[0], delta_xy[1], dz])
+        #                 )
+        #     else:
+        #         # FT controller disabled — fall back to the legacy
+        #         # impedance-based descent so behaviour is preserved.
+        #         print(
+        #             "Reseat push: FT controller disabled, using "
+        #             "legacy impedance-based descent."
+        #         )
+        #         while (
+        #             abs(
+        #                 self.obs["observation.state.cartesian"][2]
+        #                 - self.obs["observation.state.target"][2]
+        #             )
+        #             < self.delta_z_push_reset
+        #         ):
+        #             delta_xy = (
+        #                 self.actual_grasp_position[0:2]
+        #                 - self.obs["observation.state.cartesian"][0:2]
+        #             )
+        #             delta_z_step = (
+        #                 -self.delta_z_push_reset_step_size
+        #                 if (
+        #                     self.obs["observation.velocity.cartesian"][2]
+        #                     > -self.delta_z_push_reset_careful_threshold_velocity
+        #                     or abs(
+        #                         self.actual_grasp_position[2]
+        #                         - self.obs["observation.state.cartesian"][2]
+        #                     )
+        #                     > self.delta_z_push_reset_careful_threshold_distance
+        #                 )
+        #                 else 0.0
+        #             )
+        #             self.obs, *_ = self._step_translation(
+        #                 np.array([delta_xy[0], delta_xy[1], delta_z_step])
+        #             )
 
-            delta_z = abs(
-                self.obs["observation.state.cartesian"][2]
-                - self.obs["observation.state.target"][2]
-            )
-            self._current_ft_phase = "reset_release_open"
-            self.obs, *_ = self._step_translation(np.array([0.0, 0.0, delta_z * 0.8]))
-            # Gripper.home() runs a close→open calibration cycle that can
-            # squeeze the brick and produce a transient FT spike. Tag a
-            # dedicated phase and capture one env step AFTER the home +
-            # sleep so the spike actually gets sampled and the plot draws
-            # a vertical line exactly at the gripper-home event.
-            self._current_ft_phase = "reset_gripper_home"
-            self.env.unwrapped.gripper.home()  # type: ignore
-            time.sleep(0.5)
-            self.obs, *_ = self._step_zeros()
-            self.n_since_last_home += 1
+        #     delta_z = abs(
+        #         self.obs["observation.state.cartesian"][2]
+        #         - self.obs["observation.state.target"][2]
+        #     )
+        #     self._current_ft_phase = "reset_release_open"
+        #     self.obs, *_ = self._step_translation(np.array([0.0, 0.0, delta_z * 0.8]))
+        #     # Gripper.home() runs a close→open calibration cycle that can
+        #     # squeeze the brick and produce a transient FT spike. Tag a
+        #     # dedicated phase and capture one env step AFTER the home +
+        #     # sleep so the spike actually gets sampled and the plot draws
+        #     # a vertical line exactly at the gripper-home event.
+        #     self._current_ft_phase = "reset_gripper_home"
+        #     self.env.unwrapped.gripper.home()  # type: ignore
+        #     time.sleep(0.5)
+        #     self.obs, *_ = self._step_zeros()
+        #     self.n_since_last_home += 1
 
-        if self.n_since_last_home >= 4 or self.first_reset:
-            if self.pe_3dof:
-                print(
-                    f"n_since_last_home={self.n_since_last_home}, "
-                    f"first_reset={self.first_reset}, skipping home (3DOF mode, going to PE pose instead)."
-                )
-            else:
-                print(
-                    f"n_since_last_home={self.n_since_last_home}, "
-                    f"first_reset={self.first_reset}, homing..."
-                )
-                self._current_ft_phase = "reset_home_joint"
-                self.env.unwrapped.home(home_config=self.home_config)  # type: ignore
-            self.n_since_last_home = 0
-            self.first_reset = False
+        # if self.n_since_last_home >= 4 or self.first_reset:
+        #     if self.pe_3dof:
+        #         print(
+        #             f"n_since_last_home={self.n_since_last_home}, "
+        #             f"first_reset={self.first_reset}, skipping home (3DOF mode, going to PE pose instead)."
+        #         )
+        #     else:
+        #         print(
+        #             f"n_since_last_home={self.n_since_last_home}, "
+        #             f"first_reset={self.first_reset}, homing..."
+        #         )
+        #         self._current_ft_phase = "reset_home_joint"
+        #         self.env.unwrapped.home(home_config=self.home_config)  # type: ignore
+        #     self.n_since_last_home = 0
+        #     self.first_reset = False
 
-        if options is not None and options.get("last_reset", False):
-            print("Last reset, not going to start position.")
-            return self.obs, {}
+        # if options is not None and options.get("last_reset", False):
+        #     print("Last reset, not going to start position.")
+        #     return self.obs, {}
 
         self.obs, reset_info = self.env.reset(seed=seed, options=options)
         self._pe_episode_idx += 1
@@ -1461,7 +1462,7 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
         # estimate, so the absolute height of the vantage isn't critical.
         wide_pe_target = self.wide_pe_pose_euler[:3].copy()
         if self.pe_hand_z:
-            wide_pe_target[2] += 0.10
+            #wide_pe_target[2] += 0.10
             print(
                 f"Moving to wide PE pose (--hand: raised by 10 cm) = {wide_pe_target}"
             )
@@ -2476,20 +2477,20 @@ class InsertionWrapper3DoFRotZPE(Wrapper):
             err = lift2_target - self.obs["observation.state.cartesian"][:3]
             self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
 
-        print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce — opening gripper...")
-        self.env.unwrapped.gripper.set_target(0.75)  # type: ignore
-        time.sleep(1.4)
+        # print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce — opening gripper...")
+        # self.env.unwrapped.gripper.set_target(0.75)  # type: ignore
+        # time.sleep(1.4)
 
-        print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce — descending to re-grasp position...")
-        t0 = time.time()
-        while time.time() - t0 < 1.5:
-            err = regrasp_target - self.obs["observation.state.cartesian"][:3]
-            self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
+        # print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce — descending to re-grasp position...")
+        # t0 = time.time()
+        # while time.time() - t0 < 1.5:
+        #     err = regrasp_target - self.obs["observation.state.cartesian"][:3]
+        #     self.obs, *_ = self._step_translation(np.clip(err, -self.i_term_clip, self.i_term_clip))
 
-        print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce — re-grasping lego...")
-        self.env.unwrapped.gripper.set_target(0.4)  # type: ignore
-        time.sleep(2.0)
-        print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce done.")
+        # print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce — re-grasping lego...")
+        # self.env.unwrapped.gripper.set_target(0.4)  # type: ignore
+        # time.sleep(2.0)
+        # print("[InsertionWrapper3DoFRotZPE] snap_push: reinforce done.")
 
     # ------------------------------------------------------------------ #
     # Observation helpers                                                  #

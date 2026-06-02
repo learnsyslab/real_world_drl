@@ -972,6 +972,12 @@ class EvalSACActor(SACActor):
                             )
 
                 self.episode_num += 1
+                if bool(getattr(self.args, "stop_after_first_success", False)) and classifier_succ:
+                    print(
+                        "[eval] stopping after first successful episode "
+                        "(snap_push finished)."
+                    )
+                    break
                 if max_eps > 0 and len(self.episodes_data) >= max_eps:
                     print(
                         f"[eval] reached target of {max_eps} valid episodes — stopping."

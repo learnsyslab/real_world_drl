@@ -240,31 +240,57 @@ class SiemensConfig:
 
     custom_first_home_position: np.ndarray = field(
         default_factory=lambda: np.array(
-            [ 
-                0.22355211,
-                0.30581114,
-                0.12800646,
-                -2.27951312,
-                -0.05865505,
-                2.58594489,
-                1.18903553,
+            [
+                0.14611, 
+                0.19358,
+                0.09044,
+                -2.37731,
+                -0.04011,
+                2.56961,
+                1.06341,
             ]
+            #[ 
+            #    0.22355211,
+            #    0.30581114,
+            #    0.12800646,
+            #    -2.27951312,
+            #    -0.05865505,
+            #     1.18903553,
+            #]
+            #[
+            #    0.18534106,
+            #    0.35176319,
+            #    0.10533369,
+            #    -2.30630183,
+            #    -0.05615016,
+            #    2.65457749,
+            #    1.12368488,
+            #]
         )
     )
 
     # prev: [0.3649075, 0.29130843, 0.13225512, -2.0765812, -0.06310042, 2.3661199, 1.3285213]
     custom_home_position: np.ndarray = field(
         default_factory=lambda: np.array(
+            [
+                0.14611, 
+                0.19358,
+                0.09044,
+                -2.37731,
+                -0.04011,
+                2.56961,
+                1.06341,
+            ]            
             # eval
-            [ 
-                0.22355211,
-                0.30581114,
-                0.12800646,
-                -2.27951312,
-                -0.05865505,
-                2.58594489,
-                1.18903553,
-            ]
+            #[ 
+            #    0.22355211,
+            #    0.30581114,
+            #    0.12800646,
+            #    -2.27951312,
+            #   -0.05865505,
+            #   2.58594489,
+            #    1.18903553,
+            #]
             # data collection
             #[
             #    0.18534106,
@@ -281,15 +307,24 @@ class SiemensConfig:
 
     custom_home_position_pe: np.ndarray = field(
         default_factory=lambda: np.array(
-            [ 
-                0.22355211,
-                0.30581114,
-                0.12800646,
-                -2.27951312,
-                -0.05865505,
-                2.58594489,
-                1.18903553,
-            ]            
+            [
+                0.14611, 
+                0.19358,
+                0.09044,
+                -2.37731,
+                -0.04011,
+                2.56961,
+                1.06341,
+            ] 
+            # [ 
+            #     0.22355211,
+            #     0.30581114,
+            #     0.12800646,
+            #     -2.27951312,
+            #     -0.05865505,
+            #     2.58594489,
+            #     1.18903553,
+            # ]            
         )
     )
     # prev: [0.3726598, 0.19371478, 0.22794928, -1.9073441, -0.06185328, 2.0956953, 1.4201956]
@@ -297,7 +332,7 @@ class SiemensConfig:
     goal_position_ground_truth: np.ndarray = field(
         default_factory=lambda: np.array(
             #[0.52555341, -0.00133, 0.12857927] # new
-            [0.52555341, -0.000, 0.12957927] #0.52555341, -0.000, 0.12857927
+            [0.52555341, -0.00133, 0.12857927] #0.52555341, -0.000, 0.12857927
         
         )
     )
@@ -401,7 +436,7 @@ class SiemensConfig:
             (
                 [
                     0.49750429,
-                    0.15999970,
+                    -0.15999970,
                     0.09169126 + DELTA_Z_TEST,
                     0.0,
                     0.0,
@@ -427,7 +462,7 @@ class SiemensConfig:
 
     insertion_axis_index: int = 0
     insertion_axis_sign: float = 1.0
-    insertion_forcetorque: float = -0.11  # Nm or N, default: -0.21
+    insertion_forcetorque: float = -0.16  # Nm or N, default: -0.21
     insertion_forcetorque_index = 4
     ft_controller_lever_arm: float = 0.16  # set to 1 if force control
     ft_controller_k: float = (
@@ -464,7 +499,7 @@ class ShelfBoxConfig:
     """the environment id of the task"""
     use_cameras: bool = True
     """if true, use camera image observations"""
-    episode_length: int = 150
+    episode_length: int = 25
     """the maximum length of an episode"""
     control_frequency: int = 15
     """the frequency at which the control commands are sent to the robot"""
@@ -617,3 +652,167 @@ class ShelfBoxConfig:
             ]
         )
     )
+
+
+@dataclass
+class SiemensConfigFull(SiemensConfig):
+    """Siemens task config for the combined Siemens+Lego layout.
+
+    Inherits everything from SiemensConfig and overrides only the
+    layout-dependent fields for the case where the Siemens lid sits on the
+    opposite side of the goal (around swapped-sign Y) so the Lego pieces can
+    occupy the lid's original grasp region. Goal pose, FT controller
+    parameters, gripper params, and other physics constants are inherited
+    unchanged.
+
+    Capture via crisp_drl/scripts/calibrate_siemens_full.py (skip 'f' so the
+    goal stays inherited):
+        u/h/j        -> custom_first_home_position / _home_ / _pe (joints)
+        g            -> grasp_position_ground_truth + ..._euler
+        i + p        -> demo_w_D_w_o + demo_t_D_t_o
+        v (x N)      -> waypoints_after_grasp
+        b            -> dropoff_point
+        C            -> COMBINED_FIRST_PE_* constants (separate module-level
+                        output; consumed by run_sac_siemens_then_lego.py)
+        P            -> writes siemens_config_demo.py + prints a paste-block
+                        with the captured field declarations.
+
+    Copy the captured field declarations from the printed paste-block into
+    the body of this class below. Until you populate them, SiemensConfigFull
+    behaves identically to SiemensConfig.
+    """
+
+    # --- captured field overrides go here ---
+    # Example (replace with values from the paste-block):
+    relative_motion_after_grasp_pe: list = field(
+        default_factory=lambda: [0.0, 0.0, 0.00, 0.0, 0.0, 0.0]
+    )
+    """motion after grasping"""
+    waypoints_after_grasp: list = field(
+        default_factory=lambda: [
+            #(
+                #[
+                #    0.52082772,
+                #    0.15709122,
+                #    0.10043685,
+                #    6.27520990,
+                #    0.00381359,
+                #    -0.00101191,
+                #],
+                #0.001,
+            #),
+            (
+                [
+                    0.48563,
+                    -0.33844,
+                    0.12837,
+                    0,
+                    0,  
+                    0,
+                ],
+                0.002,
+            ),
+            (
+                [
+                    0.49029,
+                    -0.25466,
+                    0.16397,
+                    0,
+                    0,  
+                    0,
+                ],
+                0.002,
+            ),
+            (
+                [
+                    0.49477,
+                    -0.16261,
+                    0.16397,
+                    0,
+                    0,  
+                    0,
+                ],
+                0.002,
+            ),            
+            (
+                [
+                    0.42977,
+                    -0.08523,
+                    0.15783,
+                    0,
+                    0,  
+                    0,
+                ],
+                0.001,
+            ),
+            (
+                [
+                    0.43442,
+                    -0.00846,
+                    0.15515,
+                    0,
+                    0,  
+                    0,
+                ],
+                0.001,
+            ),
+             (
+                [
+                    0.48369,
+                    -0.00153,
+                    0.13205,
+                    0,
+                    np.deg2rad(4),  
+                    0,
+                ],
+                0.001,
+            ),
+            #(
+            #    [
+            #        0.52560835,
+            #       -0.01853190,
+            #        0.13558331,
+            #        6.27223349,
+            #        np.deg2rad(5),  # +5° about Y, /5
+            #        -0.00290716,
+            #    ],
+            #    0.001,
+            #),
+            (
+                [
+                    0.52549388,
+                    -0.00133, #-0.00133,
+                    0.13057927,
+                    0,
+                    0,
+                    0,
+                ],
+                0.001,
+            ),                        
+
+        ]
+    )
+    """waypoints to go to after grasping, rotations are relative and open loop, positions closed loop and offset by delta grasp (xz) in global frame at identical orientation"""
+
+    waypoints_after_rl_train: list = field(
+        default_factory=lambda: [                             
+            (
+                [
+                    0.52555341, 
+                    -0.000, 
+                    0.12857927,
+                    0.0,
+                    0.0,
+                    0.0, 
+                ],
+                0.002,
+            )
+        ]
+    )
+       # prev: [0.5222315, 0.26139268, 0.1362928, 0,0,0] (old layout)
+       # set to waypoints_after_grasp[0] (the new lift-off above the brick) so
+       # the post-rollout sweep stays in-workspace before going to dropoff.
+    """waypoints to go to after rl training (after that go to position after (relative motion after grasp), then undo relative motion after grasp)"""
+
+
+    pass

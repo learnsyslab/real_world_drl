@@ -1,32 +1,54 @@
 from datetime import datetime
 from pathlib import Path
+import os
 import threading
 import time
 import numpy as np
 
 from crisp_drl.agents.shared.algorithm_config import Config
-from crisp_drl.agents.shared.insertion_env_config import SiemensConfig
+
+# Optional swap: use the calibrated SiemensConfigDemo produced by
+# crisp_drl/scripts/calibrate_siemens_full.py when SIEMENS_USE_DEMO_CONFIG=1.
+# Default behavior (env var unset / 0) is unchanged: SiemensConfig from source.
+_USE_DEMO_CONFIG = os.environ.get("SIEMENS_USE_DEMO_CONFIG", "0") == "1"
+if _USE_DEMO_CONFIG:
+    try:
+        from crisp_drl.agents.shared.siemens_config_demo import (
+            SiemensConfigDemo as SiemensConfig,
+        )
+    except ImportError as e:
+        raise ImportError(
+            "SIEMENS_USE_DEMO_CONFIG=1 but siemens_config_demo.py is missing. "
+            "Run crisp_drl/scripts/calibrate_siemens_full.py first, then press 'P'."
+        ) from e
+else:
+    from crisp_drl.agents.shared.insertion_env_config import SiemensConfig
 from crisp_drl.envs import make_env, make_rew
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 # Alternate between going to the goal position and moving randomly with probability p
-p = 0.85
-#p = 0.0
+#p = 0.85
+p = 0.00
 N_ROLLOUTS = 20
 max_random_action_magnitude = 0.25e-3
 perfect_action_magnitude = 0.25e-3
 
 base_exp_name = "run_s_1b"
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-#exp_name = f"{base_exp_name}_{p}_{timestamp}"
-exp_name = f"run_s_1b_0.85_20260523_133530"
+exp_name = f"{base_exp_name}_{p}_{timestamp}"
+#exp_name = f"run_s_1b_0.85_20260523_133530"
 
 repo_id = f"collect_data_real/{exp_name}"
 data_dir = Path("rollout_data") / repo_id
 
 config = Config()
 env_config = SiemensConfig()
+print(
+    f"[collect] env_config={type(env_config).__name__} "
+    f"grasp={env_config.grasp_position_ground_truth} "
+    f"goal={env_config.goal_position_ground_truth}"
+)
 
 env = make_env.create_real_env_s1(config, env_config)
 

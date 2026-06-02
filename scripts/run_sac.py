@@ -171,9 +171,15 @@ def launch_actor(
         elif task == "lego":
             env = make_env.create_real_env_v4(config, args=args)
         elif task in ("b1", "b1_pe"):
+            from crisp_drl.agents.shared.siemens_config_demo import (
+                COMBINED_FIRST_PE_POSITION,
+            )
             env_config = ShelfBoxConfig(
                 episode_length=ROLLOUT_LENGTH if not args.eval else ROLLOUT_LENGTH_EVAL
             )
+            env_config.custom_first_home_position = COMBINED_FIRST_PE_POSITION.copy()
+            env_config.custom_home_position_pe = COMBINED_FIRST_PE_POSITION.copy()
+            env_config.custom_home_position = COMBINED_FIRST_PE_POSITION.copy()
             env = (
                 make_env.create_real_env_b1(config, env_config=env_config, args=args)
                 if not args or not args.use_pose_estimation

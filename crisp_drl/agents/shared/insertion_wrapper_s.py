@@ -468,7 +468,8 @@ class InsertionWrapperSiemens(Wrapper):
             current_xyz = np.array(
                 self.env.unwrapped.robot.end_effector_pose.position  # type: ignore
             )
-            target_xyz = current_xyz + np.array([0.0, 0.0, 0.040])
+            #target_xyz = current_xyz + np.array([0.0, 0.0, 0.040])
+            target_xyz = current_xyz + np.array([0.0, 0.0, 0.000])
             print(f"  lift 40 mm:  {current_xyz}  ->  {target_xyz}")
             try:
                 self.env.unwrapped.move_to(position=target_xyz, speed=0.03)  # type: ignore
@@ -1512,13 +1513,48 @@ class InsertionWrapperSiemensPE(Wrapper):
             coarse_grasp_world
             + world_D_world_obj[:3, :3] @ np.array([0.0, 0.0, 0.02])
         )
-        self.obs = self.slow_move_to(
-            coarse_hover_world,
-            relative_pose_euler=coarse_rel_euler,
-            max_step=0.0012, 
-            distance_err=0.0002,
-            rotation_max_step_rad=np.deg2rad(0.5),
+        #self.obs = self.slow_move_to(
+        #    coarse_hover_world,
+        #     relative_pose_euler=coarse_rel_euler,
+        #    max_step=0.0012, 
+        #    distance_err=0.0002,
+        #    rotation_max_step_rad=np.deg2rad(0.5),
+        #)
+
+        # Step 1: move laterally (XY) above the target, keep current Z
+        current_z = float(self.obs["observation.state.cartesian"][2])
+        xy_above = coarse_hover_world.copy()
+        xy_above[2] = current_z
+
+        print("Moving laterally to hover XY (no Z change)...")
+        # Use go_to_waypoint for the lateral move + rotation so the
+        # controller receives a waypoint target and we wait for convergence.
+        self.obs = self.go_to_waypoint(
+            self.obs,
+            xy_above,
+            coarse_rel_euler,
+            distance_err=0.010,
+            velocity_err=0.010,
+            is_via=True,
+            coarse_follow_err_tol=0.010,
+            coarse_velocity_tol=0.010,
         )
+        self._settle_for(0.2)
+
+        # Step 2: descend in Z to the hover height (do NOT re-apply rotation)
+        print("Descending to hover Z (vertical only)...")
+        # Descend vertically using go_to_waypoint (no rotation re-applied).
+        self.obs = self.go_to_waypoint(
+            self.obs,
+            coarse_hover_world,
+            None,  # rotation already applied above
+            distance_err=0.010,
+            velocity_err=0.010,
+            is_via=True,
+            coarse_follow_err_tol=0.010,
+            coarse_velocity_tol=0.010,
+        )
+        self._settle_for(0.2)
 
         # estimate (refined)
         if _viz_enabled:
@@ -1744,6 +1780,21 @@ class InsertionWrapperSiemensPE(Wrapper):
 
         self.start_position = self.goal_position.copy()
 
+        print("Lifting +14 mm in Z before undoing alignment yaw...")
+        cur_xyz_pre_undo = np.copy(self.obs["observation.state.cartesian"][:3])
+        # Use go_to_waypoint for the lift so the controller sets a waypoint
+        # target and we then wait for convergence instead of the rate-limited
+        # slow_move_to behavior.
+        self.obs = self.go_to_waypoint(
+            self.obs,
+            cur_xyz_pre_undo + np.array([0.0, 0.0, 0.014]),
+            None,
+            distance_err=0.0005,
+            velocity_err=0.0003,
+            is_via=False,
+        )
+        self._settle_for(0.2)
+
         applied_alignment_rot = euler_to_rot_matrix(
             applied_alignment_rpy[0],
             applied_alignment_rpy[1],
@@ -1765,18 +1816,7 @@ class InsertionWrapperSiemensPE(Wrapper):
             velocity_err=0.0003,
         )
 
-        print("Lifting +14 mm in Z before following post-grasp waypoints...")
-        # Use slow_move_to (rate-limited translation) rather than go_delta so
-        # the lift is gentle on the just-grasped brick and we get tight
-        # convergence. Undo rotation above already settled (slow_move_to
-        # blocks until done), so cur_xyz here is the post-rotation TCP.
-        cur_xyz_pre_lift = np.copy(self.obs["observation.state.cartesian"][:3])
-        self.obs = self.slow_move_to(
-            cur_xyz_pre_lift + np.array([0.0, 0.0, 0.014]),
-            max_step=0.0020,
-            distance_err=0.0005,
-            velocity_err=0.0003,
-        )
+        print("Yaw undo complete; continuing with post-grasp waypoints...")
 
         # First post-grasp waypoint: decouple rotation from translation so
         # the wrist re-orients before lateral motion (cleaner motion with a
@@ -2207,8 +2247,8 @@ class InsertionWrapperSiemensPE(Wrapper):
         self.env.unwrapped.gripper.set_target(0.85)  # type: ignore
         self._settle_for(1.2)
 
-        print("[InsertionWrapperSiemensPE] snap_push: reinforce — +Y +Z 30 mm diagonal before homing...")
-        self.obs = self.go_delta(self.obs, [0.0, 0.030, 0.030])
+        print("[InsertionWrapperSiemensPE] snap_push: reinforce — +Z 60 mm diagonal before homing...")
+        self.obs = self.go_delta(self.obs, [0.0, 0.000, 0.060])
 
         print("[InsertionWrapperSiemensPE] snap_push: reinforce — waiting before homing...")
         # self._settle_for(4.0)
@@ -2252,3 +2292,46 @@ class InsertionWrapperSiemensPE(Wrapper):
             truncated = True
 
         return self.obs, reward, terminated, truncated, info
+
+
+class InsertionWrapperSiemensFull(InsertionWrapperSiemensPE):
+    """Siemens insertion wrapper for the combined Siemens+Lego layout.
+
+    Behaviourally identical to its parent ``InsertionWrapperSiemensPE``;
+    exists as a named class so the contract is explicit at the call site:
+
+      1. Episode starts homed at the OVERVIEW PE pose (the shared viewpoint
+         that frames Siemens lid + Lego bricks). Driven by ``self.home_config``
+         which is set from ``env_config.custom_home_position_pe`` — the
+         orchestrator overrides that field to the combined first-PE joint
+         config before constructing the wrapper.
+      2. PE estimates the current world-frame lid pose. ``estimated_grasp_delta``
+         is derived from ``demo_w_D_w_o`` and that estimate; the actual grasp
+         pose = ``grasp_position_ground_truth + estimated_grasp_delta``. So
+         the grasp is PE-driven.
+      3. After grasping, the wrapper executes ``env_config.waypoints_after_grasp``
+         (each waypoint XYZ shifted by ``estimated_grasp_delta``, rotations
+         taken as deltas from the captured grasp orientation), then runs the
+         FT contact-establishment loop and the policy.
+      4. Goal pose comes from ``env_config.goal_position_ground_truth`` plus
+         ``estimated_grasp_delta`` (mirrors current Siemens behaviour). For
+         the combined layout, leave ``SiemensConfigFull.goal_position_ground_truth``
+         inherited from ``SiemensConfig`` (no override) so the goal stays
+         fixed.
+      5. On success, ``SuccessClassificationWrapper`` triggers
+         ``snap_push(reinforce=args.snap_reinforce)``. With ``reinforce=True``
+         the snap sequence performs lift / press / re-grasp / lift, then opens
+         the gripper, then explicitly homes to ``self.home_config`` (the
+         overview PE pose) and sets ``self._already_homed_in_snap=True``.
+      6. The next ``reset()`` consumes the flag and skips its post-rollout
+         sweep + trailing home. The next episode therefore begins at the
+         overview PE pose, completing the loop.
+
+    To use: pair with ``SiemensConfigFull`` (or any SiemensConfig variant)
+    where ``custom_home_position_pe`` is the overview pose, and pass
+    ``--snap_reinforce`` to the runner so step 5's reinforce branch fires.
+    """
+    # No behavioural overrides. Adding any here would silently diverge from
+    # the parent's reset / snap_push contract — prefer extending the parent
+    # or wiring a config flag instead.
+    pass

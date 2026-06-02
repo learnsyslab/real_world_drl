@@ -17,6 +17,7 @@ from crisp_drl.agents.shared.insertion_env_config import (
 )
 from crisp_drl.agents.shared.insertion_wrapper_s import (
     InsertionWrapperSiemens,
+    InsertionWrapperSiemensFull,
     InsertionWrapperSiemensPE,
 )
 from crisp_drl.agents.shared.insertion_wrapper_lego import InsertionWrapperLegoPE
@@ -521,6 +522,7 @@ def create_real_env_v4_3dof_rz_pe(
     env_config=None,
     args=None,
     brick_size: str = "2x4",
+    base_env=None,
 ) -> gym.Env:
     """3-DoF + Rot-Z LEGO env with PE-driven grasp and goal (XY + yaw, 3-D action).
 
@@ -532,10 +534,14 @@ def create_real_env_v4_3dof_rz_pe(
     → CLIWrapper``.
     """
     no_ft = bool(args is not None and getattr(args, "no_ft_sensor", False))
-    env = make_env("my_env_v4_no_ft" if no_ft else "my_env_v4")
-    print("Env created.")
-    env.wait_until_ready()
-    print("Env ready.")
+    if base_env is None:
+        env = make_env("my_env_v4_no_ft" if no_ft else "my_env_v4")
+        print("Env created.")
+        env.wait_until_ready()
+        print("Env ready.")
+    else:
+        env = base_env
+        print("Env reused (base_env provided).")
 
     env = ActionTimeStampWrapper(env)
     env = NoGripperActionWrapper(env)
@@ -721,16 +727,20 @@ def create_real_env_s1(
 
 
 def create_real_env_s1_pe(
-    alg_config: Config, env_config: SiemensConfig, args=None
+    alg_config: Config, env_config: SiemensConfig, args=None, base_env=None
 ) -> gym.Env:
     no_ft = bool(args is not None and getattr(args, "no_ft_sensor", False))
     use_6dof_grasp = bool(args is not None and getattr(args, "use_6dof_grasp", False))
     pe_align_6dof = bool(args is not None and getattr(args, "pe_align_6dof", False))
     dof_slice_end = 6 if getattr(alg_config, "actor_output_dim", 2) >= 5 else 3
-    env = make_env("my_env_v4_no_ft" if no_ft else "my_env_v4")
-    print("Env created.")
-    env.wait_until_ready()
-    print("Env ready.")
+    if base_env is None:
+        env = make_env("my_env_v4_no_ft" if no_ft else "my_env_v4")
+        print("Env created.")
+        env.wait_until_ready()
+        print("Env ready.")
+    else:
+        env = base_env
+        print("Env reused (base_env provided).")
 
     env = ActionTimeStampWrapper(env)
     env = NoGripperActionWrapper(env)
@@ -764,6 +774,100 @@ def create_real_env_s1_pe(
     #  # functools.partial(observation_has_z_pressure_or_below, error_threshold=0.005, previous_error_threshold=0.003,
     #  # min_z_height=0.055, terminate_z_height = 0.0475))
     # maybe something with z velocity
+
+    env = DinoImageEncoderWrapper(
+        env,
+        n_cameras=env_config.n_cameras,
+        image_keys=["observation.images.wrist_camera"],
+        image_size=(256, 256),
+        crops={"observation.images.wrist_camera": (175, 175 + 224, 346, 346 + 224)},
+    )
+
+    assert torch.cuda.is_available(), (
+        "CUDA must be available to use ObservationFormatterWrapper"
+    )
+    env = ObservationFormatterWrapper(
+        env,
+        "cuda",
+        keys_ranges_scales=[
+            ("observation.previous.action", (1, dof_slice_end), 1000.0),
+            ("observation.previous.error.cartesian", (1, dof_slice_end), 1000.0),
+            ("observation.velocity.cartesian", (1, dof_slice_end), 1000.0),
+            ("observation.error.cartesian", (1, dof_slice_end), 1000.0),
+            ("observation.state.sensors_bota_ft_sensor", (0, 6), 0.1),
+            ("observation.features.wrist_camera", (0, 384), 1.0),
+        ],
+    )
+    success_threshold = (
+        getattr(args, "no_ft_success_threshold", 4.0)
+        if no_ft
+        else getattr(args, "success_threshold", 8.0)
+    )
+    env = SuccessClassificationWrapper(
+        env,
+        args=args,
+        sac_config=alg_config,
+        threshold=success_threshold,
+    )
+    env = CLIWrapper(env)
+    mp_backend = getattr(args, "mp_backend", "quintic") if args is not None else "quintic"
+    env = MotionPlannerWrapper(env, backend=mp_backend)
+    return env
+
+
+def create_real_env_s1_full(
+    alg_config: Config, env_config: SiemensConfig, args=None, base_env=None
+) -> gym.Env:
+    """Siemens PE env for the combined Siemens+Lego layout.
+
+    Same wrapper stack as ``create_real_env_s1_pe`` but the insertion wrapper
+    is ``InsertionWrapperSiemensFull`` — a named subclass that pins the
+    "start at overview PE pose -> PE grasp -> waypoints -> goal -> snap push
+    -> back to overview PE pose" contract documented on the class.
+
+    Behaviourally identical to ``create_real_env_s1_pe`` today; the named
+    factory exists so the combined orchestrator's call site reads as the
+    task it actually runs.
+    """
+    no_ft = bool(args is not None and getattr(args, "no_ft_sensor", False))
+    use_6dof_grasp = bool(args is not None and getattr(args, "use_6dof_grasp", False))
+    pe_align_6dof = bool(args is not None and getattr(args, "pe_align_6dof", False))
+    dof_slice_end = 6 if getattr(alg_config, "actor_output_dim", 2) >= 5 else 3
+    if base_env is None:
+        env = make_env("my_env_v4_no_ft" if no_ft else "my_env_v4")
+        print("Env created.")
+        env.wait_until_ready()
+        print("Env ready.")
+    else:
+        env = base_env
+        print("Env reused (base_env provided).")
+
+    env = ActionTimeStampWrapper(env)
+    env = NoGripperActionWrapper(env)
+    env = LastObservationWrapper(env)
+    if no_ft:
+        env = ZeroFTInjectorWrapper(env)
+    else:
+        env = SensorTareWrapper(
+            env,
+            sensor_key="observation.state.sensors_bota_ft_sensor",
+            sensor_data_shape=(6,),
+        )
+    is_eval = False if args is None else args.eval
+    env = InsertionWrapperSiemensFull(
+        env,
+        alg_config=alg_config,
+        env_config=env_config,
+        safety_box_radius=0.003,
+        safety_box_step_size=0.0004,
+        step_limit=env_config.episode_length
+        if not is_eval
+        else 2 * env_config.episode_length,
+        use_ft_controller=not no_ft,
+        use_6dof_grasp=use_6dof_grasp,
+        pe_align_6dof=pe_align_6dof,
+        pose_viz_dir=getattr(args, "pose_viz_dir", None) if args is not None else None,
+    )
 
     env = DinoImageEncoderWrapper(
         env,
@@ -890,12 +994,15 @@ def create_real_env_b1(
 
 
 def create_real_env_b1_pe(
-    alg_config: Config, env_config: ShelfBoxConfig, args=None
+    alg_config: Config, env_config: ShelfBoxConfig, args=None, base_env=None
 ) -> gym.Env:
-    env = make_env("my_env_v4")
-    print("Env created.")
-    env.wait_until_ready()
-    print("Env ready.")
+    if base_env is None:
+        env = make_env("my_env_v4")
+        print("Env created.")
+        env.wait_until_ready()
+        print("Env ready.")
+    else:
+        env = base_env
     is_eval = False if args is None else args.eval
 
     env = ActionTimeStampWrapper(env)

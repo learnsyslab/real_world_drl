@@ -89,7 +89,14 @@ class ForceTorqueMeasurementWrapper(Wrapper):
         self.args = args
         self.obs_list = []
         self.sensor_offset = None
-        self.checkpoint_path = os.path.join("checkpoints", self.args.run_name)
+        run_name = getattr(self.args, "run_name", None) or getattr(
+            self.args, "load_policy", None
+        )
+        if run_name is None:
+            raise ValueError(
+                "ForceTorqueMeasurementWrapper requires args.run_name or args.load_policy"
+            )
+        self.checkpoint_path = os.path.join("checkpoints", run_name)
 
     def step(self, action: Any) -> tuple[Any, Any, bool, bool, dict[str, Any]]:
         obs, reward, terminated, truncated, info = super().step(action)

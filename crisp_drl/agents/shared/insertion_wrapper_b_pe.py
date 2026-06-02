@@ -649,8 +649,7 @@ class InsertionWrapperBoxPE(InsertionWrapperBox):
                 time.sleep(2.0)
             self.env.save_obs_and_reset_ft_measurement_wrapper()  # type: ignore
         else:
-            print("homing first time...")
-            self.env.unwrapped.home(home_config=self.first_home_config)  # type: ignore
+            print("homing eval  ...")
             self.first_reset = False
 
         if not self.is_eval:
