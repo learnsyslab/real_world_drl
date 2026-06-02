@@ -32,3 +32,14 @@ pkg_resources
 
 # pose-estimation visualization output
 pe_viz/
+
+# generated Siemens calibration artifacts
+crisp_drl/agents/shared/siemens_config_demo.py
+crisp_drl/agents/shared/siemens_config_demo.py.*.bak
+crisp_drl/scripts/siemens_calib_snapshot*.json
+crisp_drl/data/eval_dataset.py
+
+# local debugging / symmetry-check scripts
+debug_3dof_angles.py
+test_rotation_yaw.py
+test_symmetry_logic.py
